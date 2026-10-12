@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Layout, Modal, Tabs, message } from 'antd'
 import { CodeOutlined, DashboardOutlined, FolderOutlined } from '@ant-design/icons'
 import type { HostRecord, SessionKind } from '@bgshell/protocol'
 import { agentSocket } from './api/ws'
 import { AgentControls } from './components/AgentControls'
+import { DropUploadModal } from './components/DropUploadModal'
 import { HostEditDrawer } from './components/HostEditDrawer'
 import { HostList, type HostStatus } from './components/HostList'
 import { MetricsPane } from './components/MetricsPane'
+import { SettingsModal } from './components/SettingsModal'
 import { SftpPane } from './components/SftpPane'
 import { TerminalPane } from './components/TerminalPane'
 
@@ -31,6 +33,7 @@ export function App() {
   const [tabs, setTabs] = useState<SessionTab[]>([])
   const [activeKey, setActiveKey] = useState<string>()
   const [editing, setEditing] = useState<{ open: boolean; host?: HostRecord }>({ open: false })
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const refreshHosts = useCallback(() => agentSocket.sendControl({ t: 'hosts', m: { op: 'list' } }), [])
 
@@ -105,6 +108,51 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, hosts.map((h) => h.id).join(',')])
 
+  // ── 桌宠联动（仅 Tauri 壳内生效；浏览器宿主无 __TAURI_INTERNALS__）────────
+  // 宠物窗右键呼出会话 / 拖文件到宠物打开上传面板，均经 Tauri 事件转发
+  const [petLink, setPetLink] = useState<{ hostId: string; kind: SessionKind } | null>(null)
+  const [dropUpload, setDropUpload] = useState<{ paths: string[]; uid: string } | null>(null)
+  const lastPetUidRef = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    if (!('__TAURI_INTERNALS__' in window)) return
+    let disposed = false
+    const offs: Array<() => void> = []
+    void (async () => {
+      const { listen } = await import('@tauri-apps/api/event')
+      if (disposed) return
+      offs.push(
+        await listen<{ hostId: string; kind?: SessionKind; uid?: string }>('pet://open-session', (e) => {
+          const p = e.payload
+          if (!p?.hostId || (p.uid && p.uid === lastPetUidRef.current)) return
+          lastPetUidRef.current = p.uid
+          setPetLink({ hostId: p.hostId, kind: p.kind ?? 'shell' })
+        }),
+      )
+      offs.push(
+        await listen<{ paths?: string[]; uid?: string }>('pet://drop-upload', (e) => {
+          const p = e.payload
+          const paths = (p?.paths ?? []).filter(Boolean)
+          if (paths.length === 0 || (p.uid && p.uid === lastPetUidRef.current)) return
+          lastPetUidRef.current = p.uid
+          setDropUpload({ paths, uid: p.uid ?? crypto.randomUUID() })
+        }),
+      )
+    })()
+    return () => {
+      disposed = true
+      offs.forEach((off) => off())
+    }
+  }, [])
+
+  // 呼出的会话：等主机列表就绪后打开（主机不存在则忽略——未同步或已删除）
+  useEffect(() => {
+    if (!petLink || hosts.length === 0) return
+    const host = hosts.find((h) => h.id === petLink.hostId)
+    setPetLink(null)
+    if (host) openSession(host, petLink.kind)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [petLink, hosts])
+
   const openSession = (host: HostRecord, kind: SessionKind) => {
     const sessionId = crypto.randomUUID()
     setTabs((prev) => [...prev, { key: sessionId, kind, hostId: host.id, hostName: host.name }])
@@ -140,7 +188,7 @@ export function App() {
               onRefresh={refreshHosts}
             />
           </div>
-          <AgentControls connected={connected} />
+          <AgentControls onOpenSettings={() => setSettingsOpen(true)} />
         </div>
       </Layout.Sider>
       <Layout.Content style={{ background: '#1e1e1e' }}>
@@ -191,6 +239,17 @@ export function App() {
         onSaved={() => {
           setEditing({ open: false })
           refreshHosts()
+        }}
+      />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <DropUploadModal
+        open={!!dropUpload}
+        paths={dropUpload?.paths ?? []}
+        hosts={hosts}
+        onClose={() => setDropUpload(null)}
+        onOpenSftp={(hostId) => {
+          const host = hosts.find((h) => h.id === hostId)
+          if (host) openSession(host, 'sftp')
         }}
       />
     </Layout>

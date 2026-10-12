@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BitGalaxy Shell</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: #1e1e1e;
+        color: #d4d4d4;
+        font-family: 'Segoe UI', 'PingFang SC', system-ui, sans-serif;
+      }
+      #app {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+      }
+      .ring {
+        width: 42px;
+        height: 42px;
+        border-radius: 50%;
+        border: 4px solid #333;
+        border-top-color: #0fdc78;
+        animation: spin 0.9s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      #msg {
+        font-size: 14px;
+        color: #9a9a9a;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="ring"></div>
+      <p id="msg">正在启动本机 Agent …</p>
+    </div>
+    <script src="./main.js"></script>
+  </body>
+</html>

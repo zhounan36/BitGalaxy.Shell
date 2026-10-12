@@ -1,5 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import type { Db } from './db.js'
 
 export interface KnownHostEntry {
   host: string
@@ -8,34 +7,31 @@ export interface KnownHostEntry {
   fingerprint: string
 }
 
-/**
- * known_hosts（TOFU，设计稿 §5.3）：首连确认指纹后落盘，后续连接比对；
- * 指纹不匹配（疑似中间人）直接拒绝。
- */
+/** known_hosts（TOFU，SQLite 持久化） */
 export class KnownHosts {
-  private entries: KnownHostEntry[] = []
+  private readonly stFind: ReturnType<Db['prepare']>
+  private readonly stUpsert: ReturnType<Db['prepare']>
 
-  constructor(private readonly file: string) {}
-
-  async load(): Promise<void> {
-    try {
-      this.entries = JSON.parse(await readFile(this.file, 'utf8')) as KnownHostEntry[]
-    } catch {
-      this.entries = []
-    }
+  constructor(private readonly db: Db) {
+    this.stFind = db.prepare('SELECT * FROM known_hosts WHERE host = ? AND port = ?')
+    this.stUpsert = db.prepare(
+      'INSERT OR REPLACE INTO known_hosts (host, port, key_type, fingerprint) VALUES (?, ?, ?, ?)',
+    )
   }
 
+  /** 兼容旧 API：SQLite 同步无需加载 */
+  async load(): Promise<void> {}
+
   find(host: string, port: number): KnownHostEntry | undefined {
-    return this.entries.find((e) => e.host === host && e.port === port)
+    const row = this.stFind.get(host, port) as
+      | { host: string; port: number; key_type: string; fingerprint: string }
+      | undefined
+    return row
+      ? { host: row.host, port: row.port, keyType: row.key_type, fingerprint: row.fingerprint }
+      : undefined
   }
 
   async save(entry: KnownHostEntry): Promise<void> {
-    const idx = this.entries.findIndex((e) => e.host === entry.host && e.port === entry.port)
-    if (idx >= 0) this.entries[idx] = entry
-    else this.entries.push(entry)
-    await mkdir(dirname(this.file), { recursive: true })
-    const tmp = `${this.file}.tmp`
-    await writeFile(tmp, JSON.stringify(this.entries, null, 2), 'utf8')
-    await rename(tmp, this.file)
+    this.stUpsert.run(entry.host, entry.port, entry.keyType, entry.fingerprint)
   }
 }

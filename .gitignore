@@ -7,6 +7,9 @@ dist-app/
 build/
 out/
 *.tsbuildinfo
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/binaries/*.exe
+apps/desktop/src-tauri/gen/schemas/
 
 # 日志
 *.log

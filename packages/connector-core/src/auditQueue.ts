@@ -1,5 +1,4 @@
-import { appendFile, mkdir } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import type { Db } from './db.js'
 
 export interface AuditEvent {
   type: string
@@ -7,16 +6,15 @@ export interface AuditEvent {
   [key: string]: unknown
 }
 
-/**
- * 审计队列（设计稿 §5.4 / §6.7）：M1 本地 jsonl 暂存（离线队列），
- * M2 起恢复联网后携带原始时间戳补报云端。
- */
+/** 审计队列（SQLite 持久化，替代 jsonl 追加） */
 export class AuditQueue {
-  constructor(private readonly file: string) {}
+  private readonly stInsert: ReturnType<Db['prepare']>
+
+  constructor(private readonly db: Db) {
+    this.stInsert = db.prepare('INSERT INTO audit_log (ts, type, meta) VALUES (?, ?, ?)')
+  }
 
   async append(type: string, meta: Record<string, unknown> = {}): Promise<void> {
-    const event: AuditEvent = { type, ts: new Date().toISOString(), ...meta }
-    await mkdir(dirname(this.file), { recursive: true })
-    await appendFile(this.file, `${JSON.stringify(event)}\n`, 'utf8')
+    this.stInsert.run(new Date().toISOString(), type, JSON.stringify(meta))
   }
 }

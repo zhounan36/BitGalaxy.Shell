@@ -10,12 +10,18 @@
   ],
   "scripts": {
     "build": "npm run build:node && npm run build:ui",
-    "build:node": "npm run build -w @bgshell/protocol && npm run build -w @bgshell/connector-core && npm run build -w @bgshell/transport-ws && npm run build -w @bgshell/agent",
+    "build:node": "npm run build -w @bgshell/protocol && npm run build -w @bgshell/connector-core && npm run build -w @bgshell/transport-ws && npm run build -w @bgshell/transport-mcp && npm run build -w @bgshell/agent",
     "build:ui": "npm run build -w @bgshell/workbench-ui",
+    "build:pet": "npm run build -w @bgshell/pet-ui",
     "dev:agent": "tsx watch apps/agent/src/main.ts",
     "dev:ui": "npm run dev -w @bgshell/workbench-ui",
+    "dev:pet": "npm run dev -w @bgshell/pet-ui",
     "start": "node apps/agent/dist/main.js",
-    "build:exe": "npm run build:ui && node scripts/build-exe.mjs"
+    "build:exe": "npm run build:ui && node scripts/build-exe.mjs",
+    "pet:prep": "npm run build:pet && node scripts/prep-pet.mjs",
+    "desktop:prep": "node scripts/prep-sidecar.mjs",
+    "desktop:dev": "npm run build:exe && npm run desktop:prep && npm run pet:prep && npm run dev -w @bgshell/desktop",
+    "desktop:build": "npm run build:exe && npm run desktop:prep && npm run pet:prep && npm run build -w @bgshell/desktop"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",

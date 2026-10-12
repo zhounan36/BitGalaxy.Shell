@@ -1,0 +1,17 @@
+{
+  "name": "@bgshell/transport-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Agent 接入面④：MCP server（stdio）——向本地 AI 客户端（Claude Code/Cursor 等）暴露主机运维工具集（docs/ai-design.md）",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@bgshell/connector-core": "*",
+    "@bgshell/protocol": "*",
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "zod": "^3.25.0"
+  }
+}

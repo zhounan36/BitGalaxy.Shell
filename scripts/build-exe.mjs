@@ -33,7 +33,7 @@ await esbuild.build({
   entryPoints: [join(root, 'apps/agent/src/main.ts')],
   bundle: true,
   platform: 'node',
-  target: 'node20',
+  target: 'node22',
   format: 'cjs',
   outfile: join(outDir, 'bundle.cjs'),
   external: ['cpu-features'], // ssh2 可选原生依赖，缺失时自动回退纯 JS
@@ -71,16 +71,16 @@ execFileSync(process.execPath, ['--experimental-sea-config', 'sea-config.json'],
   stdio: 'inherit',
 })
 
-// 4) 注入 node.exe 副本
+// 4) 注入 node.exe 副本（先切 GUI 子系统再注入，避开注入后杀软扫描窗口期）
 console.log('[4/5] postject 注入单文件 exe ...')
 copyFileSync(process.execPath, exePath)
+patchSubsystemGui(exePath)
 await postject.inject(exePath, 'NODE_SEA_BLOB', readFileSync(join(outDir, 'sea.blob')), {
   sentinelFuse,
 })
 
 // 5) PE Subsystem: CONSOLE(3) → GUI(2)，双击运行无黑窗
-console.log('[5/5] 切换 PE 子系统为 GUI ...')
-patchSubsystemGui(exePath)
+console.log('[5/5] 切换 PE 子系统为 GUI ... 完成')
 
 console.log(`完成: ${exePath}`)
 console.log('  双击启动（自动打开工作台）；开机自启项以 --silent 静默启动')
@@ -95,6 +95,18 @@ function patchSubsystemGui(exe) {
   const subsystemOff = optOff + 68
   const current = buf.readUInt16LE(subsystemOff)
   if (current !== 2 && current !== 3) throw new Error(`意外的 Subsystem 值: ${current}`)
+  if (current === 2) return // 已是 GUI
   buf.writeUInt16LE(2, subsystemOff) // IMAGE_SUBSYSTEM_WINDOWS_GUI
-  writeFileSync(exe, buf)
+  // 写回带重试：新建 exe 常被杀软/索引器瞬时独占
+  for (let attempt = 1; ; attempt++) {
+    try {
+      writeFileSync(exe, buf)
+      return
+    } catch (err) {
+      if (attempt >= 6 || err.code !== 'EBUSY') throw err
+      const wait = attempt * 1000
+      console.log(`  文件被占用（杀软扫描/句柄未释放），${wait}ms 后重试 ${attempt}/5 ...`)
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait) // 同步等待
+    }
+  }
 }

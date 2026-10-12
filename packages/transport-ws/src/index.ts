@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { connect as tcpConnect, type Socket } from 'node:net'
-import { join, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
 import {
   DataFrameType,
@@ -12,15 +12,19 @@ import {
   type ClientFrame,
   type HostRecord,
   type ServerFrame,
+  type SettingsResult,
 } from '@bgshell/protocol'
-import { AuditQueue, HostStore, KnownHosts, SessionManager } from '@bgshell/connector-core'
+import { AuditQueue, Db, HostStore, KnownHosts, SessionManager, SettingsStore } from '@bgshell/connector-core'
 import { serveStatic } from './static.js'
+import { createAiHandler } from './ai.js'
 
 export interface AgentServerOptions {
   port?: number
   /** 监听地址，默认 127.0.0.1（仅本机；不对局域网开放） */
   host?: string
   dataDir: string
+  /** SQLite 数据库实例（由入口创建并迁移） */
+  db: Db
   /** workbench-ui 静态构建目录；不存在时 / 返回构建提示 */
   uiDist: string
   /** SEA 单文件 exe 模式：内嵌工作台资源（key=URL 路径），优先于 uiDist 文件系统读取 */
@@ -36,8 +40,13 @@ export interface AgentServerHandle {
   close: () => void
 }
 
-/** vite dev server（workbench-ui 开发模式代理 /ws） */
-const VITE_DEV_ORIGINS = ['http://localhost:5177', 'http://127.0.0.1:5177']
+/** vite dev server（workbench-ui / pet-ui 开发模式代理 /ws） */
+const VITE_DEV_ORIGINS = [
+  'http://localhost:5177',
+  'http://127.0.0.1:5177',
+  'http://localhost:5178',
+  'http://127.0.0.1:5178',
+]
 
 /**
  * Agent 接入面①：单端口同时提供内嵌工作台（HTTP 静态）与帧通道（WS /ws）。
@@ -53,11 +62,11 @@ export async function startAgentServer(opts: AgentServerOptions): Promise<AgentS
     ...(opts.allowedOrigins ?? []),
   ])
 
-  const hostStore = new HostStore(join(opts.dataDir, 'hosts.json'))
-  const knownHosts = new KnownHosts(join(opts.dataDir, 'known-hosts.json'))
-  const audit = new AuditQueue(join(opts.dataDir, 'audit-queue.jsonl'))
-  await hostStore.load()
-  await knownHosts.load()
+  const db = opts.db
+  const hostStore = new HostStore(db)
+  const knownHosts = new KnownHosts(db)
+  const audit = new AuditQueue(db)
+  const settingsStore = new SettingsStore(db)
 
   const uiRoot = resolve(opts.uiDist)
   const server = createServer((req: IncomingMessage, res: ServerResponse) =>
@@ -88,6 +97,8 @@ export async function startAgentServer(opts: AgentServerOptions): Promise<AgentS
       sendData: (sid, type, chunk) => ws.send(encodeDataFrame(type, sid, chunk) as Buffer),
       onSessionClosed: () => {},
     })
+    // 桌宠 AI 对话（每连接一个 handler：审批/回包按连接绑定；SSH 池与历史全局共享）
+    const ai = createAiHandler({ hostStore, knownHosts, audit, settingsStore, send })
 
     ws.on('message', (data, isBinary) => {
       if (isBinary) {
@@ -106,11 +117,17 @@ export async function startAgentServer(opts: AgentServerOptions): Promise<AgentS
       } catch {
         return
       }
-      void handleControlFrame(frame, manager, hostStore, send, opts.agentControl)
+      void handleControlFrame(frame, manager, hostStore, send, opts.agentControl, ai, settingsStore)
     })
 
-    ws.on('close', () => manager.closeAll('socket-closed'))
-    ws.on('error', () => manager.closeAll('socket-error'))
+    ws.on('close', () => {
+      manager.closeAll('socket-closed')
+      ai.dispose()
+    })
+    ws.on('error', () => {
+      manager.closeAll('socket-error')
+      ai.dispose()
+    })
   })
 
   return await new Promise<AgentServerHandle>((resolveReady, rejectReady) => {
@@ -128,6 +145,8 @@ async function handleControlFrame(
   hostStore: HostStore,
   send: (frame: ServerFrame) => void,
   agentControl?: (op: AgentOp) => Promise<AgentResult>,
+  ai?: { handle: (frame: ClientFrame) => void },
+  settingsStore?: SettingsStore,
 ): Promise<void> {
   switch (frame.t) {
     case 'open':
@@ -194,6 +213,34 @@ async function handleControlFrame(
         }
       } catch (err) {
         send({ t: 'hosts', m: { op: String(op), ok: false, message: (err as Error).message } })
+      }
+      return
+    }
+    case 'ai':
+    case 'ai-approve':
+      ai?.handle(frame)
+      return
+    case 'settings': {
+      if (!settingsStore) {
+        send({ t: 'settings-result', m: { ok: false, message: '配置存储未初始化' } })
+        return
+      }
+      try {
+        let result: SettingsResult
+        if (frame.m.op === 'list') {
+          result = { ok: true, items: settingsStore.getAll() }
+        } else if (frame.m.op === 'get') {
+          result = { ok: true, value: settingsStore.get(frame.m.key) }
+        } else if (frame.m.op === 'set') {
+          settingsStore.set(frame.m.key, frame.m.value)
+          result = { ok: true }
+        } else {
+          const deleted = settingsStore.delete(frame.m.key)
+          result = { ok: deleted }
+        }
+        send({ t: 'settings-result', m: result })
+      } catch (err) {
+        send({ t: 'settings-result', m: { ok: false, message: (err as Error).message } })
       }
       return
     }

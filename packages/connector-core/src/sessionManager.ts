@@ -214,8 +214,9 @@ export class SessionManager {
   private startMetrics(entry: SessionEntry, sessionId: string, intervalSec: number): void {
     const tick = async () => {
       try {
-        const { stdout } = await entry.ssh!.exec(buildMetricsCommand(), 10_000)
-        this.hooks.sendControl({ t: 'metrics-data', s: sessionId, m: parseMetrics(stdout) })
+        const r = await entry.ssh!.exec(buildMetricsCommand(), 10_000)
+        if (r.timedOut) throw new Error('远程命令执行超时')
+        this.hooks.sendControl({ t: 'metrics-data', s: sessionId, m: parseMetrics(r.stdout) })
       } catch (err) {
         // 采集失败不终止会话（可能为目标临时不可用），下发错误帧由 UI 呈现
         this.hooks.sendControl({
