@@ -21,11 +21,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.13.2",
-    "@types/ssh2": "^1.11.0",
-    "@types/ws": "^8.5.0",
     "esbuild": "^0.28.2",
-    "postject": "^1.0.0-alpha.6",
-    "tsx": "^4.19.2",
     "typescript": "~6.0.2"
   }
 }

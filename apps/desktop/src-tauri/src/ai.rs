@@ -9,7 +9,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use crate::protocol::{AiApprovalM, AiDeltaM, AiResultM, AiStatusM, ServerFrame};
+use crate::protocol::{AiApprovalM, AiApproveM, AiDeltaM, AiResultM, AiStatusM, ServerFrame};
 use crate::session::probe_tcp;
 use crate::ssh::{HostKeyAsk, HostKeyCtx, SshConnection, SshError, SshKind};
 use crate::stores::Stores;
@@ -356,7 +356,7 @@ impl AiHandler {
         }
     }
 
-    pub fn handle_approve(&self, m: &AiApprovalM) {
+    pub fn handle_approve(&self, m: &AiApproveM) {
         if let Some(tx) = self.shared.approvals.lock().unwrap().remove(&m.req_id) {
             let _ = tx.send(m.approved);
         }
@@ -506,33 +506,29 @@ impl AiHandler {
         let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".").to_string();
         match self.shared.pool.acquire_sftp(&host_id).await {
-            Ok(sftp) => {
-                use futures_util::stream::StreamExt;
-                match sftp.read_dir(&path).await {
-                    Ok(dir) => {
-                        let mut entries: Vec<serde_json::Value> = Vec::new();
-                        let mut dir = Box::pin(dir);
-                        while let Some(entry) = dir.next().await {
-                            let name = entry.file_name();
-                            if name == "." || name == ".." {
-                                continue;
-                            }
-                            let meta = entry.metadata();
-                            entries.push(serde_json::json!({
-                                "name": name,
-                                "isDir": meta.is_dir(),
-                                "sizeB": meta.size().unwrap_or(0),
-                                "mtimeMs": meta.mtime().map(|t| t * 1000).unwrap_or(0),
-                            }));
+            Ok(sftp) => match sftp.read_dir(&path).await {
+                Ok(dir) => {
+                    let mut entries: Vec<serde_json::Value> = Vec::new();
+                    for entry in dir {
+                        let name = entry.file_name();
+                        if name == "." || name == ".." {
+                            continue;
                         }
-                        serde_json::json!({ "ok": true, "path": path, "entries": entries })
+                        let attrs = entry.metadata();
+                        entries.push(serde_json::json!({
+                            "name": name,
+                            "isDir": attrs.is_dir(),
+                            "sizeB": attrs.size.unwrap_or(0),
+                            "mtimeMs": attrs.mtime.map(|t| t as i64 * 1000).unwrap_or(0),
+                        }));
                     }
-                    Err(e) => {
-                        self.shared.pool.evict(&host_id);
-                        serde_json::json!({ "ok": false, "message": e.to_string() })
-                    }
+                    serde_json::json!({ "ok": true, "path": path, "entries": entries })
                 }
-            }
+                Err(e) => {
+                    self.shared.pool.evict(&host_id);
+                    serde_json::json!({ "ok": false, "message": e.to_string() })
+                }
+            },
             Err(e) => serde_json::json!({ "ok": false, "message": e }),
         }
     }
@@ -641,6 +637,7 @@ impl AiHandler {
             };
 
             let tool_calls = msg.tool_calls.clone();
+            let final_content = msg.content.clone();
             {
                 let mut chats = self.shared.chats.lock().unwrap();
                 if let Some(history) = chats.get_mut(chat_id) {
@@ -676,7 +673,7 @@ impl AiHandler {
             }
 
             // 最终文本：分片下推模拟流式
-            let full = msg.content.clone().unwrap_or_default();
+            let full = final_content.unwrap_or_default();
             let mut offset = 0;
             while offset < full.len() {
                 let end = (offset + 160).min(full.len());
@@ -713,13 +710,13 @@ impl AiHandler {
         self.send_ai_error(chat_id, "工具循环轮次超限，任务太复杂了，试试拆小一点");
     }
 
-    fn send_ai_error(&self, chat_id: &str, message: String) {
+    fn send_ai_error(&self, chat_id: &str, message: impl Into<String>) {
         self.shared.out.send_frame(&ServerFrame::AiResult {
             m: AiResultM {
                 chat_id: chat_id.to_string(),
                 ok: false,
                 text: String::new(),
-                message: Some(message),
+                message: Some(message.into()),
             },
         });
     }

@@ -1,0 +1,10 @@
+﻿[1m[92m    Checking[0m bgshell-desktop v0.1.0 (D:\sorce3\BitGalaxy.Shell\apps\desktop\src-tauri)
+src\ssh.rs:300:13: [1m[93mwarning[0m: variable does not need to be mutable
+src\ssh.rs:301:13: [1m[93mwarning[0m: variable does not need to be mutable
+src\ssh.rs:300:13: [1m[93mwarning[0m: unused variable: `stdout`: help: if this is intentional, prefix it with an underscore: `_stdout`
+src\ssh.rs:301:13: [1m[93mwarning[0m: unused variable: `stderr`: help: if this is intentional, prefix it with an underscore: `_stderr`
+src\mcp.rs:440:44: [1m[93mwarning[0m: unused variable: `host_id`: help: if this is intentional, prefix it with an underscore: `_host_id`
+src\session.rs:80:13: [1m[93mwarning[0m: unused variable: `term`: help: if this is intentional, prefix it with an underscore: `_term`
+src\session.rs:20:5: [1m[93mwarning[0m: field `host_id` is never read
+[1m[93mwarning[0m: `bgshell-desktop` (lib) generated 7 warnings (run `cargo fix --lib -p bgshell-desktop` to apply 6 suggestions)
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 3.69s

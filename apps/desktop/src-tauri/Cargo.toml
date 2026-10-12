@@ -15,12 +15,17 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
+# 终端复制/粘贴：WebView2 下 navigator.clipboard.readText 不可靠，走原生剪贴板
+tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "io-std", "sync", "fs"] }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
-russh = "0.59"
+# 默认后端 aws-lc-rs 需要 NASM；改用 ring（纯 cc 编译，无额外系统依赖）
+russh = { version = "0.59", default-features = false, features = ["ring", "flate2", "rsa"] }
+# rsa 0.10.0-rc.12 与当前解析的 pkcs8 不兼容（russh 按 rc.10 开发），钉住
+rsa = "=0.10.0-rc.10"
 russh-sftp = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }

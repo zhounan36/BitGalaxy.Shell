@@ -60,31 +60,25 @@ impl SftpController {
         let resolved = self.realpath(path).await?;
         let dir = self.sftp.read_dir(&resolved).await.map_err(sftp_err)?;
         let mut entries: Vec<SftpEntry> = Vec::new();
-        {
-            use futures_util::stream::StreamExt;
-            let mut dir = Box::pin(dir);
-            while let Some(entry) = dir.next().await {
-                let meta = entry.metadata();
-                let name = entry.file_name();
-                if name == "." || name == ".." {
-                    continue;
-                }
-                let entry_type = if meta.is_dir() {
-                    "dir"
-                } else if meta.is_symlink() {
-                    "symlink"
-                } else if meta.is_file() {
-                    "file"
-                } else {
-                    "other"
-                };
-                entries.push(SftpEntry {
-                    name,
-                    entry_type: entry_type.to_string(),
-                    size_b: meta.size().unwrap_or(0),
-                    mtime_ms: meta.mtime().map(|t| t * 1000).unwrap_or(0),
-                });
+        for entry in dir {
+            let attrs = entry.metadata();
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
             }
+            let entry_type = if attrs.is_dir() {
+                "dir"
+            } else if attrs.is_symlink() {
+                "symlink"
+            } else {
+                "file"
+            };
+            entries.push(SftpEntry {
+                name,
+                entry_type: entry_type.to_string(),
+                size_b: attrs.size.unwrap_or(0),
+                mtime_ms: attrs.mtime.map(|t| t as i64 * 1000).unwrap_or(0),
+            });
         }
         entries.sort_by(|a, b| {
             if a.entry_type == b.entry_type {
@@ -109,6 +103,11 @@ impl SftpController {
     }
 
     pub async fn rm(&self, path: &str, recursive: bool) -> Result<(), String> {
+        // 递归 async fn 需要装箱（E0733）
+        Box::pin(self.rm_inner(path, recursive)).await
+    }
+
+    async fn rm_inner(&self, path: &str, recursive: bool) -> Result<(), String> {
         if !recursive {
             return self.sftp.remove_file(path).await.map_err(sftp_err);
         }
@@ -117,16 +116,12 @@ impl SftpController {
             return self.rm(path, false).await;
         }
         let dir = self.sftp.read_dir(path).await.map_err(sftp_err)?;
-        {
-            use futures_util::stream::StreamExt;
-            let mut dir = Box::pin(dir);
-            while let Some(entry) = dir.next().await {
-                let name = entry.file_name();
-                if name == "." || name == ".." {
-                    continue;
-                }
-                self.rm(&join_remote(path, &name), true).await?;
+        for entry in dir {
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
             }
+            Box::pin(self.rm(&join_remote(path, &name), true)).await?;
         }
         self.sftp.remove_dir(path).await.map_err(sftp_err)
     }
@@ -201,7 +196,7 @@ impl SftpController {
         out: &Outbound,
     ) -> Result<(String, u64), String> {
         let meta = self.sftp.metadata(path).await.map_err(sftp_err)?;
-        let size = meta.size().unwrap_or(0);
+        let size = meta.size.unwrap_or(0);
         let op_id = uuid::Uuid::new_v4().to_string();
         let sftp = self.sftp.clone();
         let path = path.to_string();
@@ -263,12 +258,19 @@ impl SftpController {
     }
 
     pub async fn close(&self) {
-        for (_, h) in self.uploads.lock().unwrap().drain() {
+        // 先收集句柄再 await（MutexGuard 不能跨 await 持有）
+        let uploads: Vec<UploadHandle> = {
+            self.uploads.lock().unwrap().drain().map(|(_, h)| h).collect()
+        };
+        for h in uploads {
             let _ = h.tx.send(UploadCmd::Finish);
             let _ = h.done.await;
         }
-        for (_, t) in self.downloads.lock().unwrap().drain() {
-            t.abort();
+        let downloads: Vec<JoinHandle<()>> = {
+            self.downloads.lock().unwrap().drain().map(|(_, t)| t).collect()
+        };
+        for task in downloads {
+            task.abort();
         }
         let _ = self.sftp.close().await;
     }

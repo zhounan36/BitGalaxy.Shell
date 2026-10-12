@@ -120,16 +120,13 @@ fn merge_section<T: Serialize + serde::de::DeserializeOwned>(
     raw: Option<&serde_json::Value>,
 ) -> T {
     let mut base = serde_json::to_value(def).unwrap_or(serde_json::Value::Null);
-    if let (Some(raw), Some(fields), Some(base_obj)) =
-        (raw, raw.as_object(), base.as_object_mut())
-    {
+    if let (Some(fields), Some(base_obj)) = (raw.and_then(|v| v.as_object()), base.as_object_mut()) {
         for (k, v) in fields {
             base_obj.insert(k.clone(), v.clone());
         }
     }
-    serde_json::from_value(base).unwrap_or_else(|_| {
-        serde_json::from_value(serde_json::to_value(def).unwrap_or(serde_json::Value::Null)).unwrap()
-    })
+    let fallback = serde_json::to_value(def).unwrap_or(serde_json::Value::Null);
+    serde_json::from_value(base).unwrap_or_else(|_| serde_json::from_value(fallback).unwrap())
 }
 
 #[derive(Debug, Clone)]

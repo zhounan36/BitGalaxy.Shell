@@ -516,3 +516,38 @@ impl ServerFrame {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_control_frames() {
+        let settings: ClientFrame = serde_json::from_str(r#"{"t":"settings","m":{"op":"set","key":"k","value":{"a":1}}}"#).unwrap();
+        assert!(matches!(settings, ClientFrame::Settings { .. }));
+        let hosts: ClientFrame = serde_json::from_str(r#"{"t":"hosts","m":{"op":"list"}}"#).unwrap();
+        assert!(matches!(hosts, ClientFrame::Hosts { .. }));
+        let ai: ClientFrame = serde_json::from_str(r#"{"t":"ai","m":{"op":"chat","chatId":"c1","text":"hi"}}"#).unwrap();
+        assert!(matches!(ai, ClientFrame::Ai { .. }));
+    }
+
+    #[test]
+    fn host_record_serializes_camel_case() {
+        let rec = HostRecord {
+            input: HostInput {
+                name: "n".into(),
+                host: "h".into(),
+                port: 22,
+                username: "u".into(),
+                auth: HostAuth { kind: "password".into(), password: Some("p".into()), private_key_path: None, passphrase: None },
+                tags: None,
+            },
+            id: "id".into(),
+            created_at: "t".into(),
+            updated_at: "t".into(),
+        };
+        let json = serde_json::to_value(&rec).unwrap();
+        assert_eq!(json["privateKeyPath"], serde_json::Value::Null);
+        assert_eq!(json["createdAt"], "t");
+    }
+}
