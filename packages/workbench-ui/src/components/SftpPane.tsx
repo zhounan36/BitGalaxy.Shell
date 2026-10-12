@@ -8,8 +8,8 @@ import {
   Modal,
   Popconfirm,
   Progress,
+  Skeleton,
   Space,
-  Spin,
   Table,
   Tag,
   Tooltip,
@@ -292,7 +292,7 @@ export function SftpPane({ sessionId }: { sessionId: string }) {
 
   return (
     <div
-      style={{ height: '100%', overflow: 'auto', background: '#fff', padding: 12 }}
+      style={{ height: '100%', overflow: 'auto', background: 'var(--bg-deep)', padding: 12 }}
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault()
@@ -353,21 +353,21 @@ export function SftpPane({ sessionId }: { sessionId: string }) {
         </div>
       )}
 
-      <Table
-        size="small"
-        rowKey="name"
-        columns={columns}
-        dataSource={entries}
-        loading={loading}
-        pagination={false}
-        locale={{
-          emptyText: loading ? (
-            <Spin />
-          ) : (
-            <Empty description={error ?? (path ? '目录为空' : '连接主机中…')} />
-          ),
-        }}
-      />
+      {loading && !entries ? (
+        <Skeleton active paragraph={{ rows: 10 }} />
+      ) : (
+        <Table
+          size="small"
+          rowKey="name"
+          columns={columns}
+          dataSource={entries}
+          loading={loading}
+          pagination={false}
+          locale={{
+            emptyText: <Empty description={error ?? (path ? '目录为空' : '连接主机中…')} />,
+          }}
+        />
+      )}
     </div>
   )
 }

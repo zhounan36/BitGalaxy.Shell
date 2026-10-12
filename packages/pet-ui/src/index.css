@@ -1,3 +1,50 @@
+/* ============================================================
+   深海蓝暗色设计令牌 —— 与 packages/workbench-ui/src/index.css 保持一致
+   ============================================================ */
+:root {
+  color-scheme: dark;
+
+  --bg-inset: #081018;
+  --bg-deep: #0a121f;
+  --bg-base: #0d1a2b;
+  --bg-raised: #12233a;
+  --bg-elevated: #182f4d;
+
+  --border-subtle: rgba(130, 170, 210, 0.10);
+  --border: rgba(130, 170, 210, 0.20);
+  --border-strong: rgba(130, 170, 210, 0.34);
+
+  --text-primary: #e4eefb;
+  --text-secondary: #9fb6cf;
+  --text-muted: #677f9c;
+
+  --accent: #3ba6d8;
+  --accent-hover: #50b8e4;
+  --accent-bright: #7cc8ec;
+  --accent-soft: rgba(59, 166, 216, 0.16);
+  --accent-border: rgba(59, 166, 216, 0.45);
+
+  --success: #45c08a;
+  --warning: #dd9b34;
+  --danger: #e05769;
+
+  --shadow-1: 0 1px 2px rgba(2, 10, 22, 0.5);
+  --shadow-2: 0 8px 24px rgba(2, 12, 28, 0.55);
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* 悬浮面板（透明窗宿主）：底色取令牌 RGB，保留 alpha 融合桌面 */
+  --float-chat: rgba(13, 26, 43, 0.94);
+  --float-menu: rgba(18, 35, 58, 0.94);
+
+  --font-ui:
+    'Segoe UI Variable Text', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system,
+    sans-serif;
+  --font-mono: 'Cascadia Mono', 'JetBrains Mono', 'SF Mono', Consolas, 'Courier New', monospace;
+}
+
 /* 鲸鱼娘桌宠 · 浏览器宿主样式（Tauri 壳内同样适用：body 透明即可） */
 
 * {
@@ -23,7 +70,8 @@ body {
   background-size: 32px 32px;
   background-position: 0 0, 16px 16px;
   user-select: none;
-  font-family: 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Tauri 宿主：窗口透明，只留宠物本体 */
@@ -59,7 +107,7 @@ html.in-tauri body {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  filter: drop-shadow(0 6px 12px rgba(20, 60, 120, 0.25));
+  filter: drop-shadow(0 6px 14px rgba(4, 16, 32, 0.45));
   transition: transform 120ms ease;
   pointer-events: none; /* 交互统一由容器处理 */
 }
@@ -75,10 +123,10 @@ html.in-tauri body {
 }
 
 .pet-bubble pre {
-  font-family: 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  font-family: var(--font-ui);
   font-size: 13px;
   line-height: 1.5;
-  color: #eaf4ff;
+  color: var(--text-primary);
   white-space: pre-wrap;
   word-break: break-all;
   max-height: 6em;
@@ -101,12 +149,12 @@ html.in-tauri body {
   position: absolute;
   top: 16px;
   left: 16px;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid #d8e0ea;
-  border-radius: 10px;
+  background: var(--float-menu);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   padding: 10px 14px;
   font-size: 12px;
-  color: #345;
+  color: var(--text-secondary);
   min-width: 180px;
 }
 
@@ -122,9 +170,10 @@ html.in-tauri body {
   bottom: 300px;
   width: 190px;
   padding: 6px;
-  border-radius: 12px;
-  background: rgba(16, 34, 56, 0.94);
-  box-shadow: 0 8px 24px rgba(8, 24, 48, 0.35);
+  border-radius: var(--radius-lg);
+  background: var(--float-menu);
+  box-shadow: var(--shadow-2);
+  border: 1px solid var(--border-subtle);
   animation: bubble-in 140ms ease;
   z-index: 10;
 }
@@ -140,7 +189,7 @@ html.in-tauri body {
   min-width: 0;
   border: none;
   background: none;
-  color: #eaf4ff;
+  color: var(--text-primary);
   font-size: 13px;
   line-height: 1.4;
   text-align: left;
@@ -150,10 +199,20 @@ html.in-tauri body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: background 140ms ease;
 }
 
 .pet-menu-btn:hover {
-  background: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.pet-menu-btn:active {
+  transform: scale(0.98);
+}
+
+.pet-menu-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .pet-menu-strong {
@@ -170,13 +229,13 @@ html.in-tauri body {
 .pet-menu-sep {
   height: 1px;
   margin: 4px 8px;
-  background: rgba(255, 255, 255, 0.18);
+  background: var(--border-subtle);
 }
 
 .pet-menu-empty {
   padding: 6px 9px;
   font-size: 12px;
-  color: #b9c9dd;
+  color: var(--text-secondary);
 }
 
 /* 文件拖放提示（Tauri 宿主拖文件悬停时） */
@@ -186,12 +245,13 @@ html.in-tauri body {
   transform: translateX(50%);
   bottom: 300px;
   padding: 8px 14px;
-  border-radius: 12px;
-  background: rgba(16, 34, 56, 0.94);
-  color: #9fe8ff;
+  border-radius: var(--radius-lg);
+  background: var(--float-menu);
+  color: var(--accent-bright);
   font-size: 13px;
   white-space: nowrap;
-  box-shadow: 0 8px 24px rgba(8, 24, 48, 0.35);
+  box-shadow: var(--shadow-2);
+  border: 1px solid var(--accent-border);
   animation: bubble-in 140ms ease;
   pointer-events: none;
   z-index: 9;
@@ -210,7 +270,7 @@ html.in-tauri body {
 
 .pet-debug li {
   line-height: 1.7;
-  color: #6a7a8a;
+  color: var(--text-muted);
 }
 
 /* AI 对话面板：贴宠物左侧（宠物在右下角），深海蓝半透明风 */
@@ -223,10 +283,10 @@ html.in-tauri body {
   max-height: calc(100vh - 40px);
   display: flex;
   flex-direction: column;
-  border-radius: 14px;
-  background: rgba(12, 28, 48, 0.94);
-  box-shadow: 0 10px 30px rgba(8, 24, 48, 0.45);
-  border: 1px solid rgba(120, 190, 255, 0.25);
+  border-radius: var(--radius-lg);
+  background: var(--float-chat);
+  box-shadow: var(--shadow-2);
+  border: 1px solid var(--border);
   overflow: hidden;
   animation: bubble-in 160ms ease;
   z-index: 11;
@@ -239,9 +299,9 @@ html.in-tauri body {
   padding: 10px 12px;
   font-size: 13px;
   font-weight: 600;
-  color: #9fe8ff;
-  background: rgba(255, 255, 255, 0.06);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--accent-bright);
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .chat-head span {
@@ -251,16 +311,22 @@ html.in-tauri body {
 .chat-close {
   border: none;
   background: none;
-  color: #b9c9dd;
+  color: var(--text-secondary);
   font-size: 13px;
   cursor: pointer;
   padding: 2px 8px;
   border-radius: 6px;
+  transition: background 140ms ease, color 140ms ease;
 }
 
 .chat-close:hover {
   background: rgba(255, 255, 255, 0.12);
-  color: #fff;
+  color: var(--text-primary);
+}
+
+.chat-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .chat-list {
@@ -275,7 +341,7 @@ html.in-tauri body {
 
 .chat-empty {
   font-size: 12px;
-  color: #8fa8c4;
+  color: var(--text-muted);
   line-height: 1.7;
   padding: 6px 2px;
 }
@@ -283,35 +349,35 @@ html.in-tauri body {
 .chat-msg {
   max-width: 88%;
   padding: 7px 10px;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-all;
-  color: #eaf4ff;
+  color: var(--text-primary);
 }
 
 .chat-user {
   align-self: flex-end;
-  background: linear-gradient(135deg, #2f7bd9, #3aa6dd);
+  background: var(--accent);
   border-bottom-right-radius: 3px;
 }
 
 .chat-assistant {
   align-self: flex-start;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--bg-elevated);
   border-bottom-left-radius: 3px;
 }
 
 .chat-err {
-  background: rgba(215, 70, 80, 0.22);
+  background: rgba(224, 87, 105, 0.22);
   color: #ffd7d7;
 }
 
 .chat-busy {
   align-self: flex-start;
   font-size: 12px;
-  color: #8fd0ff;
+  color: var(--accent-bright);
   padding: 2px 4px;
   animation: bubble-in 140ms ease;
 }
@@ -319,19 +385,19 @@ html.in-tauri body {
 .chat-approval {
   margin: 0 12px 8px;
   padding: 10px;
-  border-radius: 10px;
-  background: rgba(230, 150, 40, 0.14);
-  border: 1px solid rgba(240, 170, 70, 0.45);
+  border-radius: var(--radius-md);
+  background: rgba(221, 155, 52, 0.14);
+  border: 1px solid rgba(221, 155, 52, 0.45);
 }
 
 .chat-approval-title {
   font-size: 12px;
-  color: #ffd9a0;
+  color: #f0c06a;
   margin-bottom: 6px;
 }
 
 .chat-approval-cmd {
-  font-family: Consolas, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: #ffe9c9;
   background: rgba(0, 0, 0, 0.3);
@@ -357,67 +423,90 @@ html.in-tauri body {
   font-size: 12px;
   padding: 5px 12px;
   cursor: pointer;
+  transition: background 140ms ease, transform 100ms ease;
 }
 
 .chat-ok {
-  background: #3aa6dd;
+  background: var(--accent);
   color: #fff;
 }
 
 .chat-no {
   background: rgba(255, 255, 255, 0.12);
-  color: #eaf4ff;
+  color: var(--text-primary);
 }
 
 .chat-ok:hover {
-  background: #55b8e8;
+  background: var(--accent-hover);
 }
 
 .chat-no:hover {
   background: rgba(255, 255, 255, 0.2);
 }
 
+.chat-ok:active,
+.chat-no:active {
+  transform: scale(0.97);
+}
+
+.chat-ok:focus-visible,
+.chat-no:focus-visible {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 1px;
+}
+
 .chat-input-row {
   display: flex;
   gap: 8px;
   padding: 10px 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--border-subtle);
   background: rgba(255, 255, 255, 0.04);
 }
 
 .chat-input {
   flex: 1;
   min-width: 0;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--border);
   background: rgba(0, 0, 0, 0.25);
   border-radius: 8px;
-  color: #eaf4ff;
+  color: var(--text-primary);
   font-size: 13px;
   padding: 7px 10px;
   outline: none;
+  transition: border-color 140ms ease;
 }
 
 .chat-input::placeholder {
-  color: #7f95ad;
+  color: var(--text-muted);
 }
 
 .chat-input:focus {
-  border-color: rgba(120, 190, 255, 0.55);
+  border-color: var(--accent);
 }
 
 .chat-send {
   flex: 0 0 auto;
   border: none;
   border-radius: 8px;
-  background: #3aa6dd;
+  background: var(--accent);
   color: #fff;
   font-size: 13px;
   padding: 0 14px;
   cursor: pointer;
+  transition: background 140ms ease, transform 100ms ease;
 }
 
 .chat-send:hover:enabled {
-  background: #55b8e8;
+  background: var(--accent-hover);
+}
+
+.chat-send:active:enabled {
+  transform: scale(0.97);
+}
+
+.chat-send:focus-visible {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 1px;
 }
 
 .chat-send:disabled {

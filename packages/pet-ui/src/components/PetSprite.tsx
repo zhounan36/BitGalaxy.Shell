@@ -1,6 +1,9 @@
 import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import type { PetStateKey } from '../pet/machine'
 
+/** 素材根：随 vite base（dev '/'、build '/pet/'）变化，保证双宿主路径一致 */
+const SPRITE_BASE = `${import.meta.env.BASE_URL}pet/`
+
 const ALL_STATES: PetStateKey[] = [
   'sleep',
   'ready',
@@ -41,7 +44,7 @@ export function PetSprite({
   useEffect(() => {
     for (const s of ALL_STATES) {
       const img = new Image()
-      img.src = `/pet/${s}/${s}_00.png`
+      img.src = `${SPRITE_BASE}${s}/${s}_00.png`
     }
   }, [])
 
@@ -83,7 +86,7 @@ export function PetSprite({
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
     >
-      <img src={`/pet/${state}/${state}_00.png`} alt={state} draggable={false} />
+      <img src={`${SPRITE_BASE}${state}/${state}_00.png`} alt={state} draggable={false} />
     </div>
   )
 }

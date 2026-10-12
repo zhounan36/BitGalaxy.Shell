@@ -5,8 +5,8 @@
   "description": "BitGalaxy Shell 桌面壳（Tauri 2）：主窗口工作台 + 系统托盘 + bgshell-agent sidecar 托管",
   "scripts": {
     "tauri": "tauri",
-    "dev": "tauri dev",
-    "build": "tauri build"
+    "dev": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && tauri dev",
+    "build": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && tauri build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

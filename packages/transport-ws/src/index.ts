@@ -48,6 +48,9 @@ const VITE_DEV_ORIGINS = [
   'http://127.0.0.1:5178',
 ]
 
+/** Tauri 桌面壳 webview 来源（Windows WebView2 为 http://tauri.localhost；macOS/Linux 为 tauri://localhost） */
+const TAURI_ORIGINS = ['http://tauri.localhost', 'tauri://localhost']
+
 /**
  * Agent 接入面①：单端口同时提供内嵌工作台（HTTP 静态）与帧通道（WS /ws）。
  * 每条 WS 连接绑定一个 SessionManager（连接断开即关闭其全部会话）。
@@ -59,6 +62,7 @@ export async function startAgentServer(opts: AgentServerOptions): Promise<AgentS
     `http://127.0.0.1:${port}`,
     `http://localhost:${port}`,
     ...VITE_DEV_ORIGINS,
+    ...TAURI_ORIGINS,
     ...(opts.allowedOrigins ?? []),
   ])
 

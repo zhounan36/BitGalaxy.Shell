@@ -21,14 +21,14 @@ export interface HostListProps {
 /** 左侧主机列表：单击开终端，菜单含 文件/状态/编辑/删除；每台主机带探测徽标（嵌入 AgentControls 容器内使用，不再自带底部状态栏） */
 export function HostList({ hosts, hostStatus, onAction, onAdd, onRefresh }: HostListProps) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div style={{ display: 'flex', gap: 8, padding: '12px 12px 8px' }}>
+    <div className="host-panel">
+      <div className="host-toolbar">
         <Button type="primary" icon={<PlusOutlined />} block onClick={onAdd}>
           添加主机
         </Button>
         <Button icon={<ReloadOutlined />} onClick={onRefresh} />
       </div>
-      <div style={{ flex: 1, overflow: 'auto', padding: '0 8px' }}>
+      <div className="host-list">
         {hosts.length === 0 ? (
           <Empty style={{ marginTop: 48 }} description="暂无主机档案" />
         ) : (
@@ -38,7 +38,7 @@ export function HostList({ hosts, hostStatus, onAction, onAdd, onRefresh }: Host
               const st = hostStatus[host.id]
               return (
                 <List.Item
-                  style={{ cursor: 'pointer', padding: '8px' }}
+                  className="host-item"
                   onClick={() => onAction(host, 'shell')}
                   actions={[
                     <Dropdown

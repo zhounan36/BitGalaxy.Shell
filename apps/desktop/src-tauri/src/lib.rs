@@ -1,8 +1,10 @@
 //! BitGalaxy Shell 桌面壳（Tauri 2）：
 //! - 启动时以 sidecar 方式拉起 bgshell-agent --silent（壳即窗口，agent 不再开浏览器）
+//! - 入口只有桌宠：主窗口 visible=false 后台预加载（工作台就绪但不显示），
+//!   双击宠物 / 宠物菜单 / 托盘"打开工作台"按需唤起
 //! - 系统托盘：打开工作台 / 退出（退出时结束 agent 子进程）
 //! - 主窗口关闭 = 隐藏到托盘（agent 后台继续运行）
-//! - 鲸鱼娘桌宠窗（pet）：透明置顶小窗，加载 pet-ui；双击宠物回到工作台主窗
+//! - 鲸鱼娘桌宠窗（pet）：透明置顶小窗，加载 pet-ui
 
 use std::sync::Mutex;
 
@@ -73,9 +75,9 @@ fn read_file_chunk(path: String, offset: u64, len: u32) -> Result<tauri::ipc::Re
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        // 桌面壳单实例：二次启动唤起已有主窗口后自动退出（避免双托盘/双桌宠/双 sidecar）
+        // 桌面壳单实例：入口只有桌宠，二次启动聚焦宠物窗后自动退出（避免双托盘/双桌宠/双 sidecar）
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(win) = app.get_webview_window("main") {
+            if let Some(win) = app.get_webview_window("pet") {
                 let _ = win.show();
                 let _ = win.set_focus();
             }
@@ -133,7 +135,8 @@ pub fn run() {
             let use_dev_url =
                 cfg!(debug_assertions) && std::env::var("BGSH_PET_STATIC").is_err();
             let pet_url = if use_dev_url {
-                WebviewUrl::External("http://localhost:5178/".parse().unwrap())
+                // pet-ui vite base 为 /pet/（与随包分发路径一致）
+                WebviewUrl::External("http://localhost:5178/pet/".parse().unwrap())
             } else {
                 WebviewUrl::App("pet/index.html".into())
             };

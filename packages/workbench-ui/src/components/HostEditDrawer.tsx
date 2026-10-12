@@ -32,23 +32,27 @@ export function HostEditDrawer({ open, host, onClose, onSaved }: HostEditDrawerP
   }, [open, host, form])
 
   const save = async () => {
-    const v = await form.validateFields()
-    const input: HostInput = {
-      name: v.name as string,
-      host: v.host as string,
-      port: (v.port as number) ?? 22,
-      username: v.username as string,
-      auth:
-        v.authKind === 'password'
-          ? { kind: 'password', password: v.password as string }
-          : { kind: 'privateKey', privateKeyPath: v.privateKeyPath as string, passphrase: v.passphrase as string },
+    try {
+      const v = await form.validateFields()
+      const input: HostInput = {
+        name: v.name as string,
+        host: v.host as string,
+        port: (v.port as number) ?? 22,
+        username: v.username as string,
+        auth:
+          v.authKind === 'password'
+            ? { kind: 'password', password: v.password as string }
+            : { kind: 'privateKey', privateKeyPath: v.privateKeyPath as string, passphrase: v.passphrase as string },
+      }
+      agentSocket.sendControl(
+        host
+          ? { t: 'hosts', m: { op: 'update', host: { ...input, id: host.id } } }
+          : { t: 'hosts', m: { op: 'create', host: input } },
+      )
+      onSaved()
+    } catch {
+      // 校验未通过：antd 已内联展示错误，不提交
     }
-    agentSocket.sendControl(
-      host
-        ? { t: 'hosts', m: { op: 'update', host: { ...input, id: host.id } } }
-        : { t: 'hosts', m: { op: 'create', host: input } },
-    )
-    onSaved()
   }
 
   return (
@@ -66,17 +70,45 @@ export function HostEditDrawer({ open, host, onClose, onSaved }: HostEditDrawerP
         </div>
       }
     >
-      <Form form={form} layout="vertical" initialValues={{ port: 22, authKind: 'password' }}>
-        <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入名称' }]}>
+      <Form form={form} layout="vertical" scrollToFirstError initialValues={{ port: 22, authKind: 'password' }}>
+        <Form.Item
+          name="name"
+          label="名称"
+          rules={[
+            { required: true, message: '请输入名称' },
+            { whitespace: true, message: '名称不能为空白' },
+          ]}
+        >
           <Input placeholder="如：生产跳板机" />
         </Form.Item>
-        <Form.Item name="host" label="主机地址" rules={[{ required: true, message: '请输入主机地址' }]}>
+        <Form.Item
+          name="host"
+          label="主机地址"
+          rules={[
+            { required: true, message: '请输入主机地址' },
+            { whitespace: true, message: '主机地址不能为空白' },
+          ]}
+        >
           <Input placeholder="IP 或域名" />
         </Form.Item>
-        <Form.Item name="port" label="端口" rules={[{ required: true, message: '请输入端口' }]}>
+        <Form.Item
+          name="port"
+          label="端口"
+          rules={[
+            { required: true, message: '请输入端口' },
+            { type: 'integer', min: 1, max: 65535, message: '端口需为 1–65535 的整数' },
+          ]}
+        >
           <InputNumber min={1} max={65535} style={{ width: '100%' }} />
         </Form.Item>
-        <Form.Item name="username" label="用户名" rules={[{ required: true, message: '请输入用户名' }]}>
+        <Form.Item
+          name="username"
+          label="用户名"
+          rules={[
+            { required: true, message: '请输入用户名' },
+            { whitespace: true, message: '用户名不能为空白' },
+          ]}
+        >
           <Input />
         </Form.Item>
         <Form.Item name="authKind" label="认证方式">

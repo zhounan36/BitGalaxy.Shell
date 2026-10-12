@@ -11,6 +11,7 @@ import { MetricsPane } from './components/MetricsPane'
 import { SettingsModal } from './components/SettingsModal'
 import { SftpPane } from './components/SftpPane'
 import { TerminalPane } from './components/TerminalPane'
+import { TitleBar } from './components/TitleBar'
 
 interface SessionTab {
   key: string
@@ -72,7 +73,7 @@ export function App() {
                   <b>{frame.m.keyType}</b>
                 </p>
                 <p style={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>{frame.m.fingerprint}</p>
-                <p style={{ color: '#888' }}>
+                <p style={{ color: 'var(--text-muted)' }}>
                   请与服务器上 ssh-keygen -lf 输出的指纹比对，确认后信任（TOFU）。
                 </p>
               </div>
@@ -176,8 +177,10 @@ export function App() {
   }
 
   return (
-    <Layout style={{ height: '100%' }}>
-      <Layout.Sider width={280} theme="light" style={{ borderRight: '1px solid #f0f0f0' }}>
+    <div className="app-shell">
+      <TitleBar />
+      <Layout style={{ flex: 1, minHeight: 0 }}>
+        <Layout.Sider width={280} className="bgshell-sider">
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           <div style={{ flex: 1, minHeight: 0 }}>
             <HostList
@@ -191,12 +194,16 @@ export function App() {
           <AgentControls onOpenSettings={() => setSettingsOpen(true)} />
         </div>
       </Layout.Sider>
-      <Layout.Content style={{ background: '#1e1e1e' }}>
+      <Layout.Content className="bgshell-content">
         {tabs.length === 0 ? (
-          <div
-            style={{ color: '#888', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-          >
-            在左侧选择主机：单击开终端，菜单可打开 文件管理 / 运行状态
+          <div className="bgshell-empty">
+            <div className="bgshell-empty-icon">
+              <CodeOutlined />
+            </div>
+            <div className="bgshell-empty-title">选择一个主机开始</div>
+            <div className="bgshell-empty-hint">
+              单击左侧主机打开终端；通过主机菜单可进入「文件管理」或「运行状态」。
+            </div>
           </div>
         ) : (
           <Tabs
@@ -252,6 +259,7 @@ export function App() {
           if (host) openSession(host, 'sftp')
         }}
       />
-    </Layout>
+      </Layout>
+    </div>
   )
 }
