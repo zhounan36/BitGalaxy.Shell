@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.bitgalaxy.shell.desktop",
   "build": {
-    "frontendDist": "../ui"
+    "frontendDist": "../ui",
+    "devUrl": "http://localhost:5177"
   },
   "app": {
     "windows": [
@@ -27,7 +28,6 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.ico", "icons/icon.png"],
-    "externalBin": ["binaries/bgshell-agent"],
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper" }
     }
