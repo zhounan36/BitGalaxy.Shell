@@ -37,65 +37,8 @@ export function App() {
   useEffect(() => {
     applyChainRef.current = applyChainRef.current
       .then(() => applyPetWindowSize(petSize, chatOpen))
-      // TODO(debug): 排查缩放链路（修完删除）
-      .catch((err) => {
-        if (isTauri) {
-          void import('@tauri-apps/api/core').then(({ invoke }) =>
-            invoke('dbg_evt', { msg: `applyPetWindowSize failed: ${String(err)}` }),
-          )
-        }
-        console.error('applyPetWindowSize failed', err)
-      })
+      .catch((err) => console.error('applyPetWindowSize failed', err))
   }, [petSize, chatOpen])
-
-  // TODO(debug): 临时事件探针——定位 dblclick 在 WebView2 中是否产生（修完删除）
-  useEffect(() => {
-    if (!isTauri) return
-    void (async () => {
-      const { invoke } = await import('@tauri-apps/api/core')
-      const log = (m: string) => void invoke('dbg_evt', { msg: m }).catch((e) => console.error('dbg_evt failed', e))
-      log(`pet page mounted: ${location.href}`)
-      // TODO(debug): 布局实测探针——把关键 rect 写进窗口标题（修完删除）
-      window.setTimeout(() => {
-        const img = document.querySelector<HTMLImageElement>('.pet-sprite img')
-        const sprite = document.querySelector<HTMLElement>('.pet-sprite')
-        const anchor = document.querySelector<HTMLElement>('.pet-anchor')
-        if (!img || !sprite || !anchor) {
-          document.title = 'probe: missing els'
-          return
-        }
-        const rect = (el: Element) => {
-          const b = el.getBoundingClientRect()
-          return [b.x, b.y, b.width, b.height].map((v) => Math.round(v * 10) / 10)
-        }
-        const cs = getComputedStyle(img)
-        const payload = JSON.stringify({
-          iw: innerWidth,
-          ih: innerHeight,
-          dpr: devicePixelRatio,
-          a: rect(anchor),
-          s: rect(sprite),
-          i: rect(img),
-          nat: [img.naturalWidth, img.naturalHeight],
-          fit: cs.objectFit,
-          box: [cs.width, cs.height],
-        })
-        document.title = payload
-        log(`layout ${payload}`)
-      }, 500)
-      for (const t of ['pointerdown', 'pointerup', 'click', 'dblclick'] as const) {
-        document.addEventListener(
-          t,
-          (e) => {
-            const me = e as MouseEvent
-            const tgt = (e.target as HTMLElement | null)
-            log(`${t} detail=${me.detail} tgt=${tgt?.className?.toString().slice(0, 24) ?? tgt?.tagName ?? '?'}`)
-          },
-          { capture: true, passive: true },
-        )
-      }
-    })()
-  }, [])
 
   // OS 级文件拖放（仅 Tauri 宿主）：悬停亮提示，落下转发工作台开上传面板
   useEffect(() => {
@@ -173,12 +116,6 @@ export function App() {
   const onWheelZoom = (e: ReactWheelEvent) => {
     if (!e.deltaY) return
     const next = clampPetSize(petSize + (e.deltaY < 0 ? PET_SIZE_STEP : -PET_SIZE_STEP))
-    // TODO(debug): 排查缩放链路（修完删除）
-    if (isTauri) {
-      void import('@tauri-apps/api/core').then(({ invoke }) =>
-        invoke('dbg_evt', { msg: `wheel deltaY=${e.deltaY} ${petSize}->${next}` }),
-      )
-    }
     savePetSize(next)
     setPetSize(next)
   }
