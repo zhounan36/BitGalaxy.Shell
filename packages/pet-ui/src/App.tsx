@@ -134,7 +134,8 @@ export function App() {
           setMenuOpen(true)
         }}
       >
-        <Bubble view={view} />
+        {/* 菜单打开时隐藏气泡：菜单悬浮在气泡区上方，避免台词从菜单边缘露出 */}
+        {!menuOpen && <Bubble view={view} />}
         <PetSprite
           state={view.state}
           onPointerEnter={() => dispatch({ type: 'pointer-enter' })}

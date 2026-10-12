@@ -374,7 +374,7 @@ pub fn run() {
                 .min_inner_size(1024.0, 680.0)
                 .decorations(false)
                 .visible(false)
-                .on_page_load(|webview, payload| {
+                .on_page_load(|_webview, payload| {
                     if cfg!(debug_assertions) {
                         eprintln!(
                             "[bgshell][debug] main 页面加载 {:?}: {}",
