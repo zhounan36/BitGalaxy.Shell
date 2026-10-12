@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dbg-evt"
+description = "Enables the dbg_evt command without any pre-configured scope."
+commands.allow = ["dbg_evt"]
+
+[[permission]]
+identifier = "deny-dbg-evt"
+description = "Denies the dbg_evt command without any pre-configured scope."
+commands.deny = ["dbg_evt"]

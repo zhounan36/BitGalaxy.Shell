@@ -13,8 +13,16 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
     "core:window:allow-close",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "allow-show-main-window",
+    "allow-dbg-evt",
+    "allow-set-pet-visible",
+    "allow-quit-app",
+    "allow-stat-file",
+    "allow-read-file-chunk"
   ]
 }
