@@ -175,7 +175,7 @@ html.in-tauri body {
   min-width: 180px;
 }
 
-/* 右键菜单：呼出工作台 / 主机会话 */
+/* 右键菜单：呼出工作台 / 主机会话（窗口高 420，菜单 ~190 必须整体落在窗内） */
 .pet-menu-mask {
   position: absolute;
   inset: 0;
@@ -184,7 +184,7 @@ html.in-tauri body {
 .pet-menu {
   position: absolute;
   right: 10px;
-  bottom: 300px;
+  bottom: 216px;
   width: 190px;
   padding: 6px;
   border-radius: var(--radius-lg);
