@@ -73,6 +73,13 @@ fn read_file_chunk(path: String, offset: u64, len: u32) -> Result<tauri::ipc::Re
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // 桌面壳单实例：二次启动唤起已有主窗口后自动退出（避免双托盘/双桌宠/双 sidecar）
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }))
         .manage(AgentChild(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             show_main_window,

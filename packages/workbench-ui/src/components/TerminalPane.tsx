@@ -32,7 +32,10 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
       agentSocket.sendInput(sessionId, new TextEncoder().encode(d))
     })
     const resizeTo = () => {
+      const before = `${term.cols}x${term.rows}`
       fit.fit()
+      // 尺寸未变则跳过，防止 ResizeObserver ↔ fit 反馈循环（以及无谓的 WS resize 帧）
+      if (`${term.cols}x${term.rows}` === before) return
       agentSocket.sendControl({ t: 'resize', s: sessionId, m: { cols: term.cols, rows: term.rows } })
     }
     const ro = new ResizeObserver(resizeTo)
