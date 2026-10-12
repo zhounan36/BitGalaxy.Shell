@@ -1,0 +1,29 @@
+{
+  "name": "bitgalaxy-shell",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "BitGalaxy Shell Connector：本机 SSH 数据面 Agent（M1 直连 + 内嵌工作台，设计稿 docs/shell-design.md）",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build:node && npm run build:ui",
+    "build:node": "npm run build -w @bgshell/protocol && npm run build -w @bgshell/connector-core && npm run build -w @bgshell/transport-ws && npm run build -w @bgshell/agent",
+    "build:ui": "npm run build -w @bgshell/workbench-ui",
+    "dev:agent": "tsx watch apps/agent/src/main.ts",
+    "dev:ui": "npm run dev -w @bgshell/workbench-ui",
+    "start": "node apps/agent/dist/main.js",
+    "build:exe": "npm run build:ui && node scripts/build-exe.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.2",
+    "@types/ssh2": "^1.11.0",
+    "@types/ws": "^8.5.0",
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6",
+    "tsx": "^4.19.2",
+    "typescript": "~6.0.2"
+  }
+}

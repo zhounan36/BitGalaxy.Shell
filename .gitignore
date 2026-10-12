@@ -1,0 +1,49 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+dist-app/
+build/
+out/
+*.tsbuildinfo
+
+# 日志
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+
+# 缓存
+.npm/
+.vite/
+.eslintcache
+.stylelintcache
+*.cache/
+
+# 测试覆盖率
+coverage/
+
+# SEA 打包中间产物（dist-app 下，双保险）
+*.exe
+sea.blob
+
+# 编辑器
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# 操作系统
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/

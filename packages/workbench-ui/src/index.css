@@ -1,0 +1,18 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/* Tabs 内容区撑满终端区 */
+.bgshell-tabs,
+.bgshell-tabs .ant-tabs-content-holder,
+.bgshell-tabs .ant-tabs-content,
+.bgshell-tabs .ant-tabs-tabpane {
+  height: 100%;
+}
+
+.bgshell-tabs .ant-tabs-content {
+  background: #1e1e1e;
+}
