@@ -44,6 +44,8 @@ export function SftpPane({ sessionId }: { sessionId: string }) {
   const [path, setPath] = useState<string>()
   const [entries, setEntries] = useState<SftpEntry[]>()
   const [loading, setLoading] = useState(false)
+  const [opened, setOpened] = useState(false)
+  const [error, setError] = useState<string>()
   const [transfers, setTransfers] = useState<TransferView[]>([])
   const pendingRef = useRef(new Map<string, { resolve: (r: SftpResult) => void; timer: number }>())
   const doneWaitersRef = useRef(new Map<string, () => void>())
@@ -72,7 +74,9 @@ export function SftpPane({ sessionId }: { sessionId: string }) {
         if (r.ok && r.entries) {
           setPath(r.resolvedPath)
           setEntries(r.entries)
+          setError(undefined)
         } else if (!r.ok) {
+          setError(r.message ?? '读取目录失败')
           message.error(r.message ?? '读取目录失败')
         }
       } finally {
@@ -85,6 +89,8 @@ export function SftpPane({ sessionId }: { sessionId: string }) {
   // 订阅结果/进度/下载完成信号
   useEffect(() => {
     const off = agentSocket.onControl((frame) => {
+      if (frame.t === 'session-opened' && frame.s === sessionId) setOpened(true)
+      if (frame.t === 'error' && frame.s === sessionId) setError(frame.m.message)
       if (frame.t === 'sftp-result' && frame.s === sessionId) {
         const { m } = frame
         if (m.rid) {
@@ -110,9 +116,11 @@ export function SftpPane({ sessionId }: { sessionId: string }) {
     return off
   }, [sessionId])
 
+  // 首个 ls 等会话就绪：session-opened 在 SSH 建连（含指纹确认）并挂载 SFTP 子系统后才发出，
+  // 提前请求会被后端以"SFTP 会话未就绪"拒绝
   useEffect(() => {
-    void ls('.')
-  }, [ls])
+    if (opened) void ls('.')
+  }, [opened, ls])
 
   const join = (dir: string, name: string) => (dir.endsWith('/') ? `${dir}${name}` : `${dir}/${name}`)
   const parent = (p: string) => {
@@ -353,7 +361,11 @@ export function SftpPane({ sessionId }: { sessionId: string }) {
         loading={loading}
         pagination={false}
         locale={{
-          emptyText: loading ? <Spin /> : <Empty description={path ? '目录为空' : '未连接'} />,
+          emptyText: loading ? (
+            <Spin />
+          ) : (
+            <Empty description={error ?? (path ? '目录为空' : '连接主机中…')} />
+          ),
         }}
       />
     </div>

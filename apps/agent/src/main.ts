@@ -8,6 +8,7 @@ import { Db, SettingsStore } from '@bgshell/connector-core'
 import { runMcpStdio } from '@bgshell/transport-mcp'
 import { startAgentServer } from '@bgshell/transport-ws'
 import {
+  acquireSingleInstanceLock,
   appendLog,
   getAutoStart,
   loadSettings,
@@ -98,10 +99,18 @@ async function main(): Promise<void> {
   const dataDir = process.env.BGSH_DATA_DIR ?? resolveDataDir()
 
   // 接入面④：AI 客户端（Claude Code/Cursor 等）经 stdio 拉起的 MCP 子模式（docs/ai-design.md）
-  // 不启动 HTTP/WS 工作台，stdout 专用于 MCP 协议
+  // 不启动 HTTP/WS 工作台，stdout 专用于 MCP 协议；每个 AI 客户端一个实例是合法并发，不参与单实例锁
   if (process.argv.includes('--mcp-stdio') || process.env.BGSH_MCP === 'stdio') {
     await runMcpStdio({ dataDir, version: VERSION })
     return
+  }
+
+  // 全局单实例：任何启动途径（双击 exe / Tauri sidecar / npm dev）同时只允许一个 agent
+  const existing = acquireSingleInstanceLock(port)
+  if (existing) {
+    appendLog(dataDir, `[bgshell-agent] 已有实例运行中 (PID ${existing.pid})，本次启动退出。`)
+    if (!isSilent) openBrowser(`http://127.0.0.1:${existing.port ?? port}/`)
+    process.exit(0)
   }
 
   const uiDist = process.env.BGSH_UI_DIST ?? join(repoRoot, 'packages', 'workbench-ui', 'dist')

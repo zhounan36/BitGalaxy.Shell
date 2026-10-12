@@ -5,12 +5,20 @@ body,
   margin: 0;
 }
 
-/* Tabs 内容区撑满终端区 */
+/* Tabs 内容区撑满终端区
+   注意类名随 antd 大版本变化：
+   v5: .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane
+   v6: .ant-tabs-body-holder  > .ant-tabs-body    > .ant-tabs-content（pane 类名变了）
+   链条上任何一环 height:auto 都会让 xterm 容器被内容撑高，
+   触发 ResizeObserver ↔ fit() 死循环（终端行数无限增长）。 */
 .bgshell-tabs,
 .bgshell-tabs .ant-tabs-content-holder,
+.bgshell-tabs .ant-tabs-body-holder,
+.bgshell-tabs .ant-tabs-body,
 .bgshell-tabs .ant-tabs-content,
 .bgshell-tabs .ant-tabs-tabpane {
   height: 100%;
+  overflow: hidden;
 }
 
 .bgshell-tabs .ant-tabs-content {

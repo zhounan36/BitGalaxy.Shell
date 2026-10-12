@@ -73,6 +73,7 @@ execFileSync(process.execPath, ['--experimental-sea-config', 'sea-config.json'],
 
 // 4) 注入 node.exe 副本（先切 GUI 子系统再注入，避开注入后杀软扫描窗口期）
 console.log('[4/5] postject 注入单文件 exe ...')
+killRunningInstance(exePath)
 copyFileSync(process.execPath, exePath)
 patchSubsystemGui(exePath)
 await postject.inject(exePath, 'NODE_SEA_BLOB', readFileSync(join(outDir, 'sea.blob')), {
@@ -84,6 +85,24 @@ console.log('[5/5] 切换 PE 子系统为 GUI ... 完成')
 
 console.log(`完成: ${exePath}`)
 console.log('  双击启动（自动打开工作台）；开机自启项以 --silent 静默启动')
+
+// 结束正在运行的旧实例（双击运行/孤儿进程会锁住 exe，导致 copyFileSync EBUSY）
+function killRunningInstance(exe) {
+  if (process.platform !== 'win32') return
+  const cmd =
+    "$p=$env:BGSH_EXE; Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $p } | " +
+    "ForEach-Object { Write-Output $_.ProcessId; Stop-Process -Id $_.ProcessId -Force }"
+  try {
+    const out = execFileSync('powershell', ['-NoProfile', '-Command', cmd], {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: { ...process.env, BGSH_EXE: exe },
+    }).trim()
+    if (out) console.log(`  已结束占用旧实例: PID ${out.split(/\r?\n/).join(', ')}`)
+  } catch {
+    // 查询失败不阻塞构建（真正的占用仍由 EBUSY 重试兜底）
+  }
+}
 
 function patchSubsystemGui(exe) {
   const buf = readFileSync(exe)

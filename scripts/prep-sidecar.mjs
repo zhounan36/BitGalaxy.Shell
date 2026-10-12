@@ -30,5 +30,21 @@ function detectTriple() {
 const triple = detectTriple()
 mkdirSync(binariesDir, { recursive: true })
 const dest = join(binariesDir, `bgshell-agent-${triple}.exe`)
+// 结束正在运行的 sidecar 旧实例（Tauri 壳拉起的进程会锁住 binaries 下的 exe）
+if (process.platform === 'win32') {
+  const cmd =
+    "$p=$env:BGSH_EXE; Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $p } | " +
+    "ForEach-Object { Write-Output $_.ProcessId; Stop-Process -Id $_.ProcessId -Force }"
+  try {
+    const out = execFileSync('powershell', ['-NoProfile', '-Command', cmd], {
+      encoding: 'utf8',
+      windowsHide: true,
+      env: { ...process.env, BGSH_EXE: dest },
+    }).trim()
+    if (out) console.log(`已结束占用 sidecar 旧实例: PID ${out.split(/\r?\n/).join(', ')}`)
+  } catch {
+    // 查询失败不阻塞
+  }
+}
 copyFileSync(src, dest)
 console.log(`sidecar 就绪: ${dest} (triple: ${triple})`)
