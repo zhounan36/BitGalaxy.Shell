@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import type { SettingsStore } from '@bgshell/connector-core'
 
 export interface Settings {
   /** 手动启动（非 --silent）时是否自动打开工作台 */
@@ -27,26 +28,41 @@ export function appendLog(dataDir: string, msg: string): void {
   }
 }
 
-export async function loadSettings(dataDir: string): Promise<Settings> {
-  const file = join(dataDir, 'settings.json')
-  try {
-    return { openOnStart: true, ...(JSON.parse(readFileSync(file, 'utf8')) as Partial<Settings>) }
-  } catch {
-    return { openOnStart: true }
-  }
+export function loadSettings(store: SettingsStore): Settings {
+  return { openOnStart: store.get<boolean>('app.openOnStart') ?? true }
 }
 
-export async function saveSettings(dataDir: string, settings: Settings): Promise<void> {
-  const file = join(dataDir, 'settings.json')
-  const tmp = `${file}.tmp`
-  mkdirSync(dirname(file), { recursive: true })
-  writeFileSync(tmp, JSON.stringify(settings, null, 2), 'utf8')
-  renameSync(tmp, file)
+export function saveSettings(store: SettingsStore, settings: Settings): void {
+  store.set('app.openOnStart', settings.openOnStart)
 }
 
-/** 用系统默认浏览器打开工作台（Windows：cmd start） */
+/**
+ * 打开工作台：优先 Chromium 系 --app 模式（独立窗口，无标签栏/地址栏，接近桌面应用观感），
+ * 找不到 Edge/Chrome 再回退系统默认浏览器。
+ */
 export function openBrowser(url: string): void {
   try {
+    if (process.platform === 'win32') {
+      const pf86 = process.env['ProgramFiles(x86)'] ?? ''
+      const pf = process.env.ProgramFiles ?? ''
+      const la = process.env.LOCALAPPDATA ?? ''
+      const candidates = [
+        join(pf86, 'Microsoft/Edge/Application/msedge.exe'),
+        join(pf, 'Microsoft/Edge/Application/msedge.exe'),
+        join(pf, 'Google/Chrome/Application/chrome.exe'),
+        join(la, 'Google/Chrome/Application/chrome.exe'),
+      ].filter((p) => p.length > 2 && existsSync(p))
+      for (const exe of candidates) {
+        const child = spawn(exe, [`--app=${url}`, '--window-size=1360,860'], {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        })
+        child.on('error', () => undefined) // 启动失败尝试下一个/回退
+        child.unref()
+        return
+      }
+    }
     if (process.platform === 'win32') {
       spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
     } else if (process.platform === 'darwin') {

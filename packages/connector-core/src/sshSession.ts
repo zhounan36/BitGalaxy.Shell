@@ -24,7 +24,7 @@ export function hostKeyFingerprint(key: Buffer): string {
   return `SHA256:${createHash('sha256').update(key).digest('base64')}`
 }
 
-export type SshOpenKind = 'shell' | 'sftp' | 'metrics'
+export type SshOpenKind = 'shell' | 'sftp' | 'metrics' | 'exec'
 
 /**
  * 单条 SSH 会话：建连（含 hostVerifier TOFU/防中间人）。
@@ -114,24 +114,43 @@ export class SshSession {
     })
   }
 
-  /** 单次远程命令（metrics 采集用，超时兜底） */
-  exec(cmd: string, timeoutMs = 10_000): Promise<{ stdout: string; code: number | null }> {
+  /**
+   * 单次远程命令（metrics 采集 / MCP exec 工具共用）。
+   * 超时不抛错：携带已收输出与 timedOut 标志返回（调用方自行判定失败语义）。
+   * maxBytes：stdout/stderr 各自的采集硬顶，超限丢弃后续内容并置 truncated。
+   */
+  exec(
+    cmd: string,
+    timeoutMs = 10_000,
+    maxBytes = 2 * 1024 * 1024,
+  ): Promise<{ stdout: string; stderr: string; code: number | null; truncated: boolean; timedOut: boolean }> {
     if (!this.client) return Promise.reject(new Error('SSH 连接未建立'))
     return new Promise((resolve, reject) => {
       this.client!.exec(cmd, (err, stream) => {
-        if (err) return reject(err)
-        let stdout = ''
+        if (err) return reject(err) // 通道打开失败（非超时语义）
+        let truncated = false
+        const collect = (cur: { v: string }, d: Buffer): void => {
+          if (cur.v.length >= maxBytes) {
+            truncated = true
+            return // 丢弃超出部分（继续消费防背压，但不累积）
+          }
+          cur.v += d.toString('utf8')
+          if (cur.v.length > maxBytes) {
+            cur.v = cur.v.slice(0, maxBytes)
+            truncated = true
+          }
+        }
+        const out = { v: '' }
+        const errOut = { v: '' }
         const timer = setTimeout(() => {
           stream.close()
-          reject(new Error('远程命令执行超时'))
+          resolve({ stdout: out.v, stderr: errOut.v, code: null, truncated, timedOut: true })
         }, timeoutMs)
-        stream.on('data', (d: Buffer) => {
-          stdout += d.toString('utf8')
-        })
-        stream.stderr?.on('data', () => {})
+        stream.on('data', (d: Buffer) => collect(out, d))
+        stream.stderr?.on('data', (d: Buffer) => collect(errOut, d))
         stream.on('close', (code: number | null) => {
           clearTimeout(timer)
-          resolve({ stdout, code })
+          resolve({ stdout: out.v, stderr: errOut.v, code, truncated, timedOut: false })
         })
       })
     })

@@ -1,0 +1,23 @@
+{
+  "name": "@bgshell/pet-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "鲸鱼娘桌面宠物 UI（架构：workbench-ui 之后的第三个协议客户端宿主）：状态机驱动精灵渲染 + 台词气泡；宿主为浏览器 dev / apps/pet（Tauri 壳）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "@bgshell/protocol": "*",
+    "@tauri-apps/api": "^2",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "vite": "^8.1.1"
+  }
+}

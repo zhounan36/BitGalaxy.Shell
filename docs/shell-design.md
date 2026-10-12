@@ -7,7 +7,7 @@
 | 状态 | 待评审 |
 | 范围 | 云端 shell 模块（ProjectManager 扩展）+ 本机 Agent（Shell Connector）+ 云端 SSH 网关 + 密钥管理模块 + 前端工作台 |
 | 关联仓库 | `d:\sorce3\BitGalaxy.Shell`（Agent/协议/扩展）、`d:\source2\BitGalaxyProjectManager`（云端模块） |
-| 变更记录 | v1.2：新增离线模式与共享工作台 UI 选型——Agent 内嵌 Web 工作台（React+antd+xterm 同栈，workbench-ui 双宿主），无云环境完整可用（§1.1 / §2.2 / §3 / §5.1 / §5.4 / §7 / §10 / §11-D7）；v1.1：新增云端 SSH 网关与发起位置协商（§4.7） |
+| 变更记录 | v1.3：新增 AI 接入能力（接入面④ MCP，`packages/transport-mcp` + Agent `--mcp-stdio` 子模式），详设见 `docs/ai-design.md`；v1.2：新增离线模式与共享工作台 UI 选型——Agent 内嵌 Web 工作台（React+antd+xterm 同栈，workbench-ui 双宿主），无云环境完整可用（§1.1 / §2.2 / §3 / §5.1 / §5.4 / §7 / §10 / §11-D7）；v1.1：新增云端 SSH 网关与发起位置协商（§4.7） |
 
 ---
 
@@ -69,7 +69,7 @@ flowchart LR
 | 控制面/数据面分离 | 云端做档案、授权、审计与转发；数据面有两个发起方——本机 Agent（全地址）与云端网关（仅公网地址） |
 | 发起位置协商 | 打开会话前先探测本机 Agent：在线则本机发起（覆盖含私网在内的全部主机）；不在线则云端网关发起（自动过滤私有网段）；用户可显式指定 `local` / `cloud` |
 | 离线优先降级 | 云端不可达时自动降级：Agent 内嵌工作台 + 本地主机档案 + 本地密库，核心操作能力不依赖云端；审计本地暂存、联网补报（§5.4） |
-| 一个 Agent 核心，三种接入面 | `ws://127.0.0.1` 直连、扩展 Native Messaging、云端 SignalR 中继，传输层可插拔，核心（SSH 会话/SFTP/密钥库/审计上报）一份代码 |
+| 一个 Agent 核心，多种接入面 | `ws://127.0.0.1` 直连、扩展 Native Messaging、云端 SignalR 中继、MCP（AI 客户端，docs/ai-design.md），传输层可插拔，核心（SSH 会话/SFTP/密钥库/审计上报）一份代码 |
 | 密钥只在一处明文 | 私钥明文仅存在于握手瞬间（本机 Agent 内存，或云端网关的 `ServerManaged` 解密路径）；落盘必为 AES-256-GCM 密文 |
 | 方向恒定（Agent 侧） | Agent→云端只做出站连接（中继隧道/同步/审计），云端永不主动连入本机 |
 
@@ -84,10 +84,13 @@ d:\sorce3\BitGalaxy.Shell            # 本仓库（Agent 侧）
     transport-ws/                     # 接入面 ①：127.0.0.1 WebSocket 服务
     transport-nm/                     # 接入面 ②：Native Messaging host 入口（stdio）
     transport-relay/                  # 接入面 ③：SignalR 出站客户端
+    transport-mcp/                    # 接入面 ④：MCP server（AI 客户端工具集，docs/ai-design.md）
     protocol/                         # @bgshell/protocol：前后端共享帧/类型定义
     workbench-ui/                     # 共享工作台 UI（React+antd+xterm）：终端/SFTP/指标/密钥管理界面，双宿主部署
   apps/
-    extension/                        # MV3 浏览器扩展（Chrome/Edge 通用）
+    agent/                            # Agent 入口（数据目录 + 启动装配）
+    extension/                        # MV3 浏览器扩展（Chrome/Edge 通用，规划 M5）
+    desktop/                          # Tauri 2 桌面壳（D9）：主窗口工作台 + 托盘 + agent sidecar；宠物窗规划 P2
   docs/
 
 d:\source2\BitGalaxyProjectManager    # 云端模块（遵循既有模块惯例）
@@ -286,7 +289,7 @@ interface Transport {
 }
 ```
 
-- 三实现：`transport-ws`（监听 `127.0.0.1`，Origin 白名单=云端域名 + 一次性会话令牌）、`transport-nm`（stdio length-prefixed 帧，由扩展拉起）、`transport-relay`（SignalR 出站客户端）。
+- 传输实现：`transport-ws`（监听 `127.0.0.1`，Origin 白名单=云端域名 + 一次性会话令牌）、`transport-nm`（stdio length-prefixed 帧，由扩展拉起）、`transport-relay`（SignalR 出站客户端）、`transport-mcp`（MCP stdio，AI 客户端工具集——不经会话帧协议，直用 connector-core，见 docs/ai-design.md）。
 - 直连模式的令牌握手：页面先经云端 `POST /api/shell/session-tokens` 取短时令牌（30s），Agent 校验令牌签名与 Origin —— 防止任意网页驱动本机 Agent。
 - **内嵌工作台（离线 UI）**：transport-ws 同端口提供 HTTP 服务（`http://127.0.0.1:7777`），托管 `workbench-ui` 的静态构建；离线打开即为完整工作台（本地 `hosts.json` 主机档案 + 本地密库），在线时同一 UI 亦由云端 `@pm/shell` 托管——**一套 UI、两个宿主**。本地打开的页面与 `ws://` 同源，无混合内容问题。
 
@@ -532,6 +535,7 @@ stateDiagram-v2
 | D6 | 云端网关：允许云端直接发起 SSH（仅公网地址 + `ServerManaged` 凭据 + 私网硬过滤）；发起位置 `auto` 协商、本机优先 | 无 Agent 场景零门槛可用；地址过滤同时充当 SSRF 防护；`Gateway:Enabled` 可整体回退 |
 | D7 | Agent UI 选型：内嵌 Web 工作台（Node 静态托管，HTTP+WS 同端口 7777），`workbench-ui` 共享包双宿主（Agent 内嵌 / 云端 `@pm/shell`）；否决 Electron/Tauri | 离线可用 + 一套 UI 两个宿主 + 与 PM 前端同栈零学习成本；Electron/Tauri 交付重且与"浏览器在线工具"定位重复 |
 | D8 | 桌面打包：Node SEA 单文件 `bgshell-agent.exe`（esbuild bundle + postject + PE GUI 子系统，工作台资源内嵌）；后台运行=GUI 无黑窗，控制入口在工作台 UI（agent 控制帧：自启/启动打开/退出）；单实例互斥（端口占用→引导到现有实例） | 一键双击启动零运行时依赖；不引入 Electron 重量壳；托盘图标列为后续增强 |
+| D9 | 桌面壳升级 Tauri 2（修订 D7 的"浏览器壳"结论）：`apps/desktop` = 主窗口（工作台第三宿主）+ 系统托盘 + bgshell-agent sidecar（--silent 拉起、随壳退出）；关闭主窗=隐藏到托盘；P0 过渡方案为 Edge/Chrome `--app` 模式独立窗口。宠物窗（透明/置顶/事件气泡，规划 P2）作为 Tauri 第二窗口实现 | 用户明确要桌面程序与桌面宠物形态；Tauri 常驻内存 ~60-120MB（WebView2 共享），宠物 web 动画生态全量可用，优于 Electron（150-250MB）；Agent/工作台代码零改动复用 |
 
 ---
 

@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AgentOp, AgentResult } from '@bgshell/protocol'
+import { Db, SettingsStore } from '@bgshell/connector-core'
+import { runMcpStdio } from '@bgshell/transport-mcp'
 import { startAgentServer } from '@bgshell/transport-ws'
 import {
   appendLog,
@@ -27,29 +28,35 @@ function resolveDataDir(): string {
 }
 
 /** SEA 单文件 exe：把内嵌的工作台资源装进内存 Map（key=URL 路径）；普通 node 运行返回 undefined */
-function loadSeaStaticAssets(): Map<string, Buffer> | undefined {
-  let sea: { isSea: boolean; getAsset(key: string): ArrayBuffer } | undefined
+async function loadSeaStaticAssets(): Promise<Map<string, Buffer> | undefined> {
+  let sea: { isSea(): boolean; getAsset(key: string): ArrayBuffer } | undefined
   try {
-    // Node ≥20.12；低版本无此模块，普通运行形态
-    sea = createRequire(import.meta.url)('node:sea') as typeof sea
+    // 动态 import：esbuild CJS bundle 会转换为 require；普通 node/低版本无此模块时静默回退。
+    // 不可用 createRequire(import.meta.url)——bundle 中 import.meta 为空会直接抛错（曾导致 exe 误回退文件系统）。
+    sea = (await import('node:sea')) as unknown as typeof sea
   } catch {
     return undefined
   }
-  if (!sea?.isSea) return undefined
-  const manifest = JSON.parse(Buffer.from(sea.getAsset('ui-manifest.json')).toString('utf8')) as {
-    files: string[]
+  if (!sea?.isSea()) return undefined
+  try {
+    const manifest = JSON.parse(Buffer.from(sea.getAsset('ui-manifest.json')).toString('utf8')) as {
+      files: string[]
+    }
+    const assets = new Map<string, Buffer>()
+    for (const key of manifest.files) {
+      // 'ui/assets/index-x.js' → '/assets/index-x.js'
+      assets.set(`/${key.slice('ui/'.length)}`, Buffer.from(sea.getAsset(key)))
+    }
+    return assets
+  } catch (err) {
+    console.error('SEA 内嵌资源加载失败', err)
+    return undefined
   }
-  const assets = new Map<string, Buffer>()
-  for (const key of manifest.files) {
-    // 'ui/assets/index-x.js' → '/assets/index-x.js'
-    assets.set(`/${key.slice('ui/'.length)}`, Buffer.from(sea.getAsset(key)))
-  }
-  return assets
 }
 
 async function handleAgentControl(
   op: AgentOp,
-  ctx: { dataDir: string; settings: Settings },
+  ctx: { dataDir: string; settings: Settings; settingsStore: SettingsStore },
 ): Promise<AgentResult> {
   switch (op.op) {
     case 'get-info':
@@ -66,7 +73,7 @@ async function handleAgentControl(
     }
     case 'set-open-on-start': {
       ctx.settings.openOnStart = op.enabled
-      await saveSettings(ctx.dataDir, ctx.settings)
+      saveSettings(ctx.settingsStore, ctx.settings)
       return { op: 'set-open-on-start', ok: true, openOnStart: op.enabled }
     }
     case 'shutdown': {
@@ -89,19 +96,31 @@ async function main(): Promise<void> {
   }
   const port = Number(process.env.BGSH_PORT ?? 7777)
   const dataDir = process.env.BGSH_DATA_DIR ?? resolveDataDir()
+
+  // 接入面④：AI 客户端（Claude Code/Cursor 等）经 stdio 拉起的 MCP 子模式（docs/ai-design.md）
+  // 不启动 HTTP/WS 工作台，stdout 专用于 MCP 协议
+  if (process.argv.includes('--mcp-stdio') || process.env.BGSH_MCP === 'stdio') {
+    await runMcpStdio({ dataDir, version: VERSION })
+    return
+  }
+
   const uiDist = process.env.BGSH_UI_DIST ?? join(repoRoot, 'packages', 'workbench-ui', 'dist')
 
   await mkdir(dataDir, { recursive: true })
-  const settings = await loadSettings(dataDir)
-  const staticAssets = loadSeaStaticAssets()
+  const db = new Db(join(dataDir, 'bitgalaxy.db'))
+  db.migrateFromJson(dataDir)
+  const settingsStore = new SettingsStore(db)
+  const settings = loadSettings(settingsStore)
+  const staticAssets = await loadSeaStaticAssets()
 
   try {
     await startAgentServer({
       port,
       dataDir,
+      db,
       uiDist,
       staticAssets,
-      agentControl: (op) => handleAgentControl(op, { dataDir, settings }),
+      agentControl: (op) => handleAgentControl(op, { dataDir, settings, settingsStore }),
     })
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code
@@ -115,7 +134,9 @@ async function main(): Promise<void> {
   }
 
   appendLog(dataDir, `[bgshell-agent] v${VERSION} 工作台: http://127.0.0.1:${port}/`)
-  if (!staticAssets && !existsSync(uiDist)) {
+  if (staticAssets) {
+    appendLog(dataDir, `[bgshell-agent] SEA 内嵌工作台资源 ${staticAssets.size} 个（单文件模式）`)
+  } else if (!existsSync(uiDist)) {
     appendLog(dataDir, `[bgshell-agent] 未找到工作台静态资源（${uiDist}），请先 npm run build:ui`)
   }
   if (!isSilent && settings.openOnStart) {

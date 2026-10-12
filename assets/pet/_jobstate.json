@@ -1,0 +1,349 @@
+﻿{
+    "jobKey":  "whale-maid-pet-assets",
+    "canvasId":  "2c517347-f00a-45fe-b18c-0ef41aae6d70",
+    "canvasUrl":  "https://jimeng.jianying.com/ai-tool/ai-canvas/2c517347-f00a-45fe-b18c-0ef41aae6d70",
+    "model":  "seedream_4.5",
+    "creditsSpent":  39,
+    "sheetNodeId":  "node_jjc8bpc4gh",
+    "items":  {
+                  "sheet":  {
+                                "nodeId":  "node_jjc8bpc4gh",
+                                "resourceId":  "04ce524c-0d92-47d1-89b2-2509f099a8ed",
+                                "submitId":  "f8b5f4b6-78b7-461d-8dc7-3437aa8d5628"
+                            },
+                  "idle_breath":  {
+                                      "nodeId":  "node_bsdrta5a6m",
+                                      "resourceId":  "815d2e0d-780a-46c2-8608-e0da92be0daa"
+                                  },
+                  "idle_blink":  {
+                                     "nodeId":  "node_0rg5xj8fzc",
+                                     "resourceId":  "eaafc71e-ad29-4bd2-acb6-bb1b1abefee6",
+                                     "submitId2":  "839e49eb-3840-45f9-ae61-520a7693153d"
+                                 },
+                  "working":  {
+                                  "nodeId":  "node_r9pa8r9hgt",
+                                  "resourceId":  "934fef74-8004-42dc-a492-ddccd017f63b",
+                                  "submitId2":  "a1f31c09-ab54-4611-8a27-2de7f9256294"
+                              },
+                  "need_input":  {
+                                     "nodeId":  "node_ryz5x00k56",
+                                     "resourceId":  "946c2e1b-cd7f-4ff8-b5d7-7efd869fae83",
+                                     "submitId2":  "449aa8df-3e39-4d6b-bac0-d9c4db409da5"
+                                 },
+                  "angry":  {
+                                "nodeId":  "node_v0cpx5z9bg",
+                                "resourceId":  "5de1f856-abb0-476e-a9ee-5b4e01de50f1",
+                                "submitId2":  "077c5917-2acb-4c0f-ae93-088ee7e7004e"
+                            },
+                  "wave":  {
+                               "nodeId":  "node_r2m43x31mb",
+                               "resourceId":  "0a3a895e-e0a9-4e3e-8527-b432ace16b15",
+                               "submitId2":  "90d2511d-e520-42aa-83b6-e01219a0bf42"
+                           },
+                  "drag":  {
+                               "nodeId":  "node_tbnw9zatpd",
+                               "resourceId":  "5f3e4e6d-1cbb-43fc-beeb-82cce508f973",
+                               "submitId2":  "b5d6b4c9-45e3-4af6-9c50-5ba0d56e3c8c"
+                           },
+                  "eating":  {
+                                 "nodeId":  "node_p9fgqj94mm",
+                                 "resourceId":  "52b4ee55-1b58-498e-81a7-b7f0f2124f85",
+                                 "submitId2":  "49296f28-96d1-4192-b3e8-4f7253a3ed25"
+                             },
+                  "sleep":  {
+                                "nodeId":  "node_nzhdaxqayh",
+                                "resourceId":  "08632180-a6ee-43d6-b030-b6dd112b8fc3",
+                                "submitId2":  "9f10160e-778d-4e7c-9fb8-e15c3906ec6b"
+                            },
+                  "ready":  {
+                                "nodeId":  "node_23qj58c1av",
+                                "resourceId":  "50cdcdc9-5310-49a1-9cb9-54fe684b57cb",
+                                "submitId2":  "4b5974ac-9d3c-469b-b365-98f60bfc11b2"
+                            },
+                  "fullbody":  {
+                                   "nodeId":  "node_cmzqq4jdvm",
+                                   "resourceId":  "186c873b-d63c-4146-afa2-9b86a15c369f",
+                                   "submitId2":  "e67453ef-85ed-4853-af48-3504866820f8"
+                               },
+                  "bubble":  {
+                                 "nodeId":  "node_ycg20tq5e5",
+                                 "resourceId":  "b24ae55b-5427-469f-bff6-e87fe73a7e90",
+                                 "submitId":  "ace293ed-25ed-4cc2-8335-157802c3ef10"
+                             }
+              },
+    "note":  "11 个 i2i 状态节点的 submitId 见 _jobstate.history.backup 不适用；批量 run 的 submitId 已随 _sha256.json 同目录丢弃前记录于运行日志，节点资源已终态 success，续作直接用 resourceId 下载或 node run 新 submitId。",
+    "refBase":  {
+                    "chibiResource":  "2c2a82b9-6e8b-4728-ac85-a7ce396f98c2",
+                    "chibiNode":  "node_3hvcab4za3",
+                    "matureNode":  "node_mcs4ypn5hy",
+                    "source":  "TreapGoGo/deepseek-whale-girl (MIT)",
+                    "matureResource":  "88212297-bc07-409a-a892-234b1a8d9c54"
+                },
+    "frameFill":  {
+                      "model":  "seedream_4.5",
+                      "mode":  "i2i",
+                      "refs":  [
+                                   "node_3hvcab4za3 (官方Q版设定稿 · 身份基准)",
+                                   "\u003cstateNode\u003e (各状态帧0 · 构图基准)"
+                               ],
+                      "creditsSpent":  174,
+                      "frames":  {
+                                     "idle_breath_06":  {
+                                                            "nodeId":  "node_vh68yv584t",
+                                                            "resourceId":  "5d8fa99a-2691-4039-98aa-3f2f92e8720c",
+                                                            "submitId":  "87f1daa4-524f-480d-87f8-9179de5f81a7"
+                                                        },
+                                     "eating_02":  {
+                                                       "nodeId":  "node_9bw18xdt6t",
+                                                       "resourceId":  "fd09bfdf-e421-4bd2-8ff0-8d72126bd757",
+                                                       "submitId":  "c589229d-6b93-483f-b2b3-793edf3db382"
+                                                   },
+                                     "drag_01":  {
+                                                     "nodeId":  "node_zgkwknhxba",
+                                                     "resourceId":  "f8676b09-a8b8-4c95-be79-589f9597508b",
+                                                     "submitId":  "eb245cda-b391-4b6e-888c-be65234e3476"
+                                                 },
+                                     "need_input_01":  {
+                                                           "nodeId":  "node_b667h6g3be",
+                                                           "resourceId":  "89b73066-1e5b-49d7-a311-3613e6688433",
+                                                           "submitId":  "9e8d9d9d-535d-4160-85be-e03bd2128e6f"
+                                                       },
+                                     "sleep_04":  {
+                                                      "nodeId":  "node_z5hsqgdz51",
+                                                      "resourceId":  "456bb310-04e2-4dda-9c6c-a2748deb4933",
+                                                      "submitId":  "cfb2bb98-3a2a-4c33-9a99-69c446c9e2b4"
+                                                  },
+                                     "idle_breath_01":  {
+                                                            "nodeId":  "node_j5r58y12rj",
+                                                            "resourceId":  "4d837380-5ff0-4fa4-81db-9343e722dfcf",
+                                                            "submitId":  "923eb472-00dc-4dfb-9952-77c03fdf0181"
+                                                        },
+                                     "eating_01":  {
+                                                       "nodeId":  "node_ybgffph8mn",
+                                                       "resourceId":  "c65ffa4e-7f13-40b2-be01-283a9885c4bc",
+                                                       "submitId":  "a357d449-bc8a-4cb8-84e3-f6eeb5a45ec8"
+                                                   },
+                                     "need_input_02":  {
+                                                           "nodeId":  "node_tz2qf0cgyp",
+                                                           "resourceId":  "838eec51-899d-46c0-9845-d9bd48499582",
+                                                           "submitId":  "043e8df4-f638-419c-aa0d-881b7e7f433d"
+                                                       },
+                                     "wave_03":  {
+                                                     "nodeId":  "node_4svdf72ges",
+                                                     "resourceId":  "c66251e0-438b-40e8-94d6-3cb8e6f73a97",
+                                                     "submitId":  "636c677c-8196-42e0-91fc-6d0be715cabe"
+                                                 },
+                                     "eating_03":  {
+                                                       "nodeId":  "node_7pj46ddppz",
+                                                       "resourceId":  "8a05e41e-39f2-43be-8f81-45177d8b85c1",
+                                                       "submitId":  "ad064721-cc80-4983-b9e7-39538cd62417"
+                                                   },
+                                     "drag_02":  {
+                                                     "nodeId":  "node_gdrhkk7ppf",
+                                                     "resourceId":  "c0b88993-7d81-475f-85de-55e4e7b1b469",
+                                                     "submitId":  "bad4e749-46b0-4dca-9b28-24f790b450e5"
+                                                 },
+                                     "sleep_07":  {
+                                                      "nodeId":  "node_3b2qg00cje",
+                                                      "resourceId":  "079835c2-b934-482a-8bcc-0175e74b5827",
+                                                      "submitId":  "d0e81b4a-d23c-4657-b755-59a9b85d96db"
+                                                  },
+                                     "wave_02":  {
+                                                     "nodeId":  "node_2319f1ascc",
+                                                     "resourceId":  "f3fe701b-2c91-4927-9379-31bfb5bc38fc",
+                                                     "submitId":  "1e6e1d9a-5244-4482-b9d8-6ac94dfc8138"
+                                                 },
+                                     "idle_blink_01":  {
+                                                           "nodeId":  "node_sgc8tybk5y",
+                                                           "resourceId":  "d6a33c1e-bab0-438d-98c3-46b4ce2ca9b8",
+                                                           "submitId":  "3ef71d4b-35de-4f06-9846-4431465ebe03"
+                                                       },
+                                     "need_input_03":  {
+                                                           "nodeId":  "node_fagzfm98sx",
+                                                           "resourceId":  "1131e86f-7728-420b-b9ce-0473da6909a2",
+                                                           "submitId":  "f1fbc5e2-1ddd-4011-bb6d-42b1e761f292"
+                                                       },
+                                     "eating_04":  {
+                                                       "nodeId":  "node_mke5fnsc1c",
+                                                       "resourceId":  "d403100e-d9eb-44e6-b652-1c0667e7a860",
+                                                       "submitId":  "01a86e24-5af1-462b-9ac8-d4147a7745a0"
+                                                   },
+                                     "idle_breath_04":  {
+                                                            "nodeId":  "node_9bptv226gp",
+                                                            "resourceId":  "80fa9849-a681-4161-b9c6-31f08e5a4f15",
+                                                            "submitId":  "eda47e6c-dceb-472f-9c71-f262d29de45b"
+                                                        },
+                                     "angry_03":  {
+                                                      "nodeId":  "node_9ztxyt7b9m",
+                                                      "resourceId":  "b5ec4a41-34bc-4a0e-9435-191a7096c897",
+                                                      "submitId":  "a0b3c8cf-c599-4fda-be4d-edfbb78f1171"
+                                                  },
+                                     "sleep_06":  {
+                                                      "nodeId":  "node_hy9sykwwx1",
+                                                      "resourceId":  "44db95c4-ae7b-4e48-a4d9-6267cca4d2fb",
+                                                      "submitId":  "3cd3e167-f96a-4984-b309-025a2b37a61e"
+                                                  },
+                                     "idle_breath_05":  {
+                                                            "nodeId":  "node_409njjjyct",
+                                                            "resourceId":  "974fa338-04df-4e51-a570-28b79e307480",
+                                                            "submitId":  "8855f97b-2dbd-494b-9bff-6dd910fbd703"
+                                                        },
+                                     "working_06":  {
+                                                        "nodeId":  "node_wqqpb3gcar",
+                                                        "resourceId":  "38d73507-02ab-455d-b6d6-c35a4134460a",
+                                                        "submitId":  "cc5a4336-5639-4467-ac31-bb09a66b0fd7"
+                                                    },
+                                     "angry_02":  {
+                                                      "nodeId":  "node_k4z69b0mra",
+                                                      "resourceId":  "7609167f-20c2-44e9-b18a-6e4eaa39398a",
+                                                      "submitId":  "a104be96-a416-497f-bcbb-2aafe7b27e84"
+                                                  },
+                                     "wave_01":  {
+                                                     "nodeId":  "node_dy72rqnqqy",
+                                                     "resourceId":  "283e621d-8b97-4491-8645-f6ab995d09d4",
+                                                     "submitId":  "9372fc6e-2e72-4618-aa5b-e78043cce1ca"
+                                                 },
+                                     "angry_05":  {
+                                                      "nodeId":  "node_sbejbemvje",
+                                                      "resourceId":  "07d68ada-de47-4c23-9c1f-5aee03aa8dc3",
+                                                      "submitId":  "ba80b520-548d-4cb1-885f-7a2aa9f5a518"
+                                                  },
+                                     "ready_02":  {
+                                                      "nodeId":  "node_xkg0efee0f",
+                                                      "resourceId":  "cb892781-4d8e-4266-9a7d-e25fe968a81c",
+                                                      "submitId":  "3b71e144-c280-40f8-87ca-a02848c43d38"
+                                                  },
+                                     "drag_04":  {
+                                                     "nodeId":  "node_9rw2x1ff4c",
+                                                     "resourceId":  "2df24d5d-5360-42ed-aa6c-dc42f8b4f6b0",
+                                                     "submitId":  "1b668c83-93dc-408c-bb0c-66afa84abc7d"
+                                                 },
+                                     "working_01":  {
+                                                        "nodeId":  "node_htjk9msg6c",
+                                                        "resourceId":  "2e45e4f9-8784-4e00-a242-9270fc74abaa",
+                                                        "submitId":  "4c4f6573-3ce9-434c-b82f-101aedcc40d1"
+                                                    },
+                                     "drag_03":  {
+                                                     "nodeId":  "node_je8x1d2yg3",
+                                                     "resourceId":  "60004b14-4f58-4837-9c21-85098683267e",
+                                                     "submitId":  "edf21e11-8374-455f-aedf-d74653c57960"
+                                                 },
+                                     "wave_04":  {
+                                                     "nodeId":  "node_p85pxb6dn1",
+                                                     "resourceId":  "27c66add-f54d-44bf-885c-9f0f969a1f30",
+                                                     "submitId":  "98144de8-71b6-4292-ba8a-c4ee78eae2c7"
+                                                 },
+                                     "working_02":  {
+                                                        "nodeId":  "node_vkmceny034",
+                                                        "resourceId":  "d75aa9fd-3a39-4b3c-8ddb-8cf9b89192f3",
+                                                        "submitId":  "3fdc90f8-760b-472a-a994-93ab6c03d9f2"
+                                                    },
+                                     "drag_05":  {
+                                                     "nodeId":  "node_dm0vx0mmga",
+                                                     "resourceId":  "7b488e47-fb75-49c0-b3cb-999fe101796b",
+                                                     "submitId":  "f7b39e5f-0534-4f24-afa6-b3f5b4af7e42"
+                                                 },
+                                     "ready_03":  {
+                                                      "nodeId":  "node_nm220tdsmd",
+                                                      "resourceId":  "83983cef-b99c-4219-84b8-f1624b44cb19",
+                                                      "submitId":  "ee0761df-02d7-4587-a1eb-65deb36b50c5"
+                                                  },
+                                     "idle_breath_02":  {
+                                                            "nodeId":  "node_dbyv1syz6e",
+                                                            "resourceId":  "896776b4-8fb9-49f9-b663-c8768a9eaa0a",
+                                                            "submitId":  "58f20f1e-db53-4529-84d5-93ed82ae1e99"
+                                                        },
+                                     "working_07":  {
+                                                        "nodeId":  "node_x8jtg5362c",
+                                                        "resourceId":  "e04b9cf8-633f-4624-adff-0f07741db83b",
+                                                        "submitId":  "b7214756-2b1d-4dc5-b94a-3855c5e37b10"
+                                                    },
+                                     "working_04":  {
+                                                        "nodeId":  "node_c3a31nav4z",
+                                                        "resourceId":  "5dc7f67a-c393-4ba5-a4ac-b8ab3ad0b8fc",
+                                                        "submitId":  "6b989b6b-8ef6-4b34-a99a-d109e26e3482"
+                                                    },
+                                     "idle_breath_03":  {
+                                                            "nodeId":  "node_tvcyx04jy8",
+                                                            "resourceId":  "01141356-f43f-454b-8aa6-8fb8c6f5af53",
+                                                            "submitId":  "bdee8848-c35f-4841-9295-0cb1d5d1859d"
+                                                        },
+                                     "sleep_01":  {
+                                                      "nodeId":  "node_y4m831p7yg",
+                                                      "resourceId":  "922fa037-9f78-4d83-8ff3-c4cf3a1ddf7b",
+                                                      "submitId":  "f6e924b0-681c-4f12-9a75-fcb6c184fd98"
+                                                  },
+                                     "eating_06":  {
+                                                       "nodeId":  "node_jz00hy5s11",
+                                                       "resourceId":  "a423f814-78a6-420b-9516-6dc2cc67dcdf",
+                                                       "submitId":  "62ba0c00-d9fe-4845-b752-18e900e6010a"
+                                                   },
+                                     "idle_blink_02":  {
+                                                           "nodeId":  "node_1r5n75g0rv",
+                                                           "resourceId":  "edaa6481-e58a-4211-8fae-77e69de12d54",
+                                                           "submitId":  "9b6f2e26-5b3c-426c-b4fc-10551d497c46"
+                                                       },
+                                     "sleep_02":  {
+                                                      "nodeId":  "node_qehrd7fzhc",
+                                                      "resourceId":  "5ecb7ec8-f0d4-47bf-8fe6-499835f15314",
+                                                      "submitId":  "f939bfa2-4956-4e4b-9004-95e2712d4d54"
+                                                  },
+                                     "working_05":  {
+                                                        "nodeId":  "node_kb6m5mr6yq",
+                                                        "resourceId":  "b40a81f2-75a5-4194-86d6-d1c41eeee337",
+                                                        "submitId":  "2937116e-ba43-4b51-8a6b-ee373fa91111"
+                                                    },
+                                     "angry_01":  {
+                                                      "nodeId":  "node_grcd0trjvm",
+                                                      "resourceId":  "dcd91163-7525-4ecc-85ec-176e55a29b8c",
+                                                      "submitId":  "58686d62-2d1f-4df4-b1c6-732432ab87a4"
+                                                  },
+                                     "sleep_05":  {
+                                                      "nodeId":  "node_nmedxck1nc",
+                                                      "resourceId":  "976001de-8846-420d-8254-26f274143bc8",
+                                                      "submitId":  "6ac8c101-f0ae-40fa-bbe3-3200416520bc"
+                                                  },
+                                     "eating_07":  {
+                                                       "nodeId":  "node_49he715yvb",
+                                                       "resourceId":  "0d476f34-d97f-465e-a1a5-dbcb3c552d4b",
+                                                       "submitId":  "aef35ac0-8d82-43d9-b5eb-078a8fb9883a"
+                                                   },
+                                     "angry_04":  {
+                                                      "nodeId":  "node_4sck0asgd4",
+                                                      "resourceId":  "6f916b32-ec23-4359-a9af-d109ab5c9ea6",
+                                                      "submitId":  "1a506648-17af-423e-9d66-d8d6a6045aab"
+                                                  },
+                                     "ready_01":  {
+                                                      "nodeId":  "node_t1sttcxp15",
+                                                      "resourceId":  "1d027f6e-dacc-411b-be52-f494f2abdaf7",
+                                                      "submitId":  "dbae24b1-9bfa-422f-ace8-e32e0f1f2027"
+                                                  },
+                                     "wave_05":  {
+                                                     "nodeId":  "node_rfqkrf5ah7",
+                                                     "resourceId":  "d3e411a4-1b43-4066-99bc-81276f9b8975",
+                                                     "submitId":  "4b3ee88d-0d75-49c8-9e05-1f307a4d11ae"
+                                                 },
+                                     "sleep_03":  {
+                                                      "nodeId":  "node_wf3nvcyzen",
+                                                      "resourceId":  "54a043bb-5c71-40c9-b2bc-c54268ec80fb",
+                                                      "submitId":  "81503830-4b12-456a-81f3-cc47fb6150bd"
+                                                  },
+                                     "idle_breath_07":  {
+                                                            "nodeId":  "node_1msvnmm0pw",
+                                                            "resourceId":  "6611b01e-20d4-4a5c-8297-3b917b4ac46b",
+                                                            "submitId":  "de46ca9c-2342-41d0-b8fa-5d780ff5dac5"
+                                                        },
+                                     "working_03":  {
+                                                        "nodeId":  "node_8hr8484xdy",
+                                                        "resourceId":  "d4cad200-5e2b-4a67-9596-00fdd9972a8c",
+                                                        "submitId":  "4d06bcc1-ee55-4a20-90ea-623c4b39f8c7"
+                                                    },
+                                     "eating_05":  {
+                                                       "nodeId":  "node_ygc43xxsn1",
+                                                       "resourceId":  "dc273535-91ba-4b39-a3a6-d9dc3188d960",
+                                                       "submitId":  "ded72b07-0844-4b36-a0b7-f0166f361ea3"
+                                                   }
+                                 },
+                      "note":  "51 帧补帧 + 6 帧问题帧重生成（idle_breath_02 重试 2 次、eating_04 重试 3 次）；submitId 为每帧最后一次成功运行；本地管线：raw/ 2K 白底 → 洪泛抠图+去孤岛+边缘羽化 → 状态联合取景框 → 512/@2x 透明 PNG"
+                  }
+}

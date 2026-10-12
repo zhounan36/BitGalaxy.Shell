@@ -10,6 +10,7 @@
   "dependencies": {
     "@bgshell/connector-core": "*",
     "@bgshell/protocol": "*",
+    "@bgshell/transport-mcp": "*",
     "@bgshell/transport-ws": "*"
   }
 }

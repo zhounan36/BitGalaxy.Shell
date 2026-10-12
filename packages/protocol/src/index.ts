@@ -128,6 +128,37 @@ export interface AgentResult {
   message?: string
 }
 
+// ── AI 助手（桌宠对话：LLM 工具循环在 Agent 侧执行，工具集见 transport-ws/src/ai.ts）──
+
+export type AiStage = 'thinking' | 'tool' | 'awaiting-approval'
+
+/** AI 请求用户批准的命令执行（桌宠弹卡片，批准后 Agent 继续工具循环） */
+export interface AiApprovalRequest {
+  chatId: string
+  reqId: string
+  host: string
+  command: string
+}
+
+export type AiOp =
+  | { op: 'chat'; chatId: string; text: string }
+  | { op: 'reset'; chatId: string }
+
+// ── 设置（SQLite 键值存储，统一配置读写）──────────────────────────────────
+
+export type SettingsOp =
+  | { op: 'list' }
+  | { op: 'get'; key: string }
+  | { op: 'set'; key: string; value: unknown }
+  | { op: 'delete'; key: string }
+
+export interface SettingsResult {
+  ok: boolean
+  items?: Record<string, unknown>
+  value?: unknown
+  message?: string
+}
+
 // ── 控制帧：客户端 → Agent（WS 文本帧，JSON）──────────────────────────────
 
 export type HostOp =
@@ -156,6 +187,9 @@ export type ClientFrame =
   | { t: 'metrics'; s: string; m: { intervalSec: number } } // 0 = 暂停采集
   | { t: 'probe'; m: { hostId: string } }
   | { t: 'agent'; m: AgentOp }
+  | { t: 'ai'; m: AiOp }
+  | { t: 'ai-approve'; m: { chatId: string; reqId: string; approved: boolean } }
+  | { t: 'settings'; m: SettingsOp }
 
 // ── 控制帧：Agent → 客户端 ───────────────────────────────────────────────
 
@@ -176,6 +210,11 @@ export type ServerFrame =
   | { t: 'metrics-data'; s: string; m: MetricsSample }
   | { t: 'probe-result'; m: { hostId: string; ok: boolean; ms?: number; message?: string } }
   | { t: 'agent-result'; m: AgentResult }
+  | { t: 'ai-status'; m: { chatId: string; stage: AiStage; detail?: string } }
+  | { t: 'ai-delta'; m: { chatId: string; delta: string } }
+  | { t: 'ai-result'; m: { chatId: string; ok: boolean; text: string; message?: string } }
+  | { t: 'ai-approval'; m: AiApprovalRequest }
+  | { t: 'settings-result'; m: SettingsResult }
   | { t: 'error'; s?: string; m: { code: string; message: string } }
 
 // ── 数据帧（WS 二进制帧）────────────────────────────────────────────────
