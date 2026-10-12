@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Alert, Card, Col, Progress, Row, Spin, Statistic, Table, Tag } from 'antd'
+import { Alert, Card, Col, Progress, Row, Skeleton, Statistic, Table, Tag } from 'antd'
 import type { MetricsSample } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
 import { formatBytes, formatUptime } from '../utils/format'
@@ -26,9 +26,48 @@ export function MetricsPane({ sessionId }: { sessionId: string }) {
   }, [sessionId])
 
   if (!sample) {
+    if (error) {
+      return (
+        <div
+          style={{
+            height: '100%',
+            background: 'var(--bg-deep)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <Alert type="error" showIcon message={error} />
+        </div>
+      )
+    }
+    // 首采骨架屏：镜像真实布局（4 统计卡 + 内存/磁盘 + Top 进程）
     return (
-      <div style={{ height: '100%', background: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        {error ? <Alert type="error" showIcon message={error} /> : <Spin tip="连接主机并采集中..." />}
+      <div style={{ height: '100%', overflow: 'auto', background: 'var(--bg-deep)', padding: 12 }}>
+        <Row gutter={[8, 8]}>
+          {[0, 1, 2, 3].map((i) => (
+            <Col span={6} key={i}>
+              <Card size="small">
+                <Skeleton active title paragraph={{ rows: 1 }} />
+              </Card>
+            </Col>
+          ))}
+        </Row>
+        <Row gutter={[8, 8]} style={{ marginTop: 8 }}>
+          <Col span={12}>
+            <Card size="small">
+              <Skeleton active title paragraph={{ rows: 3 }} />
+            </Card>
+          </Col>
+          <Col span={12}>
+            <Card size="small">
+              <Skeleton active title paragraph={{ rows: 3 }} />
+            </Card>
+          </Col>
+        </Row>
+        <Card size="small" title="Top 进程（CPU）" style={{ marginTop: 8 }}>
+          <Skeleton active paragraph={{ rows: 5 }} />
+        </Card>
       </div>
     )
   }
@@ -36,7 +75,7 @@ export function MetricsPane({ sessionId }: { sessionId: string }) {
   const memPct = sample.memTotalB > 0 ? Math.floor((sample.memUsedB / sample.memTotalB) * 100) : 0
 
   return (
-    <div style={{ height: '100%', overflow: 'auto', background: '#f5f5f5', padding: 12 }}>
+    <div style={{ height: '100%', overflow: 'auto', background: 'var(--bg-deep)', padding: 12 }}>
       {error && <Alert type="warning" showIcon message={error} style={{ marginBottom: 8 }} />}
       <Row gutter={[8, 8]}>
         <Col span={6}>
@@ -80,7 +119,7 @@ export function MetricsPane({ sessionId }: { sessionId: string }) {
             {sample.disks.length === 0 && '（无数据）'}
             {sample.disks.map((d) => (
               <div key={`${d.source}:${d.target}`} style={{ marginBottom: 4 }}>
-                <span style={{ fontSize: 12, color: '#666' }}>{d.target}</span>
+                <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{d.target}</span>
                 <Progress
                   size="small"
                   percent={d.usedPct}
@@ -107,7 +146,7 @@ export function MetricsPane({ sessionId }: { sessionId: string }) {
           ]}
         />
       </Card>
-      <div style={{ color: '#999', fontSize: 12, marginTop: 8, textAlign: 'right' }}>
+      <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 8, textAlign: 'right' }}>
         采样时间：{new Date(sample.ts).toLocaleTimeString()}（10s 自动刷新）
       </div>
     </div>

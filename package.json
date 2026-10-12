@@ -20,7 +20,7 @@
     "build:exe": "npm run build:ui && node scripts/build-exe.mjs",
     "pet:prep": "npm run build:pet && node scripts/prep-pet.mjs",
     "desktop:prep": "node scripts/prep-sidecar.mjs",
-    "desktop:dev": "npm run build:exe && npm run desktop:prep && npm run pet:prep && npm run dev -w @bgshell/desktop",
+    "desktop:dev": "npm run build:exe && npm run desktop:prep && npm run pet:prep && start \"bgshell-pet-dev\" /min npm run dev:pet && npm run dev -w @bgshell/desktop",
     "desktop:build": "npm run build:exe && npm run desktop:prep && npm run pet:prep && npm run build -w @bgshell/desktop"
   },
   "devDependencies": {

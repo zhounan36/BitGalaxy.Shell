@@ -26,8 +26,13 @@ export class AgentSocket {
   connect(): Promise<void> {
     if (this.ready) return Promise.resolve()
     return new Promise((resolve, reject) => {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-      const ws = new WebSocket(`${proto}://${location.host}/ws`)
+      // Tauri 壳宿主（tauri.localhost）与 Agent 不同源：直连本机 Agent 端口；
+      // dev（vite）与浏览器宿主（Agent 内嵌工作台）保持同源。
+      const wsUrl =
+        location.hostname === 'tauri.localhost' || location.protocol === 'tauri:'
+          ? 'ws://127.0.0.1:7777/ws'
+          : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
+      const ws = new WebSocket(wsUrl)
       ws.binaryType = 'arraybuffer'
       ws.onopen = () => {
         this.ws = ws

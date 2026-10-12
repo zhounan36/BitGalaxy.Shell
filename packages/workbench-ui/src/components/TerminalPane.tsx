@@ -12,8 +12,8 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
     const term = new Terminal({
       fontSize: 13,
       cursorBlink: true,
-      fontFamily: 'Consolas, "Courier New", monospace',
-      theme: { background: '#1e1e1e' },
+      fontFamily: '"Cascadia Mono", "JetBrains Mono", "SF Mono", Consolas, "Courier New", monospace',
+      theme: { background: '#081018' },
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -49,5 +49,5 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
     }
   }, [sessionId])
 
-  return <div ref={holderRef} style={{ height: '100%', padding: 8 }} />
+  return <div ref={holderRef} className="terminal-holder" />
 }

@@ -14,6 +14,10 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const [aiKey, setAiKey] = useState('')
   const [aiBaseUrl, setAiBaseUrl] = useState('')
   const [aiModel, setAiModel] = useState('')
+  // AI 配置内联校验错误
+  const [aiKeyErr, setAiKeyErr] = useState<string>()
+  const [aiBaseUrlErr, setAiBaseUrlErr] = useState<string>()
+  const [aiModelErr, setAiModelErr] = useState<string>()
 
   // 打开时加载全部设置 + Agent 信息
   useEffect(() => {
@@ -45,11 +49,36 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
     setItems((prev) => ({ ...prev, 'app.openOnStart': enabled }))
   }
 
-  // AI 配置保存
+  // AI 配置保存：先做内联校验，通过才提交
   const saveAi = () => {
-    agentSocket.sendControl({ t: 'settings', m: { op: 'set', key: 'ai.apiKey', value: aiKey } })
-    agentSocket.sendControl({ t: 'settings', m: { op: 'set', key: 'ai.baseUrl', value: aiBaseUrl } })
-    agentSocket.sendControl({ t: 'settings', m: { op: 'set', key: 'ai.model', value: aiModel } })
+    const key = aiKey.trim()
+    const base = aiBaseUrl.trim()
+    const model = aiModel.trim()
+
+    let ok = true
+    if (key && /\s/.test(key)) {
+      setAiKeyErr('API Key 不应包含空格')
+      ok = false
+    } else {
+      setAiKeyErr(undefined)
+    }
+    if (base && !/^https?:\/\/\S+$/i.test(base)) {
+      setAiBaseUrlErr('请输入合法 URL，如 https://api.deepseek.com')
+      ok = false
+    } else {
+      setAiBaseUrlErr(undefined)
+    }
+    if (model && /\s/.test(model)) {
+      setAiModelErr('模型名不应包含空格')
+      ok = false
+    } else {
+      setAiModelErr(undefined)
+    }
+    if (!ok) return
+
+    agentSocket.sendControl({ t: 'settings', m: { op: 'set', key: 'ai.apiKey', value: key } })
+    agentSocket.sendControl({ t: 'settings', m: { op: 'set', key: 'ai.baseUrl', value: base } })
+    agentSocket.sendControl({ t: 'settings', m: { op: 'set', key: 'ai.model', value: model } })
     message.success('AI 配置已保存')
   }
 
@@ -116,32 +145,47 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
             children: (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '8px 0' }}>
                 <div>
-                  <div style={{ marginBottom: 4, fontSize: 13, color: '#666' }}>API Key</div>
+                  <div style={{ marginBottom: 4, fontSize: 13, color: 'var(--text-secondary)' }}>API Key</div>
                   <Input.Password
                     value={aiKey}
-                    onChange={(e) => setAiKey(e.target.value)}
+                    onChange={(e) => {
+                      setAiKey(e.target.value)
+                      setAiKeyErr(undefined)
+                    }}
+                    status={aiKeyErr ? 'error' : undefined}
                     placeholder="sk-..."
                   />
+                  {aiKeyErr && <div className="field-error">{aiKeyErr}</div>}
                 </div>
                 <div>
-                  <div style={{ marginBottom: 4, fontSize: 13, color: '#666' }}>
+                  <div style={{ marginBottom: 4, fontSize: 13, color: 'var(--text-secondary)' }}>
                     Base URL（默认 https://api.deepseek.com）
                   </div>
                   <Input
                     value={aiBaseUrl}
-                    onChange={(e) => setAiBaseUrl(e.target.value)}
+                    onChange={(e) => {
+                      setAiBaseUrl(e.target.value)
+                      setAiBaseUrlErr(undefined)
+                    }}
+                    status={aiBaseUrlErr ? 'error' : undefined}
                     placeholder="https://api.deepseek.com"
                   />
+                  {aiBaseUrlErr && <div className="field-error">{aiBaseUrlErr}</div>}
                 </div>
                 <div>
-                  <div style={{ marginBottom: 4, fontSize: 13, color: '#666' }}>
+                  <div style={{ marginBottom: 4, fontSize: 13, color: 'var(--text-secondary)' }}>
                     模型（默认 deepseek-chat）
                   </div>
                   <Input
                     value={aiModel}
-                    onChange={(e) => setAiModel(e.target.value)}
+                    onChange={(e) => {
+                      setAiModel(e.target.value)
+                      setAiModelErr(undefined)
+                    }}
+                    status={aiModelErr ? 'error' : undefined}
                     placeholder="deepseek-chat"
                   />
+                  {aiModelErr && <div className="field-error">{aiModelErr}</div>}
                 </div>
                 <Button type="primary" onClick={saveAi}>
                   保存 AI 配置
@@ -160,15 +204,15 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: '8px 0' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span>版本</span>
-                  <span style={{ color: '#999' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>
                     Agent v{agentInfo?.version ?? '—'}
                   </span>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span>存储</span>
-                  <span style={{ color: '#999' }}>SQLite（bitgalaxy.db）</span>
+                  <span style={{ color: 'var(--text-muted)' }}>SQLite（bitgalaxy.db）</span>
                 </div>
-                <div style={{ fontSize: 12, color: '#bbb', marginTop: 8 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
                   全部配置（主机档案 / 已知指纹 / 应用设置 / 审计日志）统一保存在 SQLite 数据库中。
                   首次启动时自动从旧 JSON 文件迁移数据。
                 </div>
