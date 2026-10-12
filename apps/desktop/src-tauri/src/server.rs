@@ -58,6 +58,9 @@ pub async fn start_server(
         let agent_ctl = agent_ctl.clone();
         let allowed = allowed.clone();
         tokio::spawn(async move {
+            if cfg!(debug_assertions) {
+                eprintln!("[bgshell][debug] WS 接入新连接");
+            }
             handle_conn(stream, stores, agent_ctl, allowed).await;
         });
     }
@@ -81,10 +84,15 @@ async fn handle_conn(
             if allowed_ref.iter().any(|a| a == origin) {
                 Ok(resp)
             } else {
-                Response::builder()
-                    .status(403)
-                    .body(Some("origin denied".into()))
-                    .map_err(|_| ())
+                // 注意：Response 别名 body 为 ()；错误响应需要显式 ErrorResponse（body 为 Option<String>）
+                let denied: tokio_tungstenite::tungstenite::http::Response<Option<String>> =
+                    tokio_tungstenite::tungstenite::http::Response::builder()
+                        .status(403)
+                        .body(Some("origin denied".to_string()))
+                        .unwrap_or_else(|_| {
+                            tokio_tungstenite::tungstenite::http::Response::new(Some(String::new()))
+                        });
+                Err(denied)
             }
         };
         match tokio_tungstenite::accept_hdr_async(stream, cb).await {

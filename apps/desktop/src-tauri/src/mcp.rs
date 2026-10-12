@@ -293,8 +293,8 @@ async fn run_stdio_async(data_dir: &Path) {
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
     loop {
-        let line = match lines.next().await {
-            Some(Ok(l)) => l,
+        let line = match lines.next_line().await {
+            Ok(Some(l)) => l,
             _ => break,
         };
         if line.trim().is_empty() {
@@ -437,7 +437,7 @@ async fn elicit_approval(state: &mut McpState, message: &str) -> Result<bool, To
 }
 
 /// 写操作统一闸门：write.enabled → defaultAction
-async fn guard_write(state: &mut McpState, host_id: &str, describe: &str) -> Result<(), ToolError> {
+async fn guard_write(state: &mut McpState, _host_id: &str, describe: &str) -> Result<(), ToolError> {
     if !state.policy.write.enabled {
         return Err(ToolError::new(
             ERR_DISABLED,
@@ -661,7 +661,7 @@ async fn run_list_dir(
     _detail: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, ToolError> {
     let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default();
-    let path = args.get("path").and_then(|v| v.as_str").unwrap_or(".");
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     let ctrl = state.pool.acquire_sftp_ctrl(host_id).await?;
     let (resolved, entries) = ctrl
         .ls(path)
@@ -679,7 +679,7 @@ async fn run_read_file(
     _detail: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, ToolError> {
     let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default();
-    let path = args.get("path").and_then(|v| v.as_str").unwrap_or_default();
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or_default();
     let requested = args.get("maxBytes").and_then(|v| v.as_u64()).unwrap_or(0);
     let max_bytes = requested.clamp(1, state.policy.limits.max_read_file_bytes as u64) as usize;
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -689,7 +689,7 @@ async fn run_read_file(
         .metadata(path)
         .await
         .map_err(|e| ToolError::new(ERR_SFTP_FAILED, format!("路径 {path}: {e}")))?;
-    let size = meta.size().unwrap_or(0);
+    let size = meta.size.unwrap_or(0);
     if size == 0 {
         return Ok(serde_json::json!({ "path": path, "offset": offset, "content": "", "sizeB": 0, "truncated": false }));
     }
@@ -732,8 +732,8 @@ async fn run_exec_command(
     args: &serde_json::Value,
     detail: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, ToolError> {
-    let host_id = args.get("hostId").and_then(|v| v.as_str").unwrap_or_default();
-    let command = args.get("command").and_then(|v| v.as_str").unwrap_or_default().to_string();
+    let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default();
+    let command = args.get("command").and_then(|v| v.as_str()).unwrap_or_default().to_string();
     detail.insert("command".into(), serde_json::json!(command));
 
     if !state.policy.exec.enabled {
@@ -784,10 +784,10 @@ async fn run_write_file(
     args: &serde_json::Value,
     detail: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, ToolError> {
-    let host_id = args.get("hostId").and_then(|v| v.as_str").unwrap_or_default();
-    let path = args.get("path").and_then(|v| v.as_str").unwrap_or_default();
-    let content = args.get("content").and_then(|v| v.as_str").unwrap_or_default();
-    let mode = args.get("mode").and_then(|v| v.as_str").unwrap_or("overwrite").to_string();
+    let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default();
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or_default();
+    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("overwrite").to_string();
     detail.insert("path".into(), serde_json::json!(path));
     detail.insert("mode".into(), serde_json::json!(mode));
 
@@ -830,8 +830,8 @@ async fn run_make_dir(
     args: &serde_json::Value,
     detail: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, ToolError> {
-    let host_id = args.get("hostId").and_then(|v| v.as_str").unwrap_or_default();
-    let path = args.get("path").and_then(|v| v.as_str").unwrap_or_default();
+    let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default();
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or_default();
     detail.insert("path".into(), serde_json::json!(path));
     let describe = format!("主机 {}\n新建目录: {path}", host_label_of(&state.stores, host_id));
     guard_write(state, host_id, &describe).await?;
@@ -847,9 +847,9 @@ async fn run_rename_path(
     args: &serde_json::Value,
     detail: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, ToolError> {
-    let host_id = args.get("hostId").and_then(|v| v.as_str").unwrap_or_default();
-    let from = args.get("from").and_then(|v| v.as_str").unwrap_or_default();
-    let to = args.get("to").and_then(|v| v.as_str").unwrap_or_default();
+    let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default();
+    let from = args.get("from").and_then(|v| v.as_str()).unwrap_or_default();
+    let to = args.get("to").and_then(|v| v.as_str()).unwrap_or_default();
     detail.insert("from".into(), serde_json::json!(from));
     detail.insert("to".into(), serde_json::json!(to));
     let describe = format!("主机 {}\n{from} → {to}", host_label_of(&state.stores, host_id));
@@ -866,8 +866,8 @@ async fn run_delete_path(
     args: &serde_json::Value,
     detail: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Value, ToolError> {
-    let host_id = args.get("hostId").and_then(|v| v.as_str").unwrap_or_default();
-    let path = args.get("path").and_then(|v| v.as_str").unwrap_or_default();
+    let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default();
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or_default();
     let recursive = args.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
     detail.insert("path".into(), serde_json::json!(path));
     detail.insert("recursive".into(), serde_json::json!(recursive));

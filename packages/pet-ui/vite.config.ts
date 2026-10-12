@@ -8,6 +8,8 @@ export default defineConfig({
   base: '/pet/',
   server: {
     port: 5178,
+    // 固定 IPv4 回环：Tauri 壳探测 dev server（127.0.0.1），避免 Node 把 localhost 解析到 ::1
+    host: '127.0.0.1',
     // 开发模式：/ws 代理到本机 Agent（transport-ws 已放行 5178 来源）
     proxy: {
       '/ws': { target: 'http://127.0.0.1:7777', ws: true },

@@ -45,7 +45,9 @@ export function App() {
   const onDragStart = () => {
     dispatch({ type: 'drag-start' })
     if (isTauri) {
-      void startWindowDrag()
+      // 原生拖窗接管指针后 webview 收不到 pointerup：
+      // startDragging 为模态调用，settle（松手/失败）即补发 drag-end
+      void startWindowDrag().finally(() => dispatch({ type: 'drag-end' }))
       return
     }
     const rect = anchorRef.current?.getBoundingClientRect()

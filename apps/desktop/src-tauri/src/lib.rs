@@ -195,6 +195,31 @@ fn make_agent_ctl(app: tauri::AppHandle, stores: Stores, data_dir: PathBuf) -> s
     })
 }
 
+/// dev server 探测：IPv4/IPv6 双栈 + HTTP 层验证（TCP 通且有 HTTP 响应才算就绪；
+/// vite 关闭或仅剩半死连接时回退随包资产，避免窗口锁定已死的 devUrl）
+fn dev_server_ready(port: u16) -> bool {
+    use std::io::{Read, Write};
+    use std::time::Duration;
+    let addrs = [
+        std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        std::net::SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)),
+    ];
+    for addr in addrs {
+        let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(400)) else {
+            continue;
+        };
+        let req = format!("GET / HTTP/1.0\r\nHost: localhost:{port}\r\n\r\n");
+        if stream.write_all(req.as_bytes()).is_err() {
+            continue;
+        }
+        let mut buf = [0u8; 16];
+        if matches!(stream.read(&mut buf), Ok(n) if n > 0) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn run() {
     let silent = std::env::args().any(|a| a == "--silent");
     let app = tauri::Builder::default()
@@ -210,6 +235,8 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             Some(vec!["--silent"]),
         ))
+        // 终端复制/粘贴：原生剪贴板读写（经 plugin:clipboard-manager IPC）
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             show_main_window,
             stat_file,
@@ -269,12 +296,34 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // ── 工作台主窗 ─────────────────────────────────────────────
+            // dev：vite dev server 可达（tauri dev / npm run dev:ui）→ 加载 devUrl；
+            // 直跑 exe / release：加载随包分发的构建产物（apps/desktop/ui）。
+            let main_url = if cfg!(debug_assertions) && dev_server_ready(5177) {
+                WebviewUrl::External("http://localhost:5177".parse().unwrap())
+            } else {
+                WebviewUrl::App("index.html".into())
+            };
+            WebviewWindowBuilder::new(app, "main", main_url)
+                .title("BitGalaxy Shell 工作台")
+                .inner_size(1360.0, 860.0)
+                .min_inner_size(1024.0, 680.0)
+                .decorations(false)
+                .visible(false)
+                .on_page_load(|webview, payload| {
+                    if cfg!(debug_assertions) {
+                        eprintln!(
+                            "[bgshell][debug] main 页面加载 {:?}: {}",
+                            payload.event(),
+                            payload.url()
+                        );
+                    }
+                })
+                .build()?;
+
             // ── 鲸鱼娘桌宠窗：透明置顶 · 无边框 · 不进任务栏 ──────────
-            // dev：主窗加载 vite dev server（npm run dev:ui，5177）；
-            //      宠物窗加载 pet-ui dev server（npm run dev:pet，5178）。
-            // release：均加载随包分发的构建产物（apps/desktop/ui）。
-            let use_dev_url = cfg!(debug_assertions) && std::env::var("BGSH_PET_STATIC").is_err();
-            let pet_url = if use_dev_url {
+            let pet_url = if cfg!(debug_assertions) && dev_server_ready(5178) {
+                // pet-ui vite base 为 /pet/（与随包分发路径一致）
                 WebviewUrl::External("http://localhost:5178/pet/".parse().unwrap())
             } else {
                 WebviewUrl::App("pet/index.html".into())

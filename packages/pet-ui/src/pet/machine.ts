@@ -26,6 +26,9 @@ const TRANSIENT: Partial<Record<PetStateKey, number>> = {
   angry: 3000,
 }
 
+/** drag 兜底：drag-end 丢失（如原生拖窗吞掉 pointerup）时最迟回落时间 */
+const DRAG_STUCK_MS = 10_000
+
 export interface PetConfig {
   /** working 无输出多久进入干饭 */
   eatingAfterMs: number
@@ -185,6 +188,10 @@ export class PetMachine {
         return
       case 'need_input':
         // 指纹确认实际在完整工作台完成；宠物只负责提醒（骨架阶段不做弹窗）
+        return
+      case 'drag':
+        // 无瞬态表项，但 drag-end 丢失时需自愈，否则永久扑腾
+        if (held >= DRAG_STUCK_MS) this.enter(this.base)
         return
       default:
         return

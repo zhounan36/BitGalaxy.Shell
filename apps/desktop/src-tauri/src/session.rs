@@ -17,7 +17,6 @@ use crate::wire::Outbound;
 type SessionMap = Arc<StdMutex<HashMap<String, SessionEntry>>>;
 
 struct SessionEntry {
-    host_id: String,
     kind: String,
     conn: Option<Arc<SshConnection>>,
     sftp: Option<Arc<SftpController>>,
@@ -28,9 +27,8 @@ struct SessionEntry {
 }
 
 impl SessionEntry {
-    fn new(host_id: &str, kind: &str) -> SessionEntry {
+    fn new(kind: &str) -> SessionEntry {
         SessionEntry {
-            host_id: host_id.to_string(),
             kind: kind.to_string(),
             conn: None,
             sftp: None,
@@ -68,7 +66,7 @@ impl SessionManager {
                 return;
             }
             let kind = opts.kind.clone().unwrap_or_else(|| "shell".into());
-            sessions.insert(session_id.to_string(), SessionEntry::new(host_id, &kind));
+            sessions.insert(session_id.to_string(), SessionEntry::new(&kind));
         }
 
         let this = self.clone();
@@ -77,7 +75,6 @@ impl SessionManager {
         let kind = opts.kind.clone().unwrap_or_else(|| "shell".into());
         let cols = opts.cols.unwrap_or(80);
         let rows = opts.rows.unwrap_or(24);
-        let term = opts.term.clone().unwrap_or_else(|| "xterm-256color".into());
         tokio::spawn(async move {
             let Some(host) = this.stores.hosts.get(&host_id) else {
                 this.fail_open(&session_id, "主机档案不存在");
@@ -386,9 +383,10 @@ impl SessionManager {
 
     fn start_metrics(&self, session_id: &str, interval_sec: i64, conn: &Arc<SshConnection>) {
         let this = self.clone();
-        let session_id = session_id.to_string();
+        let task_session_id = session_id.to_string();
         let conn = conn.clone();
         let task = tokio::spawn(async move {
+            let session_id = task_session_id;
             let mut first = true;
             loop {
                 if !first {

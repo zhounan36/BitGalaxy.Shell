@@ -193,6 +193,61 @@ body {
   padding: 8px;
 }
 
+/* ============================================================
+   终端右键菜单（复制 / 粘贴 / 全选 / 清屏）
+   ============================================================ */
+.term-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 184px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  user-select: none;
+}
+
+.term-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-primary);
+  font: 13px/1.2 var(--font-ui);
+  cursor: pointer;
+  text-align: left;
+}
+
+.term-menu-item:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: #fff;
+}
+
+.term-menu-item:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.term-menu-key {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.term-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
 /* SFTP / 指标面板内容底：与标签页一致 */
 .pane-surface {
   background: var(--bg-deep);

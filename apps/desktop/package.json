@@ -2,7 +2,7 @@
   "name": "@bgshell/desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "BitGalaxy Shell 桌面壳（Tauri 2）：主窗口工作台 + 系统托盘 + bgshell-agent sidecar 托管",
+  "description": "BitGalaxy Shell 桌面应用（Tauri 2 单进程）：内嵌 Agent（SSH/WS/MCP）+ 工作台 + 桌宠 + 托盘",
   "scripts": {
     "tauri": "tauri",
     "dev": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && tauri dev",

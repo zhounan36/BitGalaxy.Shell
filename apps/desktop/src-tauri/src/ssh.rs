@@ -3,11 +3,9 @@
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use base64::Engine;
 use russh::client::{Config, Handle, Handler};
 use russh::keys::{Algorithm, HashAlg, PrivateKeyWithHashAlg, PublicKey};
 use russh::{ChannelMsg, ChannelWriteHalf};
-use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 use crate::protocol::{HostKeyInfo, HostRecord, ServerFrame};
@@ -32,11 +30,6 @@ impl SshError {
     pub fn message(&self) -> String {
         self.to_string()
     }
-}
-
-/// OpenSSH 风格指纹：SHA256(base64 标准 padding)——与 Node createHash 版本逐字节一致
-pub fn host_key_fingerprint(digest: [u8; 32]) -> String {
-    format!("SHA256:{}", base64::engine::general_purpose::STANDARD.encode(digest))
 }
 
 // ── host key 校验上下文 ───────────────────────────────────────────────────
@@ -73,8 +66,7 @@ impl Handler for ConnHandler {
 
     async fn check_server_key(&mut self, server_public_key: &PublicKey) -> Result<bool, Self::Error> {
         let ctx = &self.ctx;
-        let digest: [u8; 32] = Sha256::digest(ssh_key_bytes(server_public_key)).into();
-        let fingerprint = host_key_fingerprint(digest);
+        let fingerprint = ssh_key_fingerprint(server_public_key);
         let key_type = server_public_key.algorithm().as_str().to_string();
 
         if let Some(known) = ctx.known.find(&ctx.host, ctx.port) {
@@ -100,7 +92,7 @@ impl Handler for ConnHandler {
                     m: HostKeyInfo {
                         host: ctx.host.clone(),
                         port: ctx.port,
-                        key_type,
+                        key_type: key_type.clone(),
                         fingerprint: fingerprint.clone(),
                     },
                 });
@@ -127,11 +119,16 @@ impl Handler for ConnHandler {
     }
 }
 
-/// 主机公钥的 SSH wire 编码字节（与 ssh-keygen -lf 哈希的 blob 一致）。
-/// ssh-key 的 Encode::to_bytes 在 russh::keys::PublicKey 上可用。
-fn ssh_key_bytes(pk: &PublicKey) -> Vec<u8> {
-    use russh::keys::ssh_key::Encode;
-    pk.to_bytes().unwrap_or_default()
+/// 主机公钥指纹：SHA256(SSH wire blob) + 标准 base64（带 padding）。
+/// 直接对 public_key_base64 解码出的 wire blob 自行哈希——与旧 Node Agent
+/// （ssh2 hostVerifier 的 key blob + createHash）逐字节一致，known_hosts 数据互通。
+fn ssh_key_fingerprint(pk: &PublicKey) -> String {
+    use base64::Engine;
+    use russh::keys::PublicKeyBase64;
+    use sha2::{Digest, Sha256};
+    let engine = base64::engine::general_purpose::STANDARD;
+    let blob = engine.decode(pk.public_key_base64()).unwrap_or_default();
+    format!("SHA256:{}", engine.encode(Sha256::digest(blob)))
 }
 
 // ── 连接 ──────────────────────────────────────────────────────────────────
@@ -148,7 +145,7 @@ pub struct SshConnection {
     /// shell 会话的写半部（stdin / resize）
     pty: Option<ChannelWriteHalf<russh::client::Msg>>,
     /// shell 会话的读半部（stdout/stderr → 上层 take 后转发为数据帧）
-    pub shell_reader: StdMutex<Option<russh::ChannelReadHalf<russh::client::Msg>>>,
+    pub shell_reader: StdMutex<Option<russh::ChannelReadHalf>>,
     pub host_label: String,
 }
 
@@ -172,7 +169,7 @@ pub async fn connect(
     });
     let addr = (host.input.host.clone(), host.input.port);
 
-    let handle = {
+    let mut handle = {
         let connect_fut = russh::client::connect(config, addr, ConnHandler { ctx: ctx.clone() });
         match tokio::time::timeout(Duration::from_secs(15), connect_fut).await {
             Ok(Ok(h)) => h,
@@ -200,9 +197,13 @@ pub async fn connect(
             let passphrase = host.input.auth.passphrase.as_deref();
             let key = russh::keys::decode_secret_key(&secret, passphrase)
                 .map_err(|e| SshError::Auth(format!("私钥解析失败: {e}")))?;
-            let hash_alg = pick_hash_alg(&handle, &key).await;
-            let with_hash = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg)
-                .map_err(|e| SshError::Auth(format!("私钥不可用: {e}")))?;
+            // RSA 按 rsa-sha2-512 签名（OpenSSH 7.2+ 支持；旧服务器见 HashAlg::Sha1 可按需扩展）
+            let hash_alg = if matches!(key.algorithm(), Algorithm::Rsa { .. }) {
+                Some(HashAlg::Sha512)
+            } else {
+                None
+            };
+            let with_hash = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
             handle.authenticate_publickey(user, with_hash).await
         }
         _ => {
@@ -249,18 +250,6 @@ pub async fn connect(
     })
 }
 
-/// RSA 私钥按服务器能力选哈希；其余算法 None
-async fn pick_hash_alg(handle: &Handle<ConnHandler>, key: &russh::keys::PrivateKey) -> Option<HashAlg> {
-    if key.algorithm() == Algorithm::Rsa {
-        match handle.best_available_rsa_hash().await {
-            Ok(Some(Some(h))) => Some(h),
-            _ => Some(HashAlg::Sha512),
-        }
-    } else {
-        None
-    }
-}
-
 fn classify_connect(e: russh::Error, host: &str, port: u16) -> SshError {
     let msg = e.to_string();
     let lower = msg.to_lowercase();
@@ -283,7 +272,7 @@ impl SshConnection {
     /// PTY stdin
     pub async fn write_input(&self, data: &[u8]) -> Result<(), String> {
         if let Some(pty) = &self.pty {
-            pty.data(data.to_vec()).await.map_err(|e| e.to_string())
+            pty.data(data).await.map_err(|e| e.to_string())
         } else {
             Ok(())
         }
@@ -310,34 +299,31 @@ impl SshConnection {
             .await
             .map_err(|e| e.to_string())?;
 
-        let mut stdout = String::new();
-        let mut stderr = String::new();
+        let mut stdout_buf: Vec<u8> = Vec::new();
+        let mut stderr_buf: Vec<u8> = Vec::new();
         let mut truncated = false;
         let mut code: Option<i32> = None;
-
-        let mut buf_stdin: Vec<u8> = Vec::new();
-        let mut buf_err: Vec<u8> = Vec::new();
 
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
             let msg = tokio::select! {
                 m = channel.wait() => m,
                 _ = tokio::time::sleep_until(deadline) => {
-                    return Ok(ExecOutput { stdout: to_utf8_lossy(&buf_stdin), stderr: to_utf8_lossy(&buf_err), code: None, truncated, timed_out: true });
+                    return Ok(ExecOutput { stdout: to_utf8_lossy(&stdout_buf), stderr: to_utf8_lossy(&stderr_buf), code: None, truncated, timed_out: true });
                 }
             };
             let Some(msg) = msg else { break };
             match msg {
-                ChannelMsg::Data { ref data } => collect_text(&mut buf_stdin, data, max_bytes, &mut truncated),
-                ChannelMsg::ExtendedData { ref data, .. } => collect_text(&mut buf_err, data, max_bytes, &mut truncated),
+                ChannelMsg::Data { ref data } => collect_text(&mut stdout_buf, data, max_bytes, &mut truncated),
+                ChannelMsg::ExtendedData { ref data, .. } => collect_text(&mut stderr_buf, data, max_bytes, &mut truncated),
                 ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status as i32),
                 ChannelMsg::Eof | ChannelMsg::Close => break,
                 _ => {}
             }
         }
         Ok(ExecOutput {
-            stdout: to_utf8_lossy(&buf_stdin),
-            stderr: to_utf8_lossy(&buf_err),
+            stdout: to_utf8_lossy(&stdout_buf),
+            stderr: to_utf8_lossy(&stderr_buf),
             code,
             truncated,
             timed_out: false,
