@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { HostRecord } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
-import { openHostSession, openWorkbench } from '../api/tauri'
+import { openHostSession, openWorkbench, hidePet, quitApp } from '../api/tauri'
 
 /** 宠物右键菜单：呼出 AI 对话 / 工作台 / 已存主机（点击开 SSH 终端，"文件"开文件管理） */
 export function PetMenu({ onClose, onOpenChat }: { onClose: () => void; onOpenChat: () => void }) {
@@ -93,6 +93,29 @@ export function PetMenu({ onClose, onOpenChat }: { onClose: () => void; onOpenCh
             </div>
           ))
         )}
+        <div className="pet-menu-sep" />
+        <button
+          type="button"
+          className="pet-menu-btn"
+          title="隐藏后从系统托盘「显示桌宠」唤回"
+          onClick={() => {
+            void hidePet()
+            onClose()
+          }}
+        >
+          隐藏桌宠
+        </button>
+        <button
+          type="button"
+          className="pet-menu-btn pet-menu-quit"
+          title="退出整个应用（含托盘）"
+          onClick={() => {
+            void quitApp()
+            onClose()
+          }}
+        >
+          退出
+        </button>
       </div>
     </>
   )

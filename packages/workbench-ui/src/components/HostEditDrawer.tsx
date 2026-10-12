@@ -1,7 +1,11 @@
 import { useEffect } from 'react'
 import { Button, Drawer, Form, Input, InputNumber, Radio } from 'antd'
+import { FolderOpenOutlined } from '@ant-design/icons'
 import type { HostInput, HostRecord } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
+
+/** 仅 Tauri 壳内有原生文件选择器；浏览器宿主无法取得本机真实路径 */
+const isTauri = '__TAURI_INTERNALS__' in window
 
 export interface HostEditDrawerProps {
   open: boolean
@@ -53,6 +57,13 @@ export function HostEditDrawer({ open, host, onClose, onSaved }: HostEditDrawerP
     } catch {
       // 校验未通过：antd 已内联展示错误，不提交
     }
+  }
+
+  /** 系统文件选择器选取私钥文件（私钥常无扩展名，不做类型过滤） */
+  const pickPrivateKey = async () => {
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    const picked = await open({ multiple: false, title: '选择私钥文件' })
+    if (typeof picked === 'string' && picked) form.setFieldValue('privateKeyPath', picked)
   }
 
   return (
@@ -134,7 +145,21 @@ export function HostEditDrawer({ open, host, onClose, onSaved }: HostEditDrawerP
                   rules={[{ required: true, message: '请输入私钥文件路径' }]}
                   tooltip="M1 直连版：Agent 直接读本机私钥文件（M2 起由密库托管）"
                 >
-                  <Input placeholder="C:\Users\me\.ssh\id_ed25519" />
+                  <Input
+                    placeholder="C:\Users\me\.ssh\id_ed25519"
+                    addonAfter={
+                      isTauri ? (
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<FolderOpenOutlined />}
+                          onClick={() => void pickPrivateKey()}
+                        >
+                          浏览
+                        </Button>
+                      ) : undefined
+                    }
+                  />
                 </Form.Item>
                 <Form.Item name="passphrase" label="私钥口令（可选）">
                   <Input.Password />

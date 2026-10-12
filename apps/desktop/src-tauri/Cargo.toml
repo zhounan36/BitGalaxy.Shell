@@ -17,6 +17,8 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 # 终端复制/粘贴：WebView2 下 navigator.clipboard.readText 不可靠，走原生剪贴板
 tauri-plugin-clipboard-manager = "2"
+# 工作台原生文件选择器（主机编辑：私钥文件路径浏览）
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "io-std", "sync", "fs"] }

@@ -345,5 +345,83 @@
                                                    }
                                  },
                       "note":  "51 帧补帧 + 6 帧问题帧重生成（idle_breath_02 重试 2 次、eating_04 重试 3 次）；submitId 为每帧最后一次成功运行；本地管线：raw/ 2K 白底 → 洪泛抠图+去孤岛+边缘羽化 → 状态联合取景框 → 512/@2x 透明 PNG"
-                  }
+                  },
+    "p1":  {
+               "greenFirstFrames":  {
+                                        "idle_breath":  "6a48672a-a165-4079-8232-6fd617e7e334",
+                                        "drag":  "84aebd12-6577-4ee8-a5b7-c69b592b5fe4",
+                                        "sleep":  "41c4f623-bb47-4fba-8f62-3a927270541c",
+                                        "angry":  "0639d22e-3780-4fce-a2a6-5a09961789c8"
+                                    },
+               "tailImageNodes":  {
+                                      "idle_breath":  "node_8eqw45hsff",
+                                      "drag":  "node_g2v1wkys24",
+                                      "sleep":  "node_ckwdsppxcn",
+                                      "angry":  "node_dv9bvgjnva"
+                                  },
+               "videoNodes":  {
+                                  "idle_breath_fwd":  "node_13k408rp0q",
+                                  "idle_breath_back":  "node_yedpt8nhkz",
+                                  "sleep_fwd":  "node_szjanqm71x",
+                                  "sleep_back":  "node_7btgbj3mvx",
+                                  "drag_fwd":  "node_g6kv60svvj",
+                                  "drag_back":  "node_qp6nn1gkj0",
+                                  "angry_once":  "node_fvw35tzkr8"
+                              },
+               "imageQuoteEachCredits":  3,
+               "note":  "绿幕方案：首帧=归一化@2x帧合成纯绿底(1024)；尾帧=seedream_4.5 i2i 2K；视频=seedance_2.5 first_last_frame 720P 4s，抽帧fps=8后chroma key抠图",
+               "tailImageSubmitIds":  {
+                                          "idle_breath":  "25340bde-f0d5-453d-87e6-4d6aa0d07790",
+                                          "drag":  "d5915ef7-4444-411d-9061-559a2f1ea00d",
+                                          "sleep":  "9f25c116-7c49-46fe-8389-b034ca28d55d",
+                                          "angry":  "ec47c46b-276a-43fd-9299-9ae7e1aceffa"
+                                      },
+               "tailImageResources":  {
+                                          "idle_breath":  "21f2adbc-df7f-4ade-8792-c144fb96cc72",
+                                          "drag":  "1edc2b5e-9168-4d73-835b-5ef214af2915",
+                                          "sleep":  "fb3c748d-42be-4b26-a05b-15462c1975ac",
+                                          "angry":  "c577e543-88e3-4ca1-8f6b-f27f2cab15fb"
+                                      },
+               "fixedTailImports":  {
+                                        "note":  "黑线修复版尾帧（v7）；sleep/angry/idle_breath 已替换视频引用，drag 无需修复仍用原节点",
+                                        "sleep":  {
+                                                      "nodeId":  "node_r4q17x7pad",
+                                                      "resourceId":  "8e5da105-98c2-4731-b510-028029ebebbd"
+                                                  },
+                                        "angry":  {
+                                                      "nodeId":  "node_m77xvztf4p",
+                                                      "resourceId":  "0efb964a-8d93-4910-96eb-bc654aebb959"
+                                                  },
+                                        "idle_breath":  {
+                                                            "nodeId":  "node_gwkmafp1mm",
+                                                            "resourceId":  "1fa309c1-36a5-4043-8787-073942e90e58"
+                                                        }
+                                    },
+               "videoQuoteEachCredits":  80,
+               "videoQuoteTotalCredits":  560,
+               "videoQuoteApproved":  true,
+               "ffmpegPath":  "C:\\Users\\Administrator\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-9.0.2-full_build\\bin\\ffmpeg.exe",
+               "lesson":  "node edit video 传生成参数时为整体替换：必须一次性传全 mode/model/ratio/resolution/duration/prompt/ref，否则未传字段被清空或重置为默认（事故：5 节点 prompt 被清、model 变 seedance_2.0_vip、1:1→16:9、4s→5s，已完整重建；4 个 prompt 为按模板重建非逐字原文，drag 两节点原样未动）",
+               "videoSubmitIds":  {
+                                      "sleep_fwd":  "e59f292a-39a1-4cac-be10-f5e9461ccf30",
+                                      "idle_breath_back":  "60fd0e33-5362-43f2-8c5f-730db116990c",
+                                      "idle_breath_fwd":  "77963446-e54a-4006-b852-8a4111226ba0",
+                                      "angry_once":  "ef227dbd-fdfb-4a9d-aba7-52e9b6988e60",
+                                      "drag_back":  "a51b6739-92c2-46de-9a55-99840593388e",
+                                      "drag_fwd":  "30110bcc-67b3-465d-879a-cb5d4ce650bc",
+                                      "sleep_back":  "8aa37136-18fa-45d6-ace9-df95cecf30f2"
+                                  },
+               "videoResources":  {
+                                      "idle_breath_fwd":  "b05e1ec6-fff3-4721-8299-62aff9de1ab8",
+                                      "idle_breath_back":  "5f1fbd8c-114a-4283-a1e2-a14da1340fc2",
+                                      "sleep_fwd":  "2fee88e1-b3cf-44ff-ad31-a2d42c2350a6",
+                                      "sleep_back":  "f8f4bae6-b76f-4283-bd77-643d6613f59b",
+                                      "drag_fwd":  "bbcc6ade-bff5-47e5-a8bb-90a2c59d0fd0"
+                                  },
+               "videoRunRejected":  {
+                                        "drag_back":  "insufficient credits (serviceCode 20005, submitId a51b6739-92c2-46de-9a55-99840593388e)",
+                                        "angry_once":  "insufficient credits (serviceCode 20005, submitId ef227dbd-fdfb-4a9d-aba7-52e9b6988e60)",
+                                        "note":  "批量扣费到第 6/7 个节点时余额耗尽；补跑需充值后重新 confirm+run，配置本身无问题"
+                                    }
+           }
 }

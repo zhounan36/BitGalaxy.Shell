@@ -1,7 +1,8 @@
 //! BitGalaxy Shell 桌面应用（Tauri 2，单进程架构）：
 //! - Agent 全内嵌：WS 服务（/ws）+ SSH/SFTP/审计/设置 + AI 对话 + MCP（--mcp-stdio 子模式）
 //! - 入口只有桌宠：主窗口 visible=false 后台预加载，双击宠物 / 宠物菜单 / 托盘按需唤起
-//! - 系统托盘：打开工作台 / 退出；主窗口关闭 = 隐藏到托盘
+//! - 桌宠可隐藏/唤出：宠物菜单隐藏，托盘"隐藏/显示桌宠"开关或二次启动唤回
+//! - 系统托盘：打开工作台 / 桌宠开关 / 退出；主窗口关闭 = 隐藏到托盘
 //! - 开机自启（tauri-plugin-autostart）：启动桌面 exe 并带 --silent（不弹工作台，桌宠/托盘常驻）
 
 use std::path::PathBuf;
@@ -58,13 +59,57 @@ pub fn append_log(data_dir: &PathBuf, msg: &str) {
 
 // ── Tauri IPC 命令（工作台/桌宠使用）─────────────────────────────────────
 
+/// 托盘"桌宠开关"菜单项句柄：隐藏/唤出后同步文案（隐藏桌宠 ⇄ 显示桌宠）
+struct PetToggle(MenuItem<tauri::Wry>);
+
+/// 按宠物窗当前可见性同步托盘菜单文案
+fn sync_pet_tray_text(app: &tauri::AppHandle) {
+    let visible = app
+        .get_webview_window("pet")
+        .map(|w| w.is_visible().unwrap_or(true))
+        .unwrap_or(true);
+    if let Some(toggle) = app.try_state::<PetToggle>() {
+        let _ = toggle.0.set_text(if visible { "隐藏桌宠" } else { "显示桌宠" });
+    }
+}
+
 /// 双击宠物/托盘外的回工作台入口：唤起主窗口
 #[tauri::command]
 fn show_main_window(app: tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.show();
-        let _ = win.set_focus();
+    let data_dir = resolve_data_dir();
+    append_log(&data_dir, "[dbg] show_main_window 被调用");
+    match app.get_webview_window("main") {
+        Some(win) => {
+            append_log(&data_dir, &format!("[dbg] show 结果: {:?}", win.show()));
+            let _ = win.set_focus();
+        }
+        None => append_log(&data_dir, "[dbg] main 窗口不存在"),
     }
+}
+
+/// 临时诊断：桌宠事件探针（修完双击问题后删除）
+#[tauri::command]
+fn dbg_evt(msg: String) {
+    let data_dir = resolve_data_dir();
+    append_log(&data_dir, &format!("[dbg] {msg}"));
+}
+
+/// 隐藏/唤出桌宠（宠物窗菜单隐藏后，经托盘开关或二次启动唤回）
+#[tauri::command]
+fn set_pet_visible(app: tauri::AppHandle, visible: bool) {
+    if let Some(win) = app.get_webview_window("pet") {
+        let _ = if visible { win.show() } else { win.hide() };
+        if visible {
+            let _ = win.set_focus();
+        }
+    }
+    sync_pet_tray_text(&app);
+}
+
+/// 退出整个应用（桌宠右键菜单「退出」，与托盘「退出」同路径）
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 /// 文件元信息（拖拽上传面板：展示大小 / 跳过目录）
@@ -223,12 +268,13 @@ fn dev_server_ready(port: u16) -> bool {
 pub fn run() {
     let silent = std::env::args().any(|a| a == "--silent");
     let app = tauri::Builder::default()
-        // 桌面单实例：入口只有桌宠，二次启动聚焦宠物窗后自动退出
+        // 桌面单实例：入口只有桌宠，二次启动唤回宠物窗（隐藏时也能找回）后自动退出
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(win) = app.get_webview_window("pet") {
                 let _ = win.show();
                 let _ = win.set_focus();
             }
+            sync_pet_tray_text(app);
         }))
         // 开机自启：启动桌面 exe 并带 --silent（桌宠/托盘常驻，不弹工作台）
         .plugin(tauri_plugin_autostart::init(
@@ -237,8 +283,13 @@ pub fn run() {
         ))
         // 终端复制/粘贴：原生剪贴板读写（经 plugin:clipboard-manager IPC）
         .plugin(tauri_plugin_clipboard_manager::init())
+        // 原生文件选择器（主机编辑：私钥文件路径浏览）
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             show_main_window,
+            dbg_evt,
+            set_pet_visible,
+            quit_app,
             stat_file,
             read_file_chunk
         ])
@@ -276,10 +327,12 @@ pub fn run() {
                 }
             });
 
-            // ── 系统托盘 ──────────────────────────────────────────────
+            // ── 系统托盘 ──────────────────────────────────────────
             let show = MenuItem::with_id(app, "show", "打开工作台", true, None::<&str>)?;
+            let pet_toggle = MenuItem::with_id(app, "pet", "隐藏桌宠", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &pet_toggle, &quit])?;
+            app.manage(PetToggle(pet_toggle));
             TrayIconBuilder::with_id("tray")
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("BitGalaxy Shell")
@@ -290,6 +343,17 @@ pub fn run() {
                             let _ = win.show();
                             let _ = win.set_focus();
                         }
+                    }
+                    // 桌宠开关：按当前可见性取反（隐藏 ⇄ 唤出）
+                    "pet" => {
+                        if let Some(win) = app.get_webview_window("pet") {
+                            let show = !win.is_visible().unwrap_or(true);
+                            let _ = if show { win.show() } else { win.hide() };
+                            if show {
+                                let _ = win.set_focus();
+                            }
+                        }
+                        sync_pet_tray_text(app);
                     }
                     "quit" => app.exit(0),
                     _ => {}

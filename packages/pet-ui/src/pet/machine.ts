@@ -1,25 +1,42 @@
 /**
- * 鲸鱼娘桌宠状态机（框架无关，可单测）。
+ * 鲸鱼娘桌宠状态机 v2（框架无关，可单测）。
  *
- * 状态与素材一一对应：public/pet/<state>/<state>_00.png（见 assets/pet/manifest.json）。
- * 事件来源：Agent 控制帧（agentSocket.onControl）、PTY 数据帧流量、指针交互、tick 计时器。
- * 时间常量与 manifest 的 transitions 声明保持一致。
+ * 采用成熟桌宠方案（Shimeji-ee / VPet-Simulator / Unity Animator）验证过的
+ * 「双层」结构：
+ * - 基础逻辑层 PetBaseState：sleep / idle_breath / working / eating / need_input / drag
+ *   由连接状态、会话流量、空闲计时驱动，计时与动作完全解耦。
+ * - 动作叠加层 PetActionKey：ready / wave / idle_blink / angry
+ *   叠在基础层之上播放，到时自动清除并回落基础层；带优先级门控，
+ *   高优先级才能打断低优先级（angry(3) > ready(2) > wave(1) > idle_blink(0)）。
+ *
+ * 渲染状态（snapshot.state）= action ?? base，对 v1 消费方完全兼容。
+ * 非循环动作（ready/wave/angry）播完后末帧驻留，动作总时长由 ACTION_MS
+ * 决定，与精灵图帧数/帧率无关。
  */
 
-export type PetStateKey =
-  | 'sleep' // 空闲 5 分钟 / 断线 · DeepSleep
-  | 'ready' // 唤醒/连上 Agent 登场亮相（瞬态）
+export type PetBaseState =
+  | 'sleep' // 断线 / 长时间空闲 · DeepSleep
   | 'idle_breath' // 待机呼吸
-  | 'idle_blink' // 待机眨眼（瞬态）
-  | 'wave' // hover 问候 / 戳醒（瞬态）
   | 'working' // 会话有输出 · 打字+内心独白
-  | 'need_input' // TOFU 指纹确认 / 等用户输入
   | 'eating' // working 30s 无输出 · 干饭
-  | 'angry' // open-failed / probe 失败 · 炸毛（3s 自愈）
+  | 'need_input' // TOFU 指纹确认 / 等用户输入
   | 'drag' // 被用户拖拽 · 鲸尾扑腾
 
-/** 瞬态：到时自动回落；持续态：由事件/计时器切换 */
-const TRANSIENT: Partial<Record<PetStateKey, number>> = {
+export type PetActionKey = 'ready' | 'wave' | 'idle_blink' | 'angry'
+
+/** 兼容 v1 消费方（PetSprite / Bubble / DebugPanel）的渲染状态并集 */
+export type PetStateKey = PetBaseState | PetActionKey
+
+/** 动作叠加层优先级：数值高者可打断低者，同/低级请求被丢弃（防 wave 抖动） */
+export const ACTION_PRIORITY: Record<PetActionKey, number> = {
+  idle_blink: 0,
+  wave: 1,
+  ready: 2,
+  angry: 3,
+}
+
+/** 动作驻留时长（ms）：由状态机决定节奏，不依赖剪辑播完 */
+export const ACTION_MS: Record<PetActionKey, number> = {
   ready: 1600,
   wave: 1500,
   idle_blink: 450,
@@ -61,9 +78,12 @@ export type PetEvent =
   | { type: 'tick'; now: number }
 
 export interface PetSnapshot {
+  /** 渲染状态 = action ?? base（兼容 v1） */
   state: PetStateKey
-  /** 无瞬态时的自然基线（决定瞬态结束后回落到哪） */
-  base: 'idle_breath' | 'working'
+  /** 基础逻辑层真实状态 */
+  base: PetBaseState
+  /** 当前叠加的动作；null = 纯基础层 */
+  action: PetActionKey | null
   connected: boolean
   sessions: number
   /** 待确认的主机指纹（need_input 时展示） */
@@ -73,22 +93,29 @@ export interface PetSnapshot {
 }
 
 export class PetMachine {
-  private state: PetStateKey = 'sleep'
-  private base: 'idle_breath' | 'working' = 'idle_breath'
+  private base: PetBaseState = 'sleep'
+  private action: PetActionKey | null = null
+  private actionStartedAt = 0
   private connected = false
   private sessions = 0
   private pendingHostkey: string | null = null
-  private enteredAt = Date.now()
+  private baseEnteredAt = Date.now()
   private lastOutputAt = Date.now()
   private lastActivityAt = Date.now()
   private readonly log: PetEvent[] = []
 
   constructor(private readonly config: PetConfig = DEFAULT_PET_CONFIG) {}
 
+  /** 当前应渲染的状态（动作层压在基础层上） */
+  get state(): PetStateKey {
+    return this.action ?? this.base
+  }
+
   snapshot(): PetSnapshot {
     return {
       state: this.state,
       base: this.base,
+      action: this.action,
       connected: this.connected,
       sessions: this.sessions,
       pendingHostkey: this.pendingHostkey,
@@ -103,64 +130,76 @@ export class PetMachine {
       case 'ws-open':
         this.connected = true
         this.touch()
-        this.enter('ready')
+        this.enterBase(this.naturalBase())
+        this.playAction('ready') // 唤醒登场
         return
       case 'ws-close':
         this.connected = false
         this.sessions = 0
         this.pendingHostkey = null
-        this.enter('sleep') // 没饭吃就睡
+        this.clearAction()
+        this.enterBase('sleep') // 没饭吃就睡
         return
       case 'session-opened':
         this.sessions += 1
         this.pendingHostkey = null
         this.lastOutputAt = Date.now()
         this.touch()
-        if (this.state !== 'angry') this.enter('working')
+        // 基础层立即切到工作；若 angry 正在叠放则播完自然回落
+        this.enterBase('working')
         return
       case 'session-closed':
         this.sessions = Math.max(0, this.sessions - 1)
         this.touch()
-        this.enter(this.base)
+        this.enterBase(this.naturalBase())
         return
       case 'output':
         this.lastOutputAt = Date.now()
         this.touch()
         // 干饭/深睡中被输出唤醒 → 回工作岗位
-        if ((this.state === 'eating' || this.state === 'sleep') && this.sessions > 0) {
-          this.enter('working')
+        if ((this.base === 'eating' || this.base === 'sleep') && this.sessions > 0) {
+          this.enterBase('working')
         }
         return
       case 'hostkey-unknown':
         this.pendingHostkey = ev.fingerprint
         this.touch()
-        this.enter('need_input')
+        this.enterBase('need_input')
         return
       case 'hostkey-confirmed':
         this.pendingHostkey = null
         this.touch()
-        this.enter(this.base)
+        this.enterBase(this.naturalBase())
         return
       case 'agent-error':
         this.touch()
-        this.enter('angry')
+        this.playAction('angry') // 最高优先级，可打断一切动作
         return
       case 'pointer-enter':
-        if (this.state === 'idle_breath' || this.state === 'idle_blink') this.enter('wave')
+        if (this.base === 'idle_breath') this.playAction('wave')
         return
       case 'poke':
         this.touch()
-        if (this.state === 'sleep') this.enter('ready')
+        if (this.base === 'drag') return // 拖拽中不理会
+        if (this.base === 'sleep') {
+          this.enterBase('idle_breath') // 戳醒
+          this.playAction('ready')
+        } else {
+          this.playAction('wave') // 任意清醒状态都回应
+        }
         return
       case 'drag-start':
-        if (this.state !== 'angry') this.enter('drag')
+        // 用户直接交互永远优先（VPet 原则）：打断当前动作进入拖拽
+        this.clearAction()
+        this.enterBase('drag')
         return
       case 'drag-end':
         this.touch()
-        this.enter(this.base)
+        this.enterBase(this.naturalBase())
         return
       case 'blink':
-        if (this.state === 'idle_breath') this.enter('idle_blink')
+        // usePet 只在显示态为 idle_breath 时调度；有动作叠放时由优先级门控丢弃
+        if (this.base === 'idle_breath') this.playAction('idle_blink')
         return
       case 'tick':
         this.tick(ev.now)
@@ -169,48 +208,63 @@ export class PetMachine {
   }
 
   private tick(now: number): void {
-    const held = now - this.enteredAt
-    const transientMs = TRANSIENT[this.state]
-    if (transientMs !== undefined) {
-      if (held >= transientMs) this.enter(this.base)
-      return
+    // ① 动作层到期：与基础层计时无关，直接清除回落
+    if (this.action && now - this.actionStartedAt >= ACTION_MS[this.action]) {
+      this.clearAction()
     }
-    switch (this.state) {
+    // ② 基础层计时：不受动作叠放影响
+    const held = now - this.baseEnteredAt
+    switch (this.base) {
       case 'working':
-        if (now - this.lastOutputAt >= this.config.eatingAfterMs) this.enter('eating')
+        if (now - this.lastOutputAt >= this.config.eatingAfterMs) this.enterBase('eating')
         return
       case 'eating':
-        if (now - this.lastActivityAt >= this.config.eatingToSleepMs) this.enter('sleep')
+        if (now - this.lastActivityAt >= this.config.eatingToSleepMs) this.enterBase('sleep')
         return
       case 'idle_breath':
-      case 'idle_blink':
-        if (now - this.lastActivityAt >= this.config.sleepAfterMs) this.enter('sleep')
+        if (now - this.lastActivityAt >= this.config.sleepAfterMs) this.enterBase('sleep')
         return
       case 'need_input':
         // 指纹确认实际在完整工作台完成；宠物只负责提醒（骨架阶段不做弹窗）
         return
       case 'drag':
-        // 无瞬态表项，但 drag-end 丢失时需自愈，否则永久扑腾
-        if (held >= DRAG_STUCK_MS) this.enter(this.base)
+        // drag-end 丢失时需自愈，否则永久扑腾
+        if (held >= DRAG_STUCK_MS) this.enterBase(this.naturalBase())
         return
       default:
         return
     }
   }
 
-  /** 基线随会话数变化：有会话=工作中，无会话=待机 */
-  private syncBase(): void {
-    this.base = this.connected && this.sessions > 0 ? 'working' : 'idle_breath'
+  /** 自然基线：有会话 = 工作中，否则 = 待机 */
+  private naturalBase(): PetBaseState {
+    return this.connected && this.sessions > 0 ? 'working' : 'idle_breath'
   }
 
-  private enter(next: PetStateKey): void {
-    this.syncBase()
-    if (this.state === next) {
-      this.enteredAt = Date.now()
+  /** 切换基础层（不影响动作叠放） */
+  private enterBase(next: PetBaseState): void {
+    if (this.base === next) {
+      this.baseEnteredAt = Date.now()
       return
     }
-    this.state = next
-    this.enteredAt = Date.now()
+    this.base = next
+    this.baseEnteredAt = Date.now()
+  }
+
+  /**
+   * 叠加动作：优先级门控——
+   * - drag 中不叠新动作（先 drag-end / tick 自愈）
+   * - 请求优先级 ≤ 当前动作时丢弃（防 hover 反复触发 wave 抖动）
+   */
+  private playAction(next: PetActionKey): void {
+    if (this.base === 'drag') return
+    if (this.action && ACTION_PRIORITY[next] <= ACTION_PRIORITY[this.action]) return
+    this.action = next
+    this.actionStartedAt = Date.now()
+  }
+
+  private clearAction(): void {
+    this.action = null
   }
 
   private touch(): void {

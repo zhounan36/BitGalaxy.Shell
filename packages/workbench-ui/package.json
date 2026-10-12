@@ -12,6 +12,7 @@
     "@ant-design/icons": "^6.3.2",
     "@bgshell/protocol": "*",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "antd": "^6.5.0",
