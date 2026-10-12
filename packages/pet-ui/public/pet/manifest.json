@@ -1,5 +1,5 @@
-﻿{
-    "version":  3,
+{
+    "version":  4,
     "character":  "鲸鱼娘（大肥鱼）· DeepSeek 社区二创女仆装鲸鱼娘",
     "design":  {
                    "features":  "深海蓝渐变长发（发根深蓝→发尾浅青蓝）、弧形呆毛、白色层叠蕾丝女仆发箍+亮蓝蝴蝶结、头侧鲸鱼鳍状耳朵（外深蓝内白褶边）、深蓝外圈亮蓝虹膜大眼睛、金边椭圆蓝宝石领结、小蓝鲸水花图案白围裙、多层白花边深蓝短裙、白花边短袜+深蓝玛丽珍鞋、厚实深蓝鲸尾、金色十字星点缀",
@@ -45,7 +45,16 @@
                                        "plannedFrames":  8,
                                        "frames":  8,
                                        "fps":  8,
-                                       "event":  "无会话 · 待机呼吸"
+                                       "event":  "无会话 · 待机呼吸",
+                                       "anchor":  {
+                                                      "x":  0.5,
+                                                      "y":  0.961
+                                                  },
+                                       "norm":  {
+                                                    "mode":  "height",
+                                                    "target":  474,
+                                                    "anchor":  "bottom"
+                                                }
                                    },
                    "idle_blink":  {
                                       "file":  "idle_blink/idle_blink_00.png",
@@ -54,7 +63,16 @@
                                       "plannedFrames":  3,
                                       "frames":  3,
                                       "fps":  6,
-                                      "event":  "待机中随机眨眼"
+                                      "event":  "待机中随机眨眼",
+                                      "anchor":  {
+                                                     "x":  0.5,
+                                                     "y":  0.961
+                                                 },
+                                      "norm":  {
+                                                   "mode":  "height",
+                                                   "target":  474,
+                                                   "anchor":  "bottom"
+                                               }
                                   },
                    "working":  {
                                    "file":  "working/working_00.png",
@@ -63,7 +81,16 @@
                                    "plannedFrames":  8,
                                    "frames":  8,
                                    "fps":  8,
-                                   "event":  "会话有输出 · 打字+内心独白气泡"
+                                   "event":  "会话有输出 · 打字+内心独白气泡",
+                                   "anchor":  {
+                                                  "x":  0.5,
+                                                  "y":  0.961
+                                              },
+                                   "norm":  {
+                                                "mode":  "height",
+                                                "target":  400,
+                                                "anchor":  "bottom"
+                                            }
                                },
                    "need_input":  {
                                       "file":  "need_input/need_input_00.png",
@@ -72,7 +99,16 @@
                                       "plannedFrames":  4,
                                       "frames":  4,
                                       "fps":  6,
-                                      "event":  "hostkey-unknown / 密库解锁 · 问号气泡"
+                                      "event":  "hostkey-unknown / 密库解锁 · 问号气泡",
+                                      "anchor":  {
+                                                     "x":  0.5,
+                                                     "y":  0.961
+                                                 },
+                                      "norm":  {
+                                                   "mode":  "align",
+                                                   "target":  0,
+                                                   "anchor":  "bottom"
+                                               }
                                   },
                    "angry":  {
                                  "file":  "angry/angry_00.png",
@@ -82,7 +118,16 @@
                                  "frames":  6,
                                  "fps":  10,
                                  "event":  "open-failed / probe 失败 · 3s 自愈",
-                                 "line":  "真当我是便宜货？！"
+                                 "line":  "真当我是便宜货？！",
+                                 "anchor":  {
+                                                "x":  0.5,
+                                                "y":  0.961
+                                            },
+                                 "norm":  {
+                                              "mode":  "height",
+                                              "target":  474,
+                                              "anchor":  "bottom"
+                                          }
                              },
                    "wave":  {
                                 "file":  "wave/wave_00.png",
@@ -91,16 +136,34 @@
                                 "plannedFrames":  6,
                                 "frames":  6,
                                 "fps":  8,
-                                "event":  "hover / 出场问候"
+                                "event":  "hover / 出场问候",
+                                "anchor":  {
+                                               "x":  0.5,
+                                               "y":  0.961
+                                           },
+                                "norm":  {
+                                             "mode":  "height",
+                                             "target":  474,
+                                             "anchor":  "bottom"
+                                         }
                             },
                    "drag":  {
                                 "file":  "drag/drag_00.png",
                                 "ratio":  "1:1",
                                 "loop":  true,
-                                "plannedFrames":  6,
-                                "frames":  6,
+                                "plannedFrames":  8,
+                                "frames":  8,
                                 "fps":  10,
-                                "event":  "被用户拖拽 · 鲸尾扑腾"
+                                "event":  "被用户拖拽 · 鲸尾扑腾（drag_fwd 反放 ping-pong 展开）",
+                                "anchor":  {
+                                               "x":  0.5,
+                                               "y":  0.5
+                                           },
+                                "norm":  {
+                                             "mode":  "height",
+                                             "target":  460,
+                                             "anchor":  "center"
+                                         }
                             },
                    "eating":  {
                                   "file":  "eating/eating_00.png",
@@ -110,7 +173,16 @@
                                   "frames":  8,
                                   "fps":  8,
                                   "event":  "30s 无输出 · 干饭",
-                                  "line":  "我先去吃饭，好了叫我"
+                                  "line":  "我先去吃饭，好了叫我",
+                                  "anchor":  {
+                                                 "x":  0.5,
+                                                 "y":  0.961
+                                             },
+                                  "norm":  {
+                                               "mode":  "height",
+                                               "target":  400,
+                                               "anchor":  "bottom"
+                                           }
                               },
                    "sleep":  {
                                  "file":  "sleep/sleep_00.png",
@@ -119,7 +191,16 @@
                                  "plannedFrames":  8,
                                  "frames":  8,
                                  "fps":  4,
-                                 "event":  "空闲 5min · DeepSleep 深睡"
+                                 "event":  "空闲 5min · DeepSleep 深睡",
+                                 "anchor":  {
+                                                "x":  0.5,
+                                                "y":  0.961
+                                            },
+                                 "norm":  {
+                                              "mode":  "width",
+                                              "target":  470,
+                                              "anchor":  "bottom"
+                                          }
                              },
                    "ready":  {
                                  "file":  "ready/ready_00.png",
@@ -129,7 +210,16 @@
                                  "frames":  4,
                                  "fps":  8,
                                  "event":  "唤醒/登录 · 登场亮相",
-                                 "line":  "探索未至之境"
+                                 "line":  "探索未至之境",
+                                 "anchor":  {
+                                                "x":  0.5,
+                                                "y":  0.961
+                                            },
+                                 "norm":  {
+                                              "mode":  "height",
+                                              "target":  474,
+                                              "anchor":  "bottom"
+                                          }
                              }
                },
     "ui":  {

@@ -95,6 +95,7 @@ html.in-tauri body {
 }
 
 .pet-sprite {
+  position: relative;
   cursor: grab;
   touch-action: none;
 }
@@ -104,12 +105,28 @@ html.in-tauri body {
 }
 
 .pet-sprite img {
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  inset: 0;
   object-fit: contain;
   filter: drop-shadow(0 6px 14px rgba(4, 16, 32, 0.45));
-  transition: transform 120ms ease;
+  transform-origin: 50% 96%; /* 呼吸微动以脚底为轴（对应 manifest anchor） */
   pointer-events: none; /* 交互统一由容器处理 */
+  z-index: 1;
+}
+
+/* 状态切换交叉淡化：旧层置顶淡出，新层在下层直接起播（时长与 PetSprite 注释一致） */
+.pet-sprite img.pet-fade-out {
+  z-index: 2;
+  animation: pet-crossfade-out 140ms ease forwards;
+}
+
+@keyframes pet-crossfade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
 }
 
 /* 台词气泡：生成的深海蓝蕾丝气泡底图做 9-slice */
@@ -224,6 +241,10 @@ html.in-tauri body {
   font-size: 12px;
   opacity: 0.85;
   text-align: center;
+}
+
+.pet-menu-quit {
+  color: var(--danger, #e5484d);
 }
 
 .pet-menu-sep {

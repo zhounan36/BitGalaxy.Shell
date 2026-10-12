@@ -4,7 +4,7 @@ import { ChatPanel } from './components/ChatPanel'
 import { DebugPanel } from './components/DebugPanel'
 import { PetMenu } from './components/PetMenu'
 import { PetSprite } from './components/PetSprite'
-import { forwardDropUpload, isTauri, onFileDrop, openWorkbench, startWindowDrag } from './api/tauri'
+import { forwardDropUpload, isTauri, onFileDrop, openWorkbench, setPetWindowChat, startWindowDrag } from './api/tauri'
 import { usePet } from './pet/usePet'
 
 export function App() {
@@ -17,6 +17,32 @@ export function App() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
   const [dropHover, setDropHover] = useState(false)
+
+  // 对话面板开合 → 宠物窗随之扩/缩（右下角锚定，宠物本体屏幕位置不变；浏览器宿主 no-op）
+  useEffect(() => {
+    void setPetWindowChat(chatOpen)
+  }, [chatOpen])
+
+  // TODO(debug): 临时事件探针——定位 dblclick 在 WebView2 中是否产生（修完删除）
+  useEffect(() => {
+    if (!isTauri) return
+    void (async () => {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const log = (m: string) => void invoke('dbg_evt', { msg: m }).catch((e) => console.error('dbg_evt failed', e))
+      log(`pet page mounted: ${location.href}`)
+      for (const t of ['pointerdown', 'pointerup', 'click', 'dblclick'] as const) {
+        document.addEventListener(
+          t,
+          (e) => {
+            const me = e as MouseEvent
+            const tgt = (e.target as HTMLElement | null)
+            log(`${t} detail=${me.detail} tgt=${tgt?.className?.toString().slice(0, 24) ?? tgt?.tagName ?? '?'}`)
+          },
+          { capture: true, passive: true },
+        )
+      }
+    })()
+  }, [])
 
   // OS 级文件拖放（仅 Tauri 宿主）：悬停亮提示，落下转发工作台开上传面板
   useEffect(() => {
@@ -42,12 +68,40 @@ export function App() {
     }
   }, [dispatch])
 
+  // ── 双击检测（手动配对，不依赖 DOM dblclick）────────────────────────────
+  // 背景：Tauri 下拖窗 startDragging 是模态调用，第一次按下若抖动 ≥4px 触发拖拽，
+  // pointerup 会被原生吞掉 → 第一次点击永远无法完成 → DOM dblclick 凑不齐两次 click。
+  // 因此改为：原地点按（poke）与「短促微拖」（<250ms 即松手的拖拽）都记一次 tap，
+  // 450ms 内出现两次 tap 即判定为双击 → 打开工作台。
+  const DOUBLE_TAP_MS = 450
+  const QUICK_DRAG_MS = 250
+  const lastTapAtRef = useRef(0)
+  const dragStartAtRef = useRef(0)
+
+  const registerTap = () => {
+    const now = performance.now()
+    const last = lastTapAtRef.current
+    lastTapAtRef.current = now
+    if (last && now - last < DOUBLE_TAP_MS) {
+      lastTapAtRef.current = 0
+      if (isTauri) void import('@tauri-apps/api/core').then(({ invoke }) => invoke('dbg_evt', { msg: '双击判定成立 → openWorkbench' }))
+      void openWorkbench()
+    }
+  }
+
+  /** 拖拽结束：补发 drag-end；短促微拖视为一次 tap 参与双击配对 */
+  const settleDrag = () => {
+    dispatch({ type: 'drag-end' })
+    if (performance.now() - dragStartAtRef.current < QUICK_DRAG_MS) registerTap()
+  }
+
   const onDragStart = () => {
+    dragStartAtRef.current = performance.now()
     dispatch({ type: 'drag-start' })
     if (isTauri) {
       // 原生拖窗接管指针后 webview 收不到 pointerup：
       // startDragging 为模态调用，settle（松手/失败）即补发 drag-end
-      void startWindowDrag().finally(() => dispatch({ type: 'drag-end' }))
+      void startWindowDrag().finally(() => settleDrag())
       return
     }
     const rect = anchorRef.current?.getBoundingClientRect()
@@ -75,7 +129,6 @@ export function App() {
         ref={anchorRef}
         className="pet-anchor"
         style={pos && !isTauri ? { left: pos.x, top: pos.y } : { right: 0, bottom: 0 }}
-        onDoubleClick={() => void openWorkbench()}
         onContextMenu={(e) => {
           e.preventDefault()
           setMenuOpen(true)
@@ -85,9 +138,12 @@ export function App() {
         <PetSprite
           state={view.state}
           onPointerEnter={() => dispatch({ type: 'pointer-enter' })}
-          onPoke={() => dispatch({ type: 'poke' })}
+          onPoke={() => {
+            registerTap()
+            dispatch({ type: 'poke' })
+          }}
           onDragStart={onDragStart}
-          onDragEnd={() => dispatch({ type: 'drag-end' })}
+          onDragEnd={settleDrag}
           onDragMove={onDragMove}
         />
       </div>
