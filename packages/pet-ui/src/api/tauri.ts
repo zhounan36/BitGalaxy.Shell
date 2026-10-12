@@ -10,33 +10,73 @@ export async function startWindowDrag(): Promise<void> {
   await getCurrentWindow().startDragging()
 }
 
-/** 对话面板展开后的宠物窗尺寸（逻辑像素）：容纳 right:210 / width:360 的面板与余量 */
-const CHAT_OPEN_W = 596.0
-const CHAT_OPEN_H = 500.0
-/** 收起时回到常驻尺寸（与 Rust 侧 PET_W / PET_H 一致） */
-const PET_REST_W = 340.0
-const PET_REST_H = 420.0
+/** ── 桌宠缩放 ─────────────────────────────────────────────────────────────
+ * 精灵尺寸持久化在 localStorage（默认 256，步进 16，范围 160..480）；
+ * 窗口尺寸由「精灵尺寸 + 对话面板开合」动态推导，宠物本体始终贴右下角。
+ */
+export const PET_SIZE_KEY = 'bgshell.pet-size'
+export const PET_SIZE_DEFAULT = 256
+export const PET_SIZE_MIN = 160
+export const PET_SIZE_MAX = 480
+export const PET_SIZE_STEP = 16
+
+/** 收敛到步进倍数并夹到 [MIN, MAX] */
+export function clampPetSize(v: number): number {
+  const stepped = Math.round(v / PET_SIZE_STEP) * PET_SIZE_STEP
+  return Math.min(PET_SIZE_MAX, Math.max(PET_SIZE_MIN, stepped))
+}
+
+export function loadPetSize(): number {
+  const raw = Number(localStorage.getItem(PET_SIZE_KEY))
+  return Number.isFinite(raw) && raw > 0 ? clampPetSize(raw) : PET_SIZE_DEFAULT
+}
+
+export function savePetSize(v: number): void {
+  localStorage.setItem(PET_SIZE_KEY, String(clampPetSize(v)))
+}
 
 /**
- * 对话面板开合 → 动态调整宠物窗大小。
- * 宠物本体贴窗口右下角，因此扩窗时向左上方生长（右下角锚定不动），关面板时收回常驻尺寸。
- * 浏览器宿主 no-op（窗口即整个浏览器视口）。
+ * 由精灵尺寸 + 对话面板开合推导窗口尺寸（逻辑像素）：
+ * - rest：气泡区（最高约 164px）+ 精灵盒；宽兜底 340（气泡 max-width）
+ * - chat：再容纳右侧 (petSize-46) 偏移 + 360px 宽的对话面板，高度按 rest+80 收敛
+ * 与旧常量在 petSize=256 时完全一致（340×420 / 596×500）。
  */
-export async function setPetWindowChat(open: boolean): Promise<void> {
+export function petWindowSize(petSize: number, chat: boolean): { w: number; h: number } {
+  const restW = Math.max(340, petSize + 84)
+  const restH = petSize + 164
+  const chatW = Math.max(596, restW + 256)
+  const chatH = Math.max(500, restH + 80)
+  return chat ? { w: chatW, h: chatH } : { w: restW, h: restH }
+}
+
+/**
+ * 把宠物窗调整为目标尺寸：右下角锚定（扩窗向左上生长、收窗向右下缩回，宠物本体不动）。
+ * 仅扩窗（对话面板打开）时做屏幕收敛，避免面板被顶出屏幕。浏览器宿主 no-op。
+ */
+export async function applyPetWindowSize(petSize: number, chat: boolean): Promise<void> {
   if (!isTauri) return
-  const { getCurrentWindow } = await import('@tauri-apps/api/window')
+  const { getCurrentWindow, currentMonitor } = await import('@tauri-apps/api/window')
   const { LogicalSize, LogicalPosition } = await import('@tauri-apps/api/dpi')
   const win = getCurrentWindow()
   const scale = await win.scaleFactor()
   const toLogical = (v: number) => v / scale
-  const [pos, size] = await Promise.all([win.outerPosition(), win.outerSize()])
-  const w = toLogical(size.width)
-  const h = toLogical(size.height)
-  const nw = open ? CHAT_OPEN_W : PET_REST_W
-  const nh = open ? CHAT_OPEN_H : PET_REST_H
-  // 右下角锚定：扩窗向左上生长，收窗向右下缩回（统一按逻辑坐标计算）
-  await win.setPosition(new LogicalPosition(toLogical(pos.x) + w - nw, toLogical(pos.y) + h - nh))
-  await win.setSize(new LogicalSize(nw, nh))
+  const [pos, size, monitor] = await Promise.all([win.outerPosition(), win.outerSize(), currentMonitor()])
+  const { w, h } = petWindowSize(petSize, chat)
+  // 右下角锚定：统一按逻辑坐标计算
+  let nx = toLogical(pos.x) + toLogical(size.width) - w
+  let ny = toLogical(pos.y) + toLogical(size.height) - h
+  // 屏幕收敛（仅扩窗）：宠物被拖到屏幕边缘时，扩窗不得把对话面板顶出屏幕外
+  if (chat && monitor) {
+    const ms = monitor.scaleFactor
+    const mx = monitor.position.x / ms
+    const my = monitor.position.y / ms
+    const mw = monitor.size.width / ms
+    const mh = monitor.size.height / ms
+    nx = Math.min(Math.max(nx, mx), mx + mw - w)
+    ny = Math.min(Math.max(ny, my), my + mh - h)
+  }
+  await win.setPosition(new LogicalPosition(nx, ny))
+  await win.setSize(new LogicalSize(w, h))
 }
 
 /** 双击宠物：Tauri 唤起工作台主窗；浏览器开 Agent 内嵌工作台 */

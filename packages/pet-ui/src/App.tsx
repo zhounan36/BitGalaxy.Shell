@@ -1,10 +1,21 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type WheelEvent as ReactWheelEvent } from 'react'
 import { Bubble } from './components/Bubble'
 import { ChatPanel } from './components/ChatPanel'
 import { DebugPanel } from './components/DebugPanel'
 import { PetMenu } from './components/PetMenu'
 import { PetSprite } from './components/PetSprite'
-import { forwardDropUpload, isTauri, onFileDrop, openWorkbench, setPetWindowChat, startWindowDrag } from './api/tauri'
+import {
+  applyPetWindowSize,
+  clampPetSize,
+  forwardDropUpload,
+  isTauri,
+  loadPetSize,
+  onFileDrop,
+  openWorkbench,
+  PET_SIZE_STEP,
+  savePetSize,
+  startWindowDrag,
+} from './api/tauri'
 import { usePet } from './pet/usePet'
 
 export function App() {
@@ -17,11 +28,25 @@ export function App() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
   const [dropHover, setDropHover] = useState(false)
+  // 精灵尺寸（滚轮缩放，localStorage 持久化；Tauri 宿主联动窗口尺寸，浏览器宿主仅缩 DOM）
+  const [petSize, setPetSize] = useState(loadPetSize)
 
-  // 对话面板开合 → 宠物窗随之扩/缩（右下角锚定，宠物本体屏幕位置不变；浏览器宿主 no-op）
+  // 尺寸 / 对话面板开合变化 → 宠物窗随之扩/缩（右下角锚定，宠物本体屏幕位置不变；浏览器宿主 no-op）。
+  // 串行执行：滚轮连滚时逐次应用，避免并发 IPC 读到过期的窗口位置
+  const applyChainRef = useRef(Promise.resolve())
   useEffect(() => {
-    void setPetWindowChat(chatOpen)
-  }, [chatOpen])
+    applyChainRef.current = applyChainRef.current
+      .then(() => applyPetWindowSize(petSize, chatOpen))
+      // TODO(debug): 排查缩放链路（修完删除）
+      .catch((err) => {
+        if (isTauri) {
+          void import('@tauri-apps/api/core').then(({ invoke }) =>
+            invoke('dbg_evt', { msg: `applyPetWindowSize failed: ${String(err)}` }),
+          )
+        }
+        console.error('applyPetWindowSize failed', err)
+      })
+  }, [petSize, chatOpen])
 
   // TODO(debug): 临时事件探针——定位 dblclick 在 WebView2 中是否产生（修完删除）
   useEffect(() => {
@@ -30,6 +55,34 @@ export function App() {
       const { invoke } = await import('@tauri-apps/api/core')
       const log = (m: string) => void invoke('dbg_evt', { msg: m }).catch((e) => console.error('dbg_evt failed', e))
       log(`pet page mounted: ${location.href}`)
+      // TODO(debug): 布局实测探针——把关键 rect 写进窗口标题（修完删除）
+      window.setTimeout(() => {
+        const img = document.querySelector<HTMLImageElement>('.pet-sprite img')
+        const sprite = document.querySelector<HTMLElement>('.pet-sprite')
+        const anchor = document.querySelector<HTMLElement>('.pet-anchor')
+        if (!img || !sprite || !anchor) {
+          document.title = 'probe: missing els'
+          return
+        }
+        const rect = (el: Element) => {
+          const b = el.getBoundingClientRect()
+          return [b.x, b.y, b.width, b.height].map((v) => Math.round(v * 10) / 10)
+        }
+        const cs = getComputedStyle(img)
+        const payload = JSON.stringify({
+          iw: innerWidth,
+          ih: innerHeight,
+          dpr: devicePixelRatio,
+          a: rect(anchor),
+          s: rect(sprite),
+          i: rect(img),
+          nat: [img.naturalWidth, img.naturalHeight],
+          fit: cs.objectFit,
+          box: [cs.width, cs.height],
+        })
+        document.title = payload
+        log(`layout ${payload}`)
+      }, 500)
       for (const t of ['pointerdown', 'pointerup', 'click', 'dblclick'] as const) {
         document.addEventListener(
           t,
@@ -115,10 +168,25 @@ export function App() {
     setPos({ x: Math.max(0, start.left + dx), y: Math.max(0, start.top + dy) })
   }
 
+  // 滚轮缩放桌宠：向上放大 / 向下缩小（步进 16，160..480，持久化 localStorage）。
+  // 绑定在 pet-anchor 上，对话面板 / 菜单内的滚动不受影响
+  const onWheelZoom = (e: ReactWheelEvent) => {
+    if (!e.deltaY) return
+    const next = clampPetSize(petSize + (e.deltaY < 0 ? PET_SIZE_STEP : -PET_SIZE_STEP))
+    // TODO(debug): 排查缩放链路（修完删除）
+    if (isTauri) {
+      void import('@tauri-apps/api/core').then(({ invoke }) =>
+        invoke('dbg_evt', { msg: `wheel deltaY=${e.deltaY} ${petSize}->${next}` }),
+      )
+    }
+    savePetSize(next)
+    setPetSize(next)
+  }
+
   const debug = new URLSearchParams(location.search).has('debug')
 
   return (
-    <div className="pet-stage">
+    <div className="pet-stage" style={{ '--pet-size': `${petSize}px` } as CSSProperties}>
       {debug && <DebugPanel view={view} />}
       {dropHover && <div className="drop-hint">松手，交给工作台上传</div>}
       {menuOpen && (
@@ -129,6 +197,7 @@ export function App() {
         ref={anchorRef}
         className="pet-anchor"
         style={pos && !isTauri ? { left: pos.x, top: pos.y } : { right: 0, bottom: 0 }}
+        onWheel={onWheelZoom}
         onContextMenu={(e) => {
           e.preventDefault()
           setMenuOpen(true)
@@ -138,6 +207,7 @@ export function App() {
         {!menuOpen && <Bubble view={view} />}
         <PetSprite
           state={view.state}
+          size={petSize}
           onPointerEnter={() => dispatch({ type: 'pointer-enter' })}
           onPoke={() => {
             registerTap()

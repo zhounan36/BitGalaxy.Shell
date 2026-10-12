@@ -107,6 +107,10 @@ html.in-tauri body {
 .pet-sprite img {
   position: absolute;
   inset: 0;
+  /* img 是替换元素：绝对定位 + width:auto 会取固有尺寸（512px）而不会拉伸填满，
+     必须显式撑满精灵盒，object-fit:contain 才能把整只角色缩进盒内 */
+  width: 100%;
+  height: 100%;
   object-fit: contain;
   filter: drop-shadow(0 6px 14px rgba(4, 16, 32, 0.45));
   transform-origin: 50% 96%; /* 呼吸微动以脚底为轴（对应 manifest anchor） */
@@ -175,7 +179,7 @@ html.in-tauri body {
   min-width: 180px;
 }
 
-/* 右键菜单：呼出工作台 / 主机会话（窗口高 420，菜单 ~190 必须整体落在窗内） */
+/* 右键菜单：呼出工作台 / 主机会话（bottom 随精灵尺寸 --pet-size 浮动，保持悬在宠物上方） */
 .pet-menu-mask {
   position: absolute;
   inset: 0;
@@ -184,7 +188,7 @@ html.in-tauri body {
 .pet-menu {
   position: absolute;
   right: 10px;
-  bottom: 216px;
+  bottom: calc(var(--pet-size, 256px) - 40px);
   width: 190px;
   padding: 6px;
   border-radius: var(--radius-lg);
@@ -264,7 +268,7 @@ html.in-tauri body {
   position: absolute;
   right: 50%;
   transform: translateX(50%);
-  bottom: 300px;
+  bottom: calc(var(--pet-size, 256px) + 44px);
   padding: 8px 14px;
   border-radius: var(--radius-lg);
   background: var(--float-menu);
@@ -297,7 +301,7 @@ html.in-tauri body {
 /* AI 对话面板：贴宠物左侧（宠物在右下角），深海蓝半透明风 */
 .chat-panel {
   position: absolute;
-  right: 210px;
+  right: calc(var(--pet-size, 256px) - 46px);
   bottom: 20px;
   width: 360px;
   height: 460px;

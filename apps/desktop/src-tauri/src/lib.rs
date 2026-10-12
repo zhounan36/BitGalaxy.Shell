@@ -370,6 +370,10 @@ pub fn run() {
             };
             WebviewWindowBuilder::new(app, "main", main_url)
                 .title("BitGalaxy Shell 工作台")
+                // TODO(debug): 临时开 CDP 9222（首个 webview 决定共享环境）——排查完删除
+                .additional_browser_args(
+                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=9222",
+                )
                 .inner_size(1360.0, 860.0)
                 .min_inner_size(1024.0, 680.0)
                 .decorations(false)
@@ -394,6 +398,10 @@ pub fn run() {
             };
             let mut pet = WebviewWindowBuilder::new(app, "pet", pet_url)
                 .title("鲸鱼娘桌宠")
+                // TODO(debug): 临时开 CDP 9222 定位宠物窗 IPC——排查完删除
+                .additional_browser_args(
+                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=9222",
+                )
                 .inner_size(PET_W, PET_H)
                 .decorations(false)
                 .transparent(true)
