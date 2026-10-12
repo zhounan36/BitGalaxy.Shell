@@ -25,6 +25,19 @@ export class AgentSocket {
 
   connect(): Promise<void> {
     if (this.ready) return Promise.resolve()
+    // 启动竞态兜底：服务端绑定可能略晚于窗口加载，最多重试 10 次（每次 500ms）
+    const attempt = (remaining: number): Promise<void> =>
+      this.connectOnce().catch((err: Error) => {
+        if (remaining <= 0) throw err
+        return new Promise((resolve, reject) => {
+          setTimeout(() => attempt(remaining - 1).then(resolve, reject), 500)
+        })
+      })
+    return attempt(10)
+  }
+
+  private connectOnce(): Promise<void> {
+    if (this.ready) return Promise.resolve()
     return new Promise((resolve, reject) => {
       // Tauri 壳宿主（tauri.localhost）与 Agent 不同源：直连本机 Agent 端口；
       // dev（vite）与浏览器宿主（Agent 内嵌工作台）保持同源。
