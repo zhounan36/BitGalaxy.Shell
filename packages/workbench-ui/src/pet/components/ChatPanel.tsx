@@ -8,6 +8,15 @@ interface ChatMsg {
   text: string
   thinking?: string
   error?: boolean
+  /** AI 工具执行卡片（Trae 风格：可折叠，running 带单条终止按钮） */
+  tool?: {
+    id: string
+    name: string
+    detail?: string
+    stage: 'running' | 'done' | 'failed' | 'cancelled'
+    summary?: string
+    output?: string
+  }
 }
 
 interface Approval {
@@ -59,6 +68,7 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
   const streamIdRef = useRef<string | undefined>(undefined)
   // 流式消息 id 的渲染镜像：ref 供回调读取，state 驱动 ThinkBlock 展开状态
   const [streamingId, setStreamingId] = useState<string>()
+  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
 
   // 创建/复用当前流式消息，写入正文或思考内容（多轮工具循环的思考以空行分隔）
   const streamInto = (delta: string, thinking: boolean) => {
@@ -102,6 +112,35 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
         streamInto(frame.m.delta, false)
         return
       }
+      if (frame.t === 'ai-tool') {
+        const ev = frame.m
+        // 工具卡片独立成条：先终止当前流式消息，保证「思考 → 工具 → 思考」时序清晰
+        streamIdRef.current = undefined
+        setStreamingId(undefined)
+        if (ev.stage === 'running') {
+          setMsgs((prev) => [
+            ...prev,
+            {
+              id: `tool-${ev.toolCallId}`,
+              role: 'assistant',
+              text: '',
+              tool: { id: ev.toolCallId, name: ev.name, detail: ev.detail, stage: 'running' },
+            },
+          ])
+        } else {
+          // 终态：按 toolCallId 更新同一张卡片
+          setMsgs((prev) =>
+            prev.map((m) =>
+              m.tool && m.tool.id === ev.toolCallId
+                ? { ...m, tool: { ...m.tool, stage: ev.stage, summary: ev.summary, output: ev.output } }
+                : m,
+            ),
+          )
+          // 命令被终止后，等待中的审批卡片随之失效
+          if (ev.stage === 'cancelled') setApproval(null)
+        }
+        return
+      }
       if (frame.t === 'ai-result') {
         streamIdRef.current = undefined
         setStreamingId(undefined)
@@ -110,14 +149,21 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
         // 否则输入框被 approval 永久禁用，表现为「卡死」
         setApproval(null)
         setMsgs((prev) => {
-          const tail = prev[prev.length - 1]
+          // 兜底：终态帧丢失/整轮被 abort 时，running 卡片不能永远转圈
+          const patched = prev.map((m) =>
+            m.tool && m.tool.stage === 'running'
+              ? { ...m, tool: { ...m.tool, stage: 'done' as const, summary: m.tool.summary ?? '已结束' } }
+              : m,
+          )
+          const tail = patched[patched.length - 1]
+          let next = patched
           if (frame.m.text && streamIdRef.current === undefined && tail?.role !== 'assistant') {
-            return [...prev, { id: crypto.randomUUID(), role: 'assistant', text: frame.m.text }]
+            next = [...next, { id: crypto.randomUUID(), role: 'assistant' as const, text: frame.m.text }]
           }
           if (!frame.m.ok && frame.m.message) {
-            return [...prev, { id: crypto.randomUUID(), role: 'assistant', text: frame.m.message, error: true }]
+            next = [...next, { id: crypto.randomUUID(), role: 'assistant' as const, text: frame.m.message, error: true }]
           }
-          return prev
+          return next
         })
       }
     })
@@ -158,22 +204,60 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
 
   const answerApproval = (approved: boolean) => {
     if (!approval) return
-    void agentSocket
-      .connect()
-      .then(() =>
-        agentSocket.sendControl({ t: 'ai-approve', m: { chatId: CHAT_ID, reqId: approval.reqId, approved } }),
-      )
-      .catch(() => {})
+    const snapshot = approval
     setMsgs((prev) => [
       ...prev,
       {
         id: crypto.randomUUID(),
         role: 'user',
-        text: approved ? `（批准执行：${approval.command}）` : '（拒绝执行该命令）',
+        text: approved ? `（批准执行：${snapshot.command}）` : '（拒绝执行该命令）',
       },
     ])
     setApproval(null)
     if (approved) setBusy('执行中…')
+    void agentSocket
+      .connect()
+      .then(() =>
+        agentSocket.sendControl({ t: 'ai-approve', m: { chatId: CHAT_ID, reqId: snapshot.reqId, approved } }),
+      )
+      .catch((err: Error) => {
+        // 发送失败（Agent 不可达/断线重连中）：恢复卡片让用户稍后重点，
+        // 否则审批结果丢失会被 120s 超时误判为「用户拒绝」
+        setApproval(snapshot)
+        setBusy(undefined)
+        setMsgs((prev) => [
+          ...prev,
+          { id: crypto.randomUUID(), role: 'assistant', text: `审批结果发送失败：${err.message}（连接恢复后请再点一次）`, error: true },
+        ])
+      })
+  }
+
+  /** 终止本轮对话/执行：后端 abort 工具循环、撤下审批卡片并回「已终止」 */
+  const stopTurn = () => {
+    setBusy('正在停止…')
+    setApproval(null)
+    void agentSocket
+      .connect()
+      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'cancel', chatId: CHAT_ID } }))
+      .catch((err: Error) => {
+        setBusy(undefined)
+        setMsgs((prev) => [
+          ...prev,
+          { id: crypto.randomUUID(), role: 'assistant', text: `终止请求发送失败：${err.message}`, error: true },
+        ])
+      })
+  }
+
+  /** 只终止这一条执行中的命令：对话继续，AI 会看到「用户终止了该命令」 */
+  const cancelTool = (toolCallId: string) => {
+    void agentSocket
+      .connect()
+      .then(() =>
+        agentSocket.sendControl({ t: 'ai', m: { op: 'cancel-tool', chatId: CHAT_ID, toolCallId } }),
+      )
+      .catch(() => {
+        // 连接断开时后端整轮也会因超时收尾；卡片由 ai-result 兜底清理
+      })
   }
 
   return (
@@ -206,18 +290,72 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
         {msgs.map((m) => (
           <div key={m.id} className={`chat-msg chat-${m.role}${m.error ? ' chat-err' : ''}`}>
             {m.thinking && <ThinkBlock text={m.thinking} streaming={m.id === streamingId} />}
-            {m.text}
-            <button
-              type="button"
-              className="chat-copy"
-              title="复制这条消息"
-              onClick={() => copyMsg(m)}
-            >
-              {copiedId === m.id ? '已复制' : '复制'}
-            </button>
+            {m.tool ? (
+              <div
+                className={`chat-tool chat-tool-${m.tool.stage}${m.tool.stage === 'failed' || m.tool.stage === 'cancelled' ? ' chat-tool-fail' : ''}`}
+              >
+                <button
+                  type="button"
+                  className="chat-tool-bar"
+                  title={m.tool.output ? '展开/收起输出' : undefined}
+                  onClick={() =>
+                    m.tool?.output &&
+                    setExpandedTools((prev) => {
+                      const next = new Set(prev)
+                      if (next.has(m.tool!.id)) next.delete(m.tool!.id)
+                      else next.add(m.tool!.id)
+                      return next
+                    })
+                  }
+                >
+                  {m.tool.stage === 'running' ? (
+                    <span className="chat-tool-spinner" aria-label="执行中" />
+                  ) : (
+                    <span className={`chat-tool-dot chat-tool-dot-${m.tool.stage}`} aria-hidden />
+                  )}
+                  <span className="chat-tool-name">{m.tool.name}</span>
+                  {m.tool.detail && <code className="chat-tool-detail">{m.tool.detail}</code>}
+                  <span className={`chat-tool-summary chat-tool-summary-${m.tool.stage}`}>
+                    {m.tool.stage === 'running' ? '执行中…' : (m.tool.summary ?? '')}
+                  </span>
+                  {m.tool.output && (
+                    <span className={`chat-tool-caret${expandedTools.has(m.tool.id) ? ' chat-tool-caret-open' : ''}`} aria-hidden>
+                      ▸
+                    </span>
+                  )}
+                </button>
+                {m.tool.stage === 'running' && (
+                  <button type="button" className="chat-tool-stop" title="终止这条命令（对话继续）" onClick={() => cancelTool(m.tool!.id)}>
+                    终止
+                  </button>
+                )}
+                {m.tool.output && expandedTools.has(m.tool.id) && (
+                  <pre className="chat-tool-output">{m.tool.output}</pre>
+                )}
+              </div>
+            ) : (
+              m.text
+            )}
+            {!m.tool && (
+              <button
+                type="button"
+                className="chat-copy"
+                title="复制这条消息"
+                onClick={() => copyMsg(m)}
+              >
+                {copiedId === m.id ? '已复制' : '复制'}
+              </button>
+            )}
           </div>
         ))}
-        {busy && <div className="chat-busy">{busy}</div>}
+        {busy && (
+          <div className="chat-busy">
+            {busy}
+            <button type="button" className="chat-stop" title="终止本轮对话与执行" onClick={stopTurn}>
+              停止
+            </button>
+          </div>
+        )}
       </div>
       {approval && (
         <div className="chat-approval">
@@ -225,11 +363,14 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
           <pre className="chat-approval-cmd">{approval.command}</pre>
           <div className="chat-approval-hint">等待你的批准，2 分钟内未处理将自动拒绝</div>
           <div className="chat-approval-btns">
-            <button type="button" className="chat-ok" onClick={() => answerApproval(true)}>
-              批准执行
+            <button type="button" className="chat-kill" title="终止本轮对话（撤下审批并停止执行）" onClick={stopTurn}>
+              终止本轮
             </button>
             <button type="button" className="chat-no" onClick={() => answerApproval(false)}>
               拒绝
+            </button>
+            <button type="button" className="chat-ok" onClick={() => answerApproval(true)}>
+              批准执行
             </button>
           </div>
         </div>

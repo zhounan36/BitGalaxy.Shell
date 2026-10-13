@@ -210,12 +210,41 @@ impl ConnRegistry {
             .get(host_id)
             .ok_or_else(|| ToolError::new(ERR_HOST_NOT_FOUND, format!("主机档案不存在: {host_id}")))?;
         let mismatch = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // 密码重试认证成功 → 回写主机档案（下次连接免重输）+ 审计 + 推送最新主机列表；
+        // 仅工作台交互模式（AI/MCP fail-closed 无重试，不回写）
+        let save_password: Option<Arc<dyn Fn(&str) + Send + Sync>> = match &create.ask {
+            HostKeyAsk::Interactive { out, .. } => {
+                let out = out.clone();
+                let stores = self.stores.clone();
+                let hid = host_id.to_string();
+                Some(Arc::new(move |pwd: &str| {
+                    if !stores.hosts.update_password(&hid, pwd) {
+                        return;
+                    }
+                    stores.audit.append(
+                        "host.password_updated",
+                        serde_json::json!({ "hostId": hid, "reason": "auth-retry" }),
+                    );
+                    out.send_frame(&crate::protocol::ServerFrame::Hosts {
+                        m: crate::protocol::HostsResultM {
+                            op: "list".into(),
+                            ok: true,
+                            hosts: Some(stores.hosts.list()),
+                            host: None,
+                            message: None,
+                        },
+                    });
+                }))
+            }
+            HostKeyAsk::FailClosed => None,
+        };
         let ctx = Arc::new(HostKeyCtx {
             known: self.stores.known.clone(),
             host: host.input.host.clone(),
             port: host.input.port,
             ask: create.ask,
             mismatch: mismatch.clone(),
+            save_password,
         });
         match ssh::connect(&host, ctx).await {
             Ok(conn) => {

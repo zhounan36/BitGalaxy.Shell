@@ -992,10 +992,10 @@ fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "make_dir", title: "建远程目录", read_only: false, destructive: false,
-            desc: "SFTP 创建远程目录（单级，等价 mkdir）。受写策略与审批约束。",
+            desc: "SFTP 创建远程目录（单级，等价 mkdir）。路径不支持 ~ 波浪号展开（会当作字面目录名），相对路径相对家目录；不确定时先 list_dir 确认 resolvedPath。受写策略与审批约束。",
             params: serde_json::json!({
                 "hostId": { "type": "string", "description": "主机 id（先用 list_hosts 查询）" },
-                "path": { "type": "string", "description": "远程目录路径" } }),
+                "path": { "type": "string", "description": "远程目录路径（不要带 ~）" } }),
             required: &["hostId", "path"],
         },
         ToolSpec {

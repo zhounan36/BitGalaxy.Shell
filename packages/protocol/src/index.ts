@@ -234,9 +234,24 @@ export interface AiApprovalRequest {
   command: string
 }
 
+/** AI 工具调用事件：running 先推（卡片 spinner + 单条终止），终态同 toolCallId 更新 */
+export interface AiToolEvent {
+  chatId: string
+  toolCallId: string
+  name: string
+  detail?: string
+  stage: 'running' | 'done' | 'failed' | 'cancelled'
+  summary?: string
+  /** 可展开的完整输出（stdout/stderr 或错误详情） */
+  output?: string
+}
+
 export type AiOp =
   | { op: 'chat'; chatId: string; text: string }
   | { op: 'reset'; chatId: string }
+  | { op: 'cancel'; chatId: string }
+  /** 只终止 toolCallId 对应的单条命令，对话继续 */
+  | { op: 'cancel-tool'; chatId: string; toolCallId: string }
 
 // ── 设置（SQLite 键值存储，统一配置读写）──────────────────────────────────
 
@@ -319,6 +334,7 @@ export type ServerFrame =
   | { t: 'ai-delta'; m: { chatId: string; delta: string } }
   | { t: 'ai-result'; m: { chatId: string; ok: boolean; text: string; message?: string } }
   | { t: 'ai-approval'; m: AiApprovalRequest }
+  | { t: 'ai-tool'; m: AiToolEvent }
   | { t: 'settings-result'; m: SettingsResult }
   | { t: 'error'; s?: string; m: { code: string; message: string } }
 

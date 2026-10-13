@@ -111,6 +111,19 @@ impl HostStore {
         Ok(self.get(id))
     }
 
+    /// 仅更新密码（密码重试认证成功后回写，其余档案字段不动）
+    pub fn update_password(&self, id: &str, password: &str) -> bool {
+        self.db
+            .with(|c| {
+                c.execute(
+                    "UPDATE hosts SET password=?1, updated_at=?2 WHERE id=?3",
+                    rusqlite::params![password, now_iso(), id],
+                )
+            })
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
     pub fn delete(&self, id: &str) -> bool {
         self.db
             .with(|c| c.execute("DELETE FROM hosts WHERE id = ?1", [id]))

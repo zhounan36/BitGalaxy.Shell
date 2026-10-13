@@ -470,6 +470,181 @@ html.in-tauri body {
   color: var(--accent-bright);
   padding: 2px 4px;
   animation: bubble-in 140ms ease;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 停止按钮（busy 指示旁）：随时终止本轮对话与执行 */
+.chat-stop {
+  border: 1px solid rgba(240, 140, 140, 0.5);
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(240, 140, 140, 0.95);
+  font-size: 11px;
+  padding: 1px 8px;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+.chat-stop:hover {
+  background: rgba(240, 140, 140, 0.16);
+}
+
+/* AI 工具执行卡片（Trae 风格小窗：状态条 + 可展开输出 + 单条终止） */
+.chat-tool {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 6px;
+  padding: 0 4px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 12px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-tool-fail {
+  border-color: rgba(240, 140, 140, 0.35);
+}
+
+/* 状态条（可点开输出） */
+.chat-tool-bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex: 1 1 auto;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  padding: 6px 2px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-tool-bar:not(:has(+ .chat-tool-stop)) {
+  cursor: default;
+}
+
+/* 执行中 spinner */
+.chat-tool-spinner {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  border-top-color: var(--accent-bright);
+  border-radius: 50%;
+  animation: tool-spin 0.8s linear infinite;
+}
+
+@keyframes tool-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 终态圆点 */
+.chat-tool-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.chat-tool-dot-done {
+  background: #6fcf97;
+}
+
+.chat-tool-dot-failed,
+.chat-tool-dot-cancelled {
+  background: #f0a0a0;
+}
+
+.chat-tool-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent-bright);
+  flex-shrink: 0;
+}
+
+.chat-tool-detail {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.chat-tool-summary {
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: auto;
+  flex: 0 1 auto;
+}
+
+.chat-tool-summary-running {
+  color: var(--accent-bright);
+}
+
+.chat-tool-summary-failed,
+.chat-tool-summary-cancelled {
+  color: #f0a0a0;
+}
+
+.chat-tool-caret {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+  transition: transform 140ms ease;
+}
+
+.chat-tool-caret-open {
+  transform: rotate(90deg);
+}
+
+/* 单条命令终止按钮 */
+.chat-tool-stop {
+  border: 1px solid rgba(240, 140, 140, 0.5);
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(240, 140, 140, 0.95);
+  font-size: 11px;
+  padding: 2px 9px;
+  margin: 2px;
+  cursor: pointer;
+  transition: background 140ms ease;
+  flex-shrink: 0;
+}
+
+.chat-tool-stop:hover {
+  background: rgba(240, 140, 140, 0.16);
+}
+
+/* 展开的完整输出 */
+.chat-tool-output {
+  flex-basis: 100%;
+  margin: 0 0 6px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.28);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow: auto;
 }
 
 /* 可折叠思考块（chat-msg 内，注意父级 pre-wrap 需覆盖回 wrap） */
@@ -564,7 +739,8 @@ html.in-tauri body {
 }
 
 .chat-ok,
-.chat-no {
+.chat-no,
+.chat-kill {
   border: none;
   border-radius: 7px;
   font-size: 12px;
@@ -581,6 +757,18 @@ html.in-tauri body {
 .chat-no {
   background: rgba(255, 255, 255, 0.12);
   color: var(--text-primary);
+}
+
+/* 终止本轮（审批卡片）：低调放在左侧 */
+.chat-kill {
+  background: transparent;
+  color: rgba(240, 140, 140, 0.9);
+  margin-right: auto;
+  padding: 5px 8px;
+}
+
+.chat-kill:hover {
+  background: rgba(240, 140, 140, 0.14);
 }
 
 .chat-ok:hover {
