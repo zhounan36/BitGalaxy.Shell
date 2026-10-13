@@ -26,11 +26,9 @@ fn allowed_origins(port: u16) -> Vec<String> {
     vec![
         format!("http://127.0.0.1:{port}"),
         format!("http://localhost:{port}"),
-        // vite dev（workbench-ui 5177 / pet-ui 5178 代理 /ws）
-        "http://localhost:5177".into(),
-        "http://127.0.0.1:5177".into(),
-        "http://localhost:5178".into(),
-        "http://127.0.0.1:5178".into(),
+        // vite dev（workbench-ui 17177 MPA：工作台 + /pet/ 桌宠，代理 /ws）
+        "http://localhost:17177".into(),
+        "http://127.0.0.1:17177".into(),
         // Tauri 桌面壳 webview
         "http://tauri.localhost".into(),
         "tauri://localhost".into(),

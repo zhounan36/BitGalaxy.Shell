@@ -1,7 +1,7 @@
 {
   "name": "bitgalaxy-shell",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "BitGalaxy Shell：单进程桌面应用（Tauri 2）：内嵌 Agent（SSH 数据面 + WS 工作台 + 桌宠 + MCP stdio）",
   "workspaces": [
@@ -9,14 +9,12 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "npm run build:protocol && npm run build:ui && npm run build:pet",
+    "build": "npm run build:protocol && npm run build:ui",
     "build:protocol": "npm run build -w @bgshell/protocol",
     "build:ui": "npm run build -w @bgshell/workbench-ui",
-    "build:pet": "npm run build -w @bgshell/pet-ui",
     "dev:ui": "npm run dev -w @bgshell/workbench-ui",
-    "dev:pet": "npm run dev -w @bgshell/pet-ui",
-    "desktop:assets": "npm run build:protocol && npm run build:ui && npm run build:pet && node scripts/prep-assets.mjs",
-    "desktop:dev": "npm run desktop:assets && start \"bgshell-dev-ui\" /min npm run dev:ui && start \"bgshell-dev-pet\" /min npm run dev:pet && npm run dev -w @bgshell/desktop",
+    "desktop:assets": "npm run build:protocol && npm run build:ui && node scripts/prep-assets.mjs",
+    "desktop:dev": "npm run desktop:assets && start \"bgshell-dev-ui\" /min npm run dev:ui && npm run dev -w @bgshell/desktop",
     "desktop:exe": "npm run desktop:assets && npm run build:exe-only -w @bgshell/desktop",
     "desktop:build": "npm run desktop:assets && npm run build -w @bgshell/desktop"
   },

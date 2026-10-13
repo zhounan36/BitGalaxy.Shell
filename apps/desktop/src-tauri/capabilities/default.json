@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/capability/2",
   "identifier": "default",
-  "description": "主窗口与宠物窗的默认能力：核心 API + 原生窗口拖拽。主窗加载内嵌工作台（frontendDist / dev 为 vite 5177）；宠物窗 dev 加载 vite（localhost:5178），remote 上下文需显式授权 IPC（事件互通 + 上传用本地文件读取）",
+  "description": "主窗口与宠物窗的默认能力：核心 API + 原生窗口拖拽。主窗加载内嵌工作台、宠物窗加载 /pet/（frontendDist / dev 同一 vite 17177 MPA），remote 上下文需显式授权 IPC（事件互通 + 上传用本地文件读取）",
   "windows": ["main", "pet"],
   "remote": {
-    "urls": ["http://localhost:5177", "http://127.0.0.1:5177", "http://localhost:5178"]
+    "urls": ["http://localhost:17177", "http://127.0.0.1:17177"]
   },
   "permissions": [
     "core:default",
