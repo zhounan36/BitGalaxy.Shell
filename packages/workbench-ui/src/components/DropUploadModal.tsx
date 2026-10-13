@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { Alert, Button, Input, List, Modal, Progress, Select, Typography, message } from 'antd'
-import type { HostRecord, SftpRequest, SftpResult } from '@bgshell/protocol'
+import type { HostRecord } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
+import { preflightBatch, sftpRequest, showTransferError } from '../api/transferService'
 import { formatBytes } from '../utils/format'
 
-const CHUNK = 256 * 1024
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
 interface DropFile {
@@ -85,31 +85,12 @@ export function DropUploadModal({ open, paths, hosts, onClose, onOpenSftp }: Dro
 
   const join = (d: string, name: string) => (d.endsWith('/') ? `${d}${name}` : `${d}/${name}`)
 
-  /** SFTP 请求/响应关联（同 SftpPane 的 rid 机制，独立会话） */
-  const request = async (sid: string, op: SftpRequest): Promise<SftpResult> => {
-    const rid = crypto.randomUUID()
-    return await new Promise<SftpResult>((resolve) => {
-      const timer = window.setTimeout(() => {
-        off()
-        resolve({ op: op.op, rid, ok: false, message: '请求超时' })
-      }, 20000)
-      const off = agentSocket.onControl((frame) => {
-        if (frame.t === 'sftp-result' && frame.s === sid && frame.m.rid === rid) {
-          clearTimeout(timer)
-          off()
-          resolve(frame.m)
-        }
-      })
-      agentSocket.sendControl({ t: 'sftp', s: sid, m: { ...op, rid } })
-    })
-  }
-
   const start = async () => {
     if (!hostId) {
       message.warning('请先选择目标主机')
       return
     }
-    const targets = files.filter((f) => !f.isDir && !f.statError)
+    const targets = files.filter((f) => !f.statError)
     if (targets.length === 0) {
       message.warning('没有可上传的文件')
       return
@@ -117,7 +98,6 @@ export function DropUploadModal({ open, paths, hosts, onClose, onOpenSftp }: Dro
     setPhase('uploading')
     cancelRef.current = false
     const sid = crypto.randomUUID()
-    const { invoke } = await import('@tauri-apps/api/core')
     try {
       await new Promise<void>((resolve, reject) => {
         const timer = window.setTimeout(() => {
@@ -138,45 +118,89 @@ export function DropUploadModal({ open, paths, hosts, onClose, onOpenSftp }: Dro
         agentSocket.sendControl({ t: 'open', s: sid, m: { hostId, kind: 'sftp' } })
       })
 
-      for (const f of targets) {
+      // 统一预检 + 确认（重名/权限/空间/盘格式；覆盖 / 重命名 / 取消）
+      const decisions = await preflightBatch(
+        sid,
+        'upload',
+        targets.map((f) => ({ path: f.path, name: f.name, sizeB: f.sizeB, target: join(dir, f.name) })),
+      )
+      if (decisions === null) {
+        cancelRef.current = true // 用户取消预检：finally 按「取消」处理（回到 ready）
+        return
+      }
+
+      // 原生传输：put-file / put-dir（Agent 直读本地文件，断点续传；目录递归上传）
+      const opIds = new Map<string, string>() // path → opId
+      for (let i = 0; i < targets.length; i++) {
         if (cancelRef.current) break
+        const f = targets[i]
+        const d = decisions[i]
+        if (d.skip) {
+          setTransfers((prev) => ({
+            ...prev,
+            [f.path]: { transferred: 0, total: f.sizeB, status: 'error', message: '已跳过' },
+          }))
+          continue
+        }
+        const r = await sftpRequest(
+          sid,
+          f.isDir
+            ? { op: 'put-dir' as const, path: f.path, to: d.target, fresh: d.fresh }
+            : { op: 'put-file' as const, path: f.path, to: d.target, fresh: d.fresh },
+        )
+        if (!r.ok || !r.opId) {
+          showTransferError(`${f.name} 上传失败`, r.errorKind, r.message)
+          setTransfers((prev) => ({
+            ...prev,
+            [f.path]: { transferred: 0, total: f.sizeB, status: 'error', message: r.message },
+          }))
+          continue
+        }
+        opIds.set(f.path, r.opId)
         setTransfers((prev) => ({
           ...prev,
           [f.path]: { transferred: 0, total: f.sizeB, status: 'uploading' },
         }))
-        const openRes = await request(sid, { op: 'upload-open', path: join(dir, f.name) })
-        if (!openRes.ok || !openRes.opId) {
-          setTransfers((prev) => ({
-            ...prev,
-            [f.path]: { transferred: 0, total: f.sizeB, status: 'error', message: openRes.message },
-          }))
-          continue
-        }
-        for (let offset = 0; offset < f.sizeB; offset += CHUNK) {
-          if (cancelRef.current) break
-          const buf = await invoke<ArrayBuffer>('read_file_chunk', { path: f.path, offset, len: CHUNK })
-          await agentSocket.sendSftpChunk(sid, openRes.opId, new Uint8Array(buf))
-          setTransfers((prev) => ({
-            ...prev,
-            [f.path]: {
-              ...prev[f.path],
-              transferred: Math.min(offset + buf.byteLength, f.sizeB),
-              total: f.sizeB,
-              status: 'uploading',
-            },
-          }))
-        }
-        const closeRes = await request(sid, { op: 'upload-close', opId: openRes.opId })
-        setTransfers((prev) => ({
-          ...prev,
-          [f.path]: {
-            ...prev[f.path],
-            transferred: f.sizeB,
-            status: closeRes.ok ? 'done' : 'error',
-            message: closeRes.ok ? undefined : closeRes.message,
-          },
-        }))
       }
+
+      await new Promise<void>((resolve) => {
+        let pending = opIds.size
+        if (pending === 0) return resolve()
+        const off = agentSocket.onControl((frame) => {
+          if (!('s' in frame) || frame.s !== sid) return
+          if (frame.t === 'sftp-progress') {
+            const { opId, transferred, total } = frame.m
+            const target = [...opIds.entries()].find(([, id]) => id === opId)
+            if (target) {
+              setTransfers((prev) => ({
+                ...prev,
+                [target[0]]: { ...prev[target[0]], transferred, total },
+              }))
+            }
+          }
+          if (frame.t === 'sftp-result' && frame.m.op === 'transfer-done' && frame.m.opId) {
+            const target = [...opIds.entries()].find(([, id]) => id === frame.m.opId)
+            if (target) {
+              const ok = frame.m.ok
+              setTransfers((prev) => ({
+                ...prev,
+                [target[0]]: {
+                  ...prev[target[0]],
+                  transferred: ok ? frame.m.sizeB ?? prev[target[0]]?.total ?? 0 : prev[target[0]]?.transferred ?? 0,
+                  status: ok ? 'done' : 'error',
+                  message: ok ? undefined : frame.m.message,
+                },
+              }))
+              opIds.delete(target[0])
+              pending -= 1
+              if (pending <= 0) {
+                off()
+                resolve()
+              }
+            }
+          }
+        })
+      })
     } catch (err) {
       message.error(`上传失败：${err instanceof Error ? err.message : String(err)}`)
     } finally {
@@ -253,7 +277,7 @@ export function DropUploadModal({ open, paths, hosts, onClose, onOpenSftp }: Dro
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                 <Typography.Text ellipsis style={{ maxWidth: 380 }}>
                   {f.name}
-                  {f.isDir && <Typography.Text type="secondary">（目录，跳过）</Typography.Text>}
+                  {f.isDir && <Typography.Text type="secondary">（目录，递归上传）</Typography.Text>}
                 </Typography.Text>
                 <Typography.Text type="secondary">{f.isDir ? '—' : formatBytes(f.sizeB)}</Typography.Text>
               </div>

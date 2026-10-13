@@ -6,7 +6,9 @@ edition = "2021"
 
 [lib]
 name = "bgshell_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 桌面构建只需 rlib；staticlib/cdylib 是给 tauri mobile（android/ios）用的，
+# 保留会导致每次构建额外产出 1.3GB+ 的 .lib 归档和 DLL 链接，严重拖慢开发构建
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -21,7 +23,7 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "io-std", "sync", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "io-std", "sync", "fs", "process"] }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 # 默认后端 aws-lc-rs 需要 NASM；改用 ring（纯 cc 编译，无额外系统依赖）
@@ -37,8 +39,21 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
+# 传输预检：本地磁盘剩余空间（跨平台）
+fs2 = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+# 传输预检：GetVolumeInformationW 查卷格式（FAT32 单文件 4GB 上限）
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+
+[profile.dev]
+# 编译提速：只保留行号表（跳过变量/完整类型调试信息），MSVC 下 PDB 体积大幅缩小，
+# 依赖树首次编译与 rust-lld 链接都明显加快；panic 回溯仍带行号
+debug = "line-tables-only"
 
 [profile.release]
-codegen-units = 1
-lto = true
+# 编译提速（实测增量重建一次 app 改动：fat LTO+cu=1 链接需数分钟 → thin 88s → false 70s）；
+# 关 LTO 后 exe 仅大 0.7MB（体积主要靠 strip），SSH/IO 型应用无跨 crate 内联需求
+# codegen-units 保持默认 16（=1 会把本 crate 代码生成串行化，实测单核 31s）
+lto = false
 strip = true

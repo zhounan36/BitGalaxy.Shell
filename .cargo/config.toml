@@ -1,0 +1,4 @@
+# Windows 链接提速：用随工具链自带的 rust-lld 替代 MSVC link.exe
+# （link.exe 写 200MB+ 的 debug PDB 很慢且基本单线程）
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"

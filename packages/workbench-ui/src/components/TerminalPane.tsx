@@ -1,23 +1,46 @@
 import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { Progress, Typography } from 'antd'
+import { CloseOutlined, DownloadOutlined } from '@ant-design/icons'
 import { DataFrameType } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
 import { readClipboardText, writeClipboardText } from '../api/clipboard'
+import {
+  cancelTermDownload,
+  cleanSelectedName,
+  clearSessionCwd,
+  downloadSelectionFromSession,
+  parseOsc7,
+  reportOsc7,
+  setSessionAltScreen,
+  type TermDownloadState,
+} from '../api/termUpload'
+import { formatBytes } from '../utils/format'
 
-/** 右键菜单状态（clientX/Y + 当前是否有选区） */
+/** 右键菜单状态（clientX/Y + 当前选区与清洗出的待下载名） */
 interface TermMenuState {
   x: number
   y: number
   hasSelection: boolean
+  /** 选区清洗出的文件/文件夹名（无有效选区为 null） */
+  selName: string | null
+}
+
+interface TerminalPaneProps {
+  sessionId: string
+  /** HTML5 拖放兜底（浏览器 dev 宿主；Tauri 壳内原生拖放接管、不会触发） */
+  onFilesDrop?: (files: File[]) => void
 }
 
 /** 单个终端面板：xterm ↔ Agent（stdin/stdout 二进制帧，按 sessionId 复用同一条 WS）
- *  右键呼出自定义菜单：复制 / 粘贴 / 全选 / 清屏；另支持终端惯例快捷键。 */
-export function TerminalPane({ sessionId }: { sessionId: string }) {
+ *  右键呼出自定义菜单：复制 / 下载所选（SFTP）/ 粘贴 / 全选 / 清屏；另支持终端惯例快捷键。
+ *  OSC 7（shell 集成上报当前目录）→ termUpload 目录缓存，供拖拽上传与选区下载定位远端路径。 */
+export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
   const holderRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const [menu, setMenu] = useState<TermMenuState | null>(null)
+  const [dl, setDl] = useState<TermDownloadState | null>(null)
 
   // ── 剪贴板动作（菜单与快捷键共用）─────────────────────────────────────
   const copySelection = () => {
@@ -55,6 +78,17 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
     fit.fit()
     term.focus()
 
+    // OSC 7：shell 集成上报当前目录（file://host/path）→ 缓存并做主机校验
+    // （嵌套 SSH 内层 shell 的上报会被拒绝）；全屏程序（top/vim 等交替屏幕）
+    // 运行期间无提示符 → 无新上报，缓存自然停留在进入前的目录
+    term.parser.registerOscHandler(7, (data: string) => {
+      const r = parseOsc7(data)
+      if (r) reportOsc7(sessionId, r.host, r.dir)
+      return false
+    })
+    // 全屏程序检测：xterm 自己维护交替屏幕状态，拖拽时按需读取
+    setSessionAltScreen(sessionId, () => term.buffer.active.type === 'alternate')
+
     // 打开后立即上报实际尺寸（open 帧先用占位 80x24）
     agentSocket.sendControl({ t: 'resize', s: sessionId, m: { cols: term.cols, rows: term.rows } })
 
@@ -75,12 +109,13 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
     const ro = new ResizeObserver(resizeTo)
     ro.observe(holderRef.current!)
 
-    // ── 快捷键：Ctrl+Shift+C / Ctrl+Shift+V / Ctrl+Insert / Shift+Insert ──
+    // ── 快捷键：Ctrl+Shift+C/V/A / Ctrl+Insert / Shift+Insert ──
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown') return true
       const ctrl = ev.ctrlKey || ev.metaKey
       const wantCopy = (ctrl && ev.shiftKey && ev.key.toLowerCase() === 'c') || (ctrl && ev.key === 'Insert')
       const wantPaste = (ctrl && ev.shiftKey && ev.key.toLowerCase() === 'v') || (ev.shiftKey && ev.key === 'Insert')
+      const wantSelectAll = ctrl && ev.shiftKey && ev.key.toLowerCase() === 'a'
       if (wantCopy && term.hasSelection()) {
         copySelection()
         return false
@@ -89,19 +124,30 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
         void pasteFromClipboard()
         return false
       }
+      if (wantSelectAll) {
+        term.selectAll()
+        return false
+      }
       return true
     })
 
     // ── 右键菜单：在光标处弹出自定义菜单（替换 WebView 默认菜单）──────────
     const onContextMenu = (e: MouseEvent) => {
       e.preventDefault()
-      setMenu({ x: e.clientX, y: e.clientY, hasSelection: term.hasSelection() })
+      const sel = term.getSelection()
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        hasSelection: !!sel,
+        selName: sel ? cleanSelectedName(sel) : null,
+      })
     }
     const holder = holderRef.current!
     holder.addEventListener('contextmenu', onContextMenu)
 
     return () => {
       holder.removeEventListener('contextmenu', onContextMenu)
+      clearSessionCwd(sessionId)
       offData()
       dataSub.dispose()
       ro.disconnect()
@@ -110,6 +156,19 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
+
+  // ── 选区下载（右键菜单触发）：状态经 onState 推给右下角浮层 ─────────────
+  const startDownload = (name: string) => {
+    setDl(null)
+    void downloadSelectionFromSession(sessionId, name, (st) => setDl(st)).then((fin) => {
+      // 成功 → 5s 后自动收起；失败/取消保留供查看
+      if (fin && fin.status === 'done') {
+        window.setTimeout(() => {
+          setDl((prev) => (prev && prev.status === 'done' && prev.name === fin.name ? null : prev))
+        }, 5000)
+      }
+    })
+  }
 
   // 菜单打开期间：点击菜单外 / Esc / 终端滚动 / 窗口失焦或缩放 → 关闭
   useEffect(() => {
@@ -138,12 +197,28 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
   const menuStyle: React.CSSProperties | undefined = menu
     ? {
         left: Math.max(8, Math.min(menu.x, window.innerWidth - 200)),
-        top: Math.max(8, Math.min(menu.y, window.innerHeight - 170)),
+        top: Math.max(8, Math.min(menu.y, window.innerHeight - 210)),
       }
     : undefined
 
   return (
-    <div ref={holderRef} className="terminal-holder">
+    <div
+      ref={holderRef}
+      className="terminal-holder"
+      data-term-session={sessionId}
+      onDragOver={(e) => {
+        // Tauri 壳内原生拖放接管，此处仅浏览器 dev 宿主生效
+        e.preventDefault()
+        holderRef.current?.classList.add('drag-over')
+      }}
+      onDragLeave={() => holderRef.current?.classList.remove('drag-over')}
+      onDrop={(e) => {
+        e.preventDefault()
+        holderRef.current?.classList.remove('drag-over')
+        const files = [...e.dataTransfer.files]
+        if (files.length > 0) onFilesDrop?.(files)
+      }}
+    >
       {menu && (
         <div className="term-menu" style={menuStyle} onContextMenu={(e) => e.preventDefault()}>
           <button
@@ -157,6 +232,24 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
           >
             <span>复制</span>
             <span className="term-menu-key">Ctrl+Shift+C</span>
+          </button>
+          <button
+            type="button"
+            className="term-menu-item"
+            disabled={!menu.selName}
+            title={menu.selName ?? undefined}
+            onClick={() => {
+              const name = menu.selName
+              setMenu(null)
+              if (name) startDownload(name)
+            }}
+          >
+            <span>
+              {menu.selName
+                ? `下载「${menu.selName.length > 12 ? `${menu.selName.slice(0, 11)}…` : menu.selName}」`
+                : '下载所选'}
+            </span>
+            <span className="term-menu-key">SFTP</span>
           </button>
           <button
             type="button"
@@ -179,6 +272,7 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
             }}
           >
             <span>全选</span>
+            <span className="term-menu-key">Ctrl+Shift+A</span>
           </button>
           <button
             type="button"
@@ -191,6 +285,69 @@ export function TerminalPane({ sessionId }: { sessionId: string }) {
           >
             <span>清屏</span>
           </button>
+        </div>
+      )}
+      {dl && (
+        <div className="term-dl-card">
+          <div className="term-drop-card-head">
+            <DownloadOutlined style={{ color: 'var(--accent)' }} />
+            <span className="term-drop-card-title" title={dl.name}>
+              {dl.isDir ? '下载文件夹' : '下载'}：{dl.name}
+            </span>
+            {dl.status === 'downloading' && dl.opId ? (
+              <button
+                type="button"
+                className="term-drop-card-close"
+                title="取消下载（保留断点，重新下载可续传）"
+                onClick={() => {
+                  cancelTermDownload(sessionId, dl.opId!)
+                  setDl({ ...dl, status: 'error', message: '已取消（断点已保留，重新下载自动续传）' })
+                }}
+              >
+                <CloseOutlined />
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="term-drop-card-close"
+                aria-label="关闭"
+                onClick={() => setDl(null)}
+              >
+                <CloseOutlined />
+              </button>
+            )}
+          </div>
+          <Progress
+            size="small"
+            style={{ marginBottom: 0 }}
+            status={dl.status === 'error' ? 'exception' : dl.status === 'done' ? 'success' : 'active'}
+            percent={dl.total > 0 ? Math.floor((dl.transferred / dl.total) * 100) : 0}
+            format={() =>
+              dl.status === 'resolving'
+                ? '定位远端文件…'
+                : dl.status === 'error'
+                  ? '失败'
+                  : dl.total > 0
+                    ? `${formatBytes(dl.transferred)} / ${formatBytes(dl.total)}${dl.speedBps ? ` · ${formatBytes(dl.speedBps)}/s` : ''}`
+                    : '准备中…'
+            }
+          />
+          {dl.status === 'downloading' && dl.current && (
+            <div className="term-dl-card-sub" title={dl.current}>
+              {dl.fileTotal ? `${dl.fileDone ?? 0}/${dl.fileTotal} · ` : ''}
+              {dl.current}
+            </div>
+          )}
+          {dl.status === 'done' && (
+            <div className="term-dl-card-sub">
+              已完成{dl.total > 0 ? `（${formatBytes(dl.transferred)}）` : ''}
+            </div>
+          )}
+          {dl.message && (
+            <Typography.Text type="danger" style={{ fontSize: 12 }}>
+              {dl.message}
+            </Typography.Text>
+          )}
         </div>
       )}
     </div>

@@ -1,21 +1,20 @@
-//! 桌宠 AI 对话：OpenAI 兼容接口（默认 DeepSeek）工具循环在本进程执行，工具复用 SSH 层。
-//!   list_hosts / probe_host / list_dir（只读自动放行）
-//!   exec_command（黑名单硬拒；白名单直放；其余经桌宠弹卡片人工批准，TOFU fail-closed）
+//! 桌宠 AI 对话：OpenAI 兼容接口（默认 DeepSeek）。
+//! 工具循环在本进程执行；工具实现、策略、审计统一在 toolcore，
+//! 本文件只负责 LLM 对话循环与桌宠弹卡片审批（PetApprover）。
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use crate::protocol::{AiApprovalM, AiApproveM, AiDeltaM, AiResultM, AiStatusM, ServerFrame};
-use crate::session::probe_tcp;
-use crate::ssh::{HostKeyAsk, HostKeyCtx, SshConnection, SshError, SshKind};
+use crate::policy::AiPolicy;
+use crate::pool::ConnRegistry;
+use crate::protocol::{AiApprovalM, AiApproveM, AiDeltaM, AiResultM, AiStatusM, AiThinkingM, ServerFrame};
 use crate::stores::Stores;
+use crate::toolcore::{self, ApproveFuture, Approver, ToolCtx};
 use crate::wire::Outbound;
 
-const IDLE_CLOSE_MS: u64 = 60_000;
 const MAX_HISTORY: usize = 40;
 const MAX_TOOL_ROUNDS: usize = 8;
 const APPROVAL_TIMEOUT_MS: u64 = 120_000;
@@ -43,189 +42,7 @@ fn load_ai_config(stores: &Stores) -> Option<AiConfig> {
     })
 }
 
-// ── 命令安全分级（黑名单硬拒 / 白名单直放 / 其余人工批准）─────────────────
-
-fn deny_patterns() -> &'static Vec<Regex> {
-    static PATTERNS: std::sync::OnceLock<Vec<Regex>> = std::sync::OnceLock::new();
-    PATTERNS.get_or_init(|| {
-        [
-            r"(?i)rm\s+(-[a-z]*f[a-z]*\s+)*-(?:[a-z]*r[a-z]*f|[a-z]*f[a-z]*r)\b|rm\s+-rf?\s+/(?:\s|$)",
-            r"(?i)\bmkfs(\.\w+)?\b|\bdd\s+if=",
-            r"(?i)\b(shutdown|reboot|poweroff|halt|init\s+[06])\b",
-            r":\(\)\s*\{\s*:\|:&\s*\}\s*;:|fork\s*\(\)\s*while",
-            r"(?i)chmod\s+-R\s+777\s+/",
-            r"(?i)>\s*/dev/(sd|nvme|hd)",
-            r"(?i)\b(userdel|groupdel)\b.*\broot\b",
-        ]
-        .iter()
-        .map(|s| Regex::new(s).unwrap())
-        .collect()
-    })
-}
-
-fn read_only_re() -> &'static Regex {
-    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?i)^\s*(?:sudo\s+)?(ls|ll|cat|head|tail|pwd|whoami|id|hostname|uname|uptime|date|echo|which|env|printenv|df|free|du|wc|stat|file|ps|top\s+-b|ip\s+(a|addr)|ifconfig|netstat|ss|lsof|grep|find|git\s+(status|log|diff)|systemctl\s+(status|list|is-active)|docker\s+(ps|images)|kubectl\s+get|cat\s+/etc/os-release|lsb_release)\b").unwrap()
-    })
-}
-
-fn classify_command(command: &str) -> &'static str {
-    if deny_patterns().iter().any(|re| re.is_match(command)) {
-        return "deny";
-    }
-    if read_only_re().is_match(command) {
-        "allow"
-    } else {
-        "ask"
-    }
-}
-
-// ── SSH 连接池（按 hostId 复用，空闲 60s 关闭）────────────────────────────
-
-struct PoolEntry {
-    conn: Arc<SshConnection>,
-    sftp: Option<Arc<russh_sftp::client::SftpSession>>,
-    idle_task: tokio::task::JoinHandle<()>,
-}
-
-#[derive(Clone)]
-struct AiSshPool {
-    stores: Stores,
-    entries: Arc<StdMutex<HashMap<String, PoolEntry>>>,
-    locks: Arc<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
-    closed: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl AiSshPool {
-    fn new(stores: Stores) -> AiSshPool {
-        AiSshPool {
-            stores,
-            entries: Arc::new(StdMutex::new(HashMap::new())),
-            locks: Arc::new(StdMutex::new(HashMap::new())),
-            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
-    }
-
-    fn host_lock(&self, host_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self.locks.lock().unwrap();
-        locks
-            .entry(host_id.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    }
-
-    fn evict(&self, host_id: &str) {
-        if let Some(entry) = self.entries.lock().unwrap().remove(host_id) {
-            entry.idle_task.abort();
-            let conn = entry.conn.clone();
-            let sftp = entry.sftp.clone();
-            tokio::spawn(async move {
-                if let Some(s) = sftp {
-                    let _ = s.close().await;
-                }
-                conn.close().await;
-            });
-        }
-    }
-
-    fn close_all(&self) {
-        self.closed.store(true, std::sync::atomic::Ordering::Relaxed);
-        let ids: Vec<String> = self.entries.lock().unwrap().keys().cloned().collect();
-        for id in ids {
-            self.evict(&id);
-        }
-    }
-
-    async fn acquire(&self, host_id: &str) -> Result<Arc<SshConnection>, String> {
-        if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err("Agent 已停止".into());
-        }
-        if let Some(entry) = self.entries.lock().unwrap().get(host_id) {
-            let conn = entry.conn.clone();
-            self.touch_idle(host_id);
-            return Ok(conn);
-        }
-        let lock = self.host_lock(host_id);
-        let _g = lock.lock().await;
-        if let Some(entry) = self.entries.lock().unwrap().get(host_id) {
-            let conn = entry.conn.clone();
-            self.touch_idle(host_id);
-            return Ok(conn);
-        }
-
-        let host = self
-            .stores
-            .hosts
-            .get(host_id)
-            .ok_or_else(|| format!("主机档案不存在: {host_id}"))?;
-        let mismatch = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let ctx = Arc::new(HostKeyCtx {
-            known: self.stores.known.clone(),
-            host: host.input.host.clone(),
-            port: host.input.port,
-            ask: HostKeyAsk::FailClosed,
-            mismatch: mismatch.clone(),
-        });
-        let conn = match crate::ssh::connect(&host, &SshKind::Exec, ctx).await {
-            Ok(c) => Arc::new(c),
-            Err(SshError::HostKeyRejected) => {
-                return Err(format!(
-                    "主机 {} 指纹未确认：请先在工作台人工连接一次后再交给 AI 使用",
-                    host.input.name
-                ))
-            }
-            Err(e) => return Err(e.message()),
-        };
-        self.insert(host_id, conn.clone(), None);
-        Ok(conn)
-    }
-
-    /// sftp 子系统会话（缓存于连接池条目）
-    async fn acquire_sftp(&self, host_id: &str) -> Result<Arc<russh_sftp::client::SftpSession>, String> {
-        if let Some(entry) = self.entries.lock().unwrap().get(host_id) {
-            if let Some(sftp) = entry.sftp.clone() {
-                self.touch_idle(host_id);
-                return Ok(sftp);
-            }
-        }
-        let conn = self.acquire(host_id).await?;
-        let sftp = Arc::new(conn.open_sftp().await?);
-        if let Some(entry) = self.entries.lock().unwrap().get_mut(host_id) {
-            entry.sftp = Some(sftp.clone());
-        }
-        self.touch_idle(host_id);
-        Ok(sftp)
-    }
-
-    fn insert(&self, host_id: &str, conn: Arc<SshConnection>, sftp: Option<Arc<russh_sftp::client::SftpSession>>) {
-        let pool = self.clone();
-        let id = host_id.to_string();
-        let idle_task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(IDLE_CLOSE_MS)).await;
-            pool.evict(&id);
-        });
-        self.entries.lock().unwrap().insert(
-            host_id.to_string(),
-            PoolEntry { conn, sftp, idle_task },
-        );
-    }
-
-    fn touch_idle(&self, host_id: &str) {
-        let pool = self.clone();
-        let id = host_id.to_string();
-        let idle_task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(IDLE_CLOSE_MS)).await;
-            pool.evict(&id);
-        });
-        if let Some(entry) = self.entries.lock().unwrap().get_mut(host_id) {
-            entry.idle_task.abort();
-            entry.idle_task = idle_task;
-        }
-    }
-}
-
-// ── LLM 消息与工具 ───────────────────────────────────────────────────────
+// ── LLM 消息 ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCall {
@@ -253,52 +70,67 @@ pub struct LlmMessage {
 
 fn system_prompt() -> String {
     [
-        "你是 BitGalaxy Shell 的桌宠助手「鲸鱼娘」，帮用户管理 SSH 主机。",
+        "你是 BitGalaxy Shell 的桌宠助手「鲸鱼娘」，帮用户管理 SSH 主机，也能操作用户本机（Windows）。",
         "风格：中文、简短、活泼但专业；汇报命令结果时给出要点总结，不要大段贴原文（超 20 行只说关键部分）。",
-        "可用工具：list_hosts 查主机；probe_host 测连通；exec_command 在主机上执行命令（危险命令需要用户在宠物弹窗批准）；list_dir 列远程目录。",
-        "主机 id 必须先用 list_hosts 查询；用户说\"web 服务器\"这类称呼时按名称/标签匹配。",
+        "远程工具：list_hosts 查主机；probe_host 测连通；get_metrics 采指标；exec_command 在主机上执行命令；list_dir 列远程目录；read_file 读远程小文件；write_file 写远程文件；sftp_download_file 下载远程文件到本机。",
+        "本地工具：local_exec 在本机执行 PowerShell（打包用 Compress-Archive 或 tar）；local_read_file/local_write_file 读写本机文件；sftp_upload_file 把本机文件上传到主机。",
+        "典型流程：用户说「打包 X 上传到服务器」→ local_exec 打包 → sftp_upload_file 上传 →（可选）exec_command 解压/运行。",
+        "安全：危险命令会被黑名单直接拒绝；写文件、上传下载及未识别命令会弹卡片请求用户批准，被拒时如实告知用户。文件大小超限时建议分卷或改用压缩。",
+        "主机 id 必须先用 list_hosts 查询；用户说\"web 服务器\"这类称呼时按名称/标签匹配。路径不存在时先列目录确认。",
         "执行失败时如实说明原因；不要编造输出。",
     ]
     .join("\n")
 }
 
-fn tools_json() -> serde_json::Value {
-    serde_json::json!([
-        { "type": "function", "function": {
-            "name": "list_hosts",
-            "description": "列出所有主机档案（脱敏，不含凭据）。返回 id、名称、地址、用户、标签与 hostKeyKnown（指纹是否已确认）。",
-            "parameters": { "type": "object", "properties": {} } } },
-        { "type": "function", "function": {
-            "name": "probe_host",
-            "description": "TCP 探测主机连通性（不做 SSH 握手），返回延迟或失败原因。",
-            "parameters": { "type": "object", "properties": {
-                "hostId": { "type": "string", "description": "主机 id（先用 list_hosts 查询）" } },
-                "required": ["hostId"] } } },
-        { "type": "function", "function": {
-            "name": "exec_command",
-            "description": "在主机上执行一次性非交互命令，返回 stdout/stderr/退出码。危险命令会先向用户弹卡片请求批准，未批准则返回拒绝。",
-            "parameters": { "type": "object", "properties": {
-                "hostId": { "type": "string", "description": "主机 id（先用 list_hosts 查询）" },
-                "command": { "type": "string", "description": "要执行的命令（非交互）" },
-                "timeoutSec": { "type": "number", "description": "超时秒数，默认 30，上限 120" } },
-                "required": ["hostId", "command"] } } },
-        { "type": "function", "function": {
-            "name": "list_dir",
-            "description": "SFTP 列出远程目录内容（名称/类型/大小/修改时间）。",
-            "parameters": { "type": "object", "properties": {
-                "hostId": { "type": "string", "description": "主机 id" },
-                "path": { "type": "string", "description": "远程目录路径，支持相对家目录" } },
-                "required": ["hostId", "path"] } } },
-    ])
+// ── 桌宠审批实现（弹卡片；超时视为拒绝，fail-closed）──────────────────────
+
+struct PetApprover {
+    chat_id: String,
+    out: Outbound,
+    approvals: Arc<StdMutex<HashMap<String, oneshot::Sender<bool>>>>,
+}
+
+impl Approver for PetApprover {
+    fn approve(&self, describe: &str) -> ApproveFuture {
+        let chat_id = self.chat_id.clone();
+        let out = self.out.clone();
+        let approvals = self.approvals.clone();
+        let describe = describe.to_string();
+        Box::pin(async move {
+            let req_id = uuid::Uuid::new_v4().to_string();
+            let (tx, rx) = oneshot::channel::<bool>();
+            approvals.lock().unwrap().insert(req_id.clone(), tx);
+            out.send_frame(&ServerFrame::AiStatus {
+                m: AiStatusM {
+                    chat_id: chat_id.clone(),
+                    stage: "awaiting-approval".into(),
+                    detail: Some(describe.chars().take(120).collect()),
+                },
+            });
+            out.send_frame(&ServerFrame::AiApproval {
+                m: AiApprovalM {
+                    chat_id,
+                    req_id,
+                    host: "操作审批".into(),
+                    command: describe,
+                },
+            });
+            match tokio::time::timeout(Duration::from_millis(APPROVAL_TIMEOUT_MS), rx).await {
+                Ok(Ok(approved)) => Ok(approved),
+                _ => Ok(false),
+            }
+        })
+    }
 }
 
 // ── handler ──────────────────────────────────────────────────────────────
 
 struct Shared {
     stores: Stores,
+    policy: AiPolicy,
+    registry: Arc<ConnRegistry>,
     out: Outbound,
-    pool: AiSshPool,
-    approvals: StdMutex<HashMap<String, oneshot::Sender<bool>>>,
+    approvals: Arc<StdMutex<HashMap<String, oneshot::Sender<bool>>>>,
     chats: StdMutex<HashMap<String, Vec<LlmMessage>>>,
     busy: StdMutex<HashSet<String>>,
 }
@@ -309,13 +141,19 @@ pub struct AiHandler {
 }
 
 impl AiHandler {
-    pub fn new(stores: Stores, out: Outbound) -> AiHandler {
+    pub fn new(
+        stores: Stores,
+        out: Outbound,
+        policy: AiPolicy,
+        registry: Arc<ConnRegistry>,
+    ) -> AiHandler {
         AiHandler {
             shared: Arc::new(Shared {
-                pool: AiSshPool::new(stores.clone()),
                 stores,
+                policy,
+                registry,
                 out,
-                approvals: StdMutex::new(HashMap::new()),
+                approvals: Arc::new(StdMutex::new(HashMap::new())),
                 chats: StdMutex::new(HashMap::new()),
                 busy: StdMutex::new(HashSet::new()),
             }),
@@ -363,12 +201,13 @@ impl AiHandler {
     }
 
     pub fn dispose(&self) {
+        // WS 断开只撤审批；连接归注册表管（工作台会话由 close_all 各自 release，
+        // AI 临时占用随工具执行结束自动释放，无引用后按空闲超时回收）
         let senders: Vec<oneshot::Sender<bool>> =
             self.shared.approvals.lock().unwrap().drain().map(|(_, v)| v).collect();
         for tx in senders {
             let _ = tx.send(false);
         }
-        self.shared.pool.close_all();
     }
 
     fn status(&self, chat_id: &str, stage: &str, detail: Option<String>) {
@@ -381,156 +220,49 @@ impl AiHandler {
         });
     }
 
-    /// 请求用户批准（桌宠弹卡片）；超时视为拒绝
-    async fn ask_approval(&self, chat_id: &str, host: &str, command: &str) -> bool {
-        let req_id = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = oneshot::channel::<bool>();
-        self.shared.approvals.lock().unwrap().insert(req_id.clone(), tx);
-        self.shared.out.send_frame(&ServerFrame::AiApproval {
-            m: AiApprovalM {
-                chat_id: chat_id.to_string(),
-                req_id,
-                host: host.to_string(),
-                command: command.to_string(),
-            },
-        });
-        match tokio::time::timeout(Duration::from_millis(APPROVAL_TIMEOUT_MS), rx).await {
-            Ok(Ok(approved)) => approved,
-            _ => false,
+    /// 分片下推模拟流式（thinking 块或正文），避免切断 UTF-8 字符边界
+    fn push_stream(&self, chat_id: &str, full: &str, thinking: bool) {
+        let mut offset = 0;
+        while offset < full.len() {
+            let end = (offset + 160).min(full.len());
+            let mut safe_end = end;
+            while safe_end > offset && !full.is_char_boundary(safe_end) {
+                safe_end -= 1;
+            }
+            let frame = if thinking {
+                ServerFrame::AiThinking {
+                    m: AiThinkingM {
+                        chat_id: chat_id.to_string(),
+                        delta: full[offset..safe_end].to_string(),
+                    },
+                }
+            } else {
+                ServerFrame::AiDelta {
+                    m: AiDeltaM {
+                        chat_id: chat_id.to_string(),
+                        delta: full[offset..safe_end].to_string(),
+                    },
+                }
+            };
+            self.shared.out.send_frame(&frame);
+            offset = safe_end;
         }
     }
 
+    /// 工具调用 → toolcore 统一执行（策略 + 审批 + 审计一致）
     async fn run_tool(&self, chat_id: &str, name: &str, args: &serde_json::Value) -> serde_json::Value {
-        let stores = &self.shared.stores;
-        match name {
-            "list_hosts" => {
-                let hosts: Vec<serde_json::Value> = stores
-                    .hosts
-                    .list()
-                    .iter()
-                    .map(|h| {
-                        serde_json::json!({
-                            "id": h.id,
-                            "name": h.input.name,
-                            "host": h.input.host,
-                            "port": h.input.port,
-                            "username": h.input.username,
-                            "tags": h.input.tags.clone().unwrap_or_default(),
-                            "hostKeyKnown": stores.known.find(&h.input.host, h.input.port).is_some(),
-                        })
-                    })
-                    .collect();
-                serde_json::json!({ "ok": true, "hosts": hosts })
-            }
-            "probe_host" => {
-                let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default();
-                match stores.hosts.get(host_id) {
-                    None => serde_json::json!({ "ok": false, "message": "主机档案不存在" }),
-                    Some(host) => {
-                        let r = probe_tcp(&host.input.host, host.input.port).await;
-                        serde_json::json!({
-                            "ok": r.ok,
-                            "ms": r.ms,
-                            "message": r.message,
-                        })
-                    }
-                }
-            }
-            "exec_command" => self.tool_exec(chat_id, args).await,
-            "list_dir" => self.tool_list_dir(args).await,
-            _ => serde_json::json!({ "ok": false, "message": format!("未知工具: {name}") }),
-        }
-    }
-
-    async fn tool_exec(&self, chat_id: &str, args: &serde_json::Value) -> serde_json::Value {
-        let stores = &self.shared.stores;
-        let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let Some(host) = stores.hosts.get(&host_id) else {
-            return serde_json::json!({ "ok": false, "message": "主机档案不存在" });
+        let approver = PetApprover {
+            chat_id: chat_id.to_string(),
+            out: self.shared.out.clone(),
+            approvals: self.shared.approvals.clone(),
         };
-        if command.trim().is_empty() {
-            return serde_json::json!({ "ok": false, "message": "命令为空" });
-        }
-        let cls = classify_command(&command);
-        if cls == "deny" {
-            stores.audit.append(
-                "ai.tool",
-                serde_json::json!({ "tool": "exec_command", "hostId": host_id, "command": command, "decision": "deny" }),
-            );
-            return serde_json::json!({ "ok": false, "message": "命令命中安全黑名单，已拒绝执行" });
-        }
-        let mut approved = cls == "allow";
-        if !approved {
-            self.status(chat_id, "awaiting-approval", Some(command.chars().take(120).collect()));
-            approved = self
-                .ask_approval(
-                    chat_id,
-                    &format!("{}（{}）", host.input.name, host_label(&host)),
-                    &command,
-                )
-                .await;
-        }
-        stores.audit.append(
-            "ai.tool",
-            serde_json::json!({
-                "tool": "exec_command", "hostId": host_id, "command": command,
-                "decision": if approved { "allow" } else { "approval-declined" },
-            }),
-        );
-        if !approved {
-            return serde_json::json!({ "ok": false, "message": "用户未批准该命令，未执行" });
-        }
-        let timeout_sec = args.get("timeoutSec").and_then(|v| v.as_f64()).unwrap_or(30.0);
-        let timeout_ms = (timeout_sec * 1000.0).clamp(1000.0, 120_000.0) as u64;
-        match self.shared.pool.acquire(&host_id).await {
-            Ok(conn) => match conn.exec(&command, timeout_ms, 64 * 1024).await {
-                Ok(r) => serde_json::json!({
-                    "ok": true,
-                    "exitCode": r.code,
-                    "stdout": r.stdout,
-                    "stderr": r.stderr,
-                    "truncated": r.truncated,
-                    "timedOut": r.timed_out,
-                }),
-                Err(e) => {
-                    self.shared.pool.evict(&host_id);
-                    serde_json::json!({ "ok": false, "message": e })
-                }
-            },
-            Err(e) => serde_json::json!({ "ok": false, "message": e }),
-        }
-    }
-
-    async fn tool_list_dir(&self, args: &serde_json::Value) -> serde_json::Value {
-        let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".").to_string();
-        match self.shared.pool.acquire_sftp(&host_id).await {
-            Ok(sftp) => match sftp.read_dir(&path).await {
-                Ok(dir) => {
-                    let mut entries: Vec<serde_json::Value> = Vec::new();
-                    for entry in dir {
-                        let name = entry.file_name();
-                        if name == "." || name == ".." {
-                            continue;
-                        }
-                        let attrs = entry.metadata();
-                        entries.push(serde_json::json!({
-                            "name": name,
-                            "isDir": attrs.is_dir(),
-                            "sizeB": attrs.size.unwrap_or(0),
-                            "mtimeMs": attrs.mtime.map(|t| t as i64 * 1000).unwrap_or(0),
-                        }));
-                    }
-                    serde_json::json!({ "ok": true, "path": path, "entries": entries })
-                }
-                Err(e) => {
-                    self.shared.pool.evict(&host_id);
-                    serde_json::json!({ "ok": false, "message": e.to_string() })
-                }
-            },
-            Err(e) => serde_json::json!({ "ok": false, "message": e }),
-        }
+        let ctx = ToolCtx {
+            stores: &self.shared.stores,
+            policy: &self.shared.policy,
+            registry: self.shared.registry.as_ref(),
+            client: "pet",
+        };
+        toolcore::execute(&ctx, &approver, name, args).await
     }
 
     async fn run_turn(&self, chat_id: &str, text: &str) {
@@ -595,7 +327,7 @@ impl AiHandler {
             let body = serde_json::json!({
                 "model": cfg.model,
                 "messages": req_messages,
-                "tools": tools_json(),
+                "tools": toolcore::llm_tools_json(),
                 "tool_choice": "auto",
             });
             let resp = client
@@ -628,6 +360,17 @@ impl AiHandler {
                 .pointer("/choices/0/message")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
+            // 思考内容（DeepSeek reasoning_content / OpenAI 风格 reasoning）：
+            // 只下推前端展示，不进历史（DeepSeek 要求历史消息不携带该字段）
+            let reasoning = msg_value
+                .get("reasoning_content")
+                .or_else(|| msg_value.get("reasoning"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            if let Some(think) = reasoning.as_deref() {
+                self.push_stream(chat_id, think, true);
+            }
             let msg: LlmMessage = match serde_json::from_value(msg_value) {
                 Ok(m) => m,
                 Err(_) => {
@@ -674,22 +417,7 @@ impl AiHandler {
 
             // 最终文本：分片下推模拟流式
             let full = final_content.unwrap_or_default();
-            let mut offset = 0;
-            while offset < full.len() {
-                let end = (offset + 160).min(full.len());
-                // 避免切断 UTF-8 字符边界
-                let mut safe_end = end;
-                while safe_end > offset && !full.is_char_boundary(safe_end) {
-                    safe_end -= 1;
-                }
-                out.send_frame(&ServerFrame::AiDelta {
-                    m: AiDeltaM {
-                        chat_id: chat_id.to_string(),
-                        delta: full[offset..safe_end].to_string(),
-                    },
-                });
-                offset = safe_end;
-            }
+            self.push_stream(chat_id, &full, false);
             out.send_frame(&ServerFrame::AiResult {
                 m: AiResultM {
                     chat_id: chat_id.to_string(),
@@ -720,10 +448,6 @@ impl AiHandler {
             },
         });
     }
-}
-
-fn host_label(host: &crate::protocol::HostRecord) -> String {
-    format!("{}@{}:{}", host.input.username, host.input.host, host.input.port)
 }
 
 fn truncate(s: &str, max: usize) -> String {

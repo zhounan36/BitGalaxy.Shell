@@ -6,22 +6,22 @@ const SPRITE_BASE = `${import.meta.env.BASE_URL}pet/`
 
 /** 帧表：与 public/pet/manifest.json 的 states.*.frames/fps/loop 保持同步 */
 const FRAME_TABLE: Record<PetStateKey, { frames: number; fps: number; loop: boolean }> = {
-  sleep: { frames: 8, fps: 4, loop: true },
-  ready: { frames: 4, fps: 8, loop: false },
-  idle_breath: { frames: 8, fps: 8, loop: true },
-  idle_blink: { frames: 3, fps: 6, loop: false },
-  wave: { frames: 6, fps: 8, loop: false },
-  working: { frames: 8, fps: 8, loop: true },
-  need_input: { frames: 4, fps: 6, loop: true },
-  eating: { frames: 8, fps: 8, loop: true },
-  angry: { frames: 6, fps: 10, loop: false },
-  drag: { frames: 8, fps: 10, loop: true },
+  sleep: { frames: 8, fps: 3, loop: true },
+  ready: { frames: 4, fps: 6, loop: false },
+  idle_breath: { frames: 8, fps: 6, loop: true },
+  idle_blink: { frames: 3, fps: 5, loop: false },
+  wave: { frames: 6, fps: 6, loop: false },
+  working: { frames: 8, fps: 6, loop: true },
+  need_input: { frames: 4, fps: 5, loop: true },
+  eating: { frames: 8, fps: 6, loop: true },
+  angry: { frames: 6, fps: 8, loop: false },
+  drag: { frames: 8, fps: 8, loop: true },
 }
 
 const ALL_STATES = Object.keys(FRAME_TABLE) as PetStateKey[]
 
-/** 呼吸微动：周期 2.4s，scaleY ±1.5%，以脚底为轴（Live2D 式程序化微动） */
-const BREATH_MS = 2400
+/** 呼吸微动：周期 3.6s（贴近真人静息呼吸），scaleY ±1.5%，以脚底为轴（Live2D 式程序化微动） */
+const BREATH_MS = 3600
 const BREATH_AMP = 0.015
 
 const frameUrl = (state: PetStateKey, frame: number) =>

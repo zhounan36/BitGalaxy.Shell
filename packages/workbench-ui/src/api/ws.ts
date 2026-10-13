@@ -12,12 +12,17 @@ type ControlHandler = (frame: ServerFrame) => void
 type DataHandler = (sid: string, type: number, payload: Uint8Array) => void
 type ChunkHandler = (chunk: Uint8Array) => void
 
-/** 与本机 Agent 的 WebSocket 通道（生产：Agent 同源 /ws；开发：经 vite 代理） */
+/** 与本机 Agent 的 WebSocket 通道（生产：Agent 同源 /ws；开发：经 vite 代理）。
+ * 断线自动重连（5s 退避）：主窗隐藏到托盘被 WebView2 节流/挂起等场景会掐断 WS，
+ * 不重连会让工作台永久假死（终端冻结、打开会话静默失败） */
 export class AgentSocket {
   private ws: WebSocket | null = null
   private readonly controlHandlers = new Set<ControlHandler>()
   private readonly dataHandlers = new Set<DataHandler>()
   private readonly downloadHandlers = new Map<string, ChunkHandler>()
+  private everConnected = false
+  private reconnectTimer: number | undefined
+  private pending: Promise<void> | null = null
 
   get ready(): boolean {
     return this.ws?.readyState === WebSocket.OPEN
@@ -25,6 +30,7 @@ export class AgentSocket {
 
   connect(): Promise<void> {
     if (this.ready) return Promise.resolve()
+    if (this.pending) return this.pending
     // 启动竞态兜底：服务端绑定可能略晚于窗口加载，最多重试 10 次（每次 500ms）
     const attempt = (remaining: number): Promise<void> =>
       this.connectOnce().catch((err: Error) => {
@@ -33,7 +39,25 @@ export class AgentSocket {
           setTimeout(() => attempt(remaining - 1).then(resolve, reject), 500)
         })
       })
-    return attempt(10)
+    this.pending = attempt(10).finally(() => {
+      this.pending = null
+    })
+    return this.pending
+  }
+
+  /** 断线后自动重连；成功后广播 reconnected（App 据此刷新主机列表） */
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer !== undefined) return
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = undefined
+      this.connect()
+        .then(() => {
+          this.controlHandlers.forEach((h) =>
+            h({ t: 'error', m: { code: 'reconnected', message: '已重新连接到 Agent' } }),
+          )
+        })
+        .catch(() => this.scheduleReconnect())
+    }, 5000)
   }
 
   private connectOnce(): Promise<void> {
@@ -49,14 +73,19 @@ export class AgentSocket {
       ws.binaryType = 'arraybuffer'
       ws.onopen = () => {
         this.ws = ws
+        this.everConnected = true
         resolve()
       }
       ws.onerror = () => reject(new Error('无法连接本机 Agent（请确认 agent 已启动）'))
       ws.onclose = () => {
         this.ws = null
+        // 首连重试由 connect() 兜底，不广播、不触发重连定时器（避免启动期噪音）
+        if (!this.everConnected) return
+        this.everConnected = false
         this.controlHandlers.forEach((h) =>
           h({ t: 'error', m: { code: 'disconnected', message: '与 Agent 的连接已断开' } }),
         )
+        this.scheduleReconnect()
       }
       ws.onmessage = (ev) => {
         if (typeof ev.data === 'string') {

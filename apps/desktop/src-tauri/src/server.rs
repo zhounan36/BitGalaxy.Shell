@@ -10,8 +10,10 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::ai::AiHandler;
+use crate::policy::AiPolicy;
+use crate::pool::ConnRegistry;
 use crate::protocol::{
-    self, AgentResult, ClientFrame, ServerFrame, SettingsResultM, DF_SFTP_UPLOAD, DF_STDIN,
+    self, AgentResult, ClientFrame, ServerFrame, SettingsResultM, DF_SFTP_UPLOAD, DF_STDIN
 };
 use crate::session::SessionManager;
 use crate::stores::Stores;
@@ -39,6 +41,7 @@ fn allowed_origins(port: u16) -> Vec<String> {
 pub async fn start_server(
     port: u16,
     stores: Stores,
+    policy: AiPolicy,
     agent_ctl: AgentCtl,
     ready: Option<oneshot::Sender<()>>,
 ) -> Result<(), String> {
@@ -49,19 +52,24 @@ pub async fn start_server(
         let _ = tx.send(());
     }
     let allowed = allowed_origins(port);
+    // 全局连接注册表：本进程所有 WS 连接共享（工作台会话与 AI 工具同主机复用连接；
+    // MCP stdio 为独立子进程，自建实例）
+    let registry = Arc::new(ConnRegistry::new(stores.clone(), policy.limits.idle_close_sec));
     loop {
         let (stream, _addr) = match listener.accept().await {
             Ok(x) => x,
             Err(_) => continue,
         };
         let stores = stores.clone();
+        let policy = policy.clone();
         let agent_ctl = agent_ctl.clone();
         let allowed = allowed.clone();
+        let registry = registry.clone();
         tokio::spawn(async move {
             if cfg!(debug_assertions) {
                 eprintln!("[bgshell][debug] WS 接入新连接");
             }
-            handle_conn(stream, stores, agent_ctl, allowed).await;
+            handle_conn(stream, stores, policy, agent_ctl, allowed, registry).await;
         });
     }
 }
@@ -69,8 +77,10 @@ pub async fn start_server(
 async fn handle_conn(
     stream: tokio::net::TcpStream,
     stores: Stores,
+    policy: AiPolicy,
     agent_ctl: AgentCtl,
     allowed: Vec<String>,
+    registry: Arc<ConnRegistry>,
 ) {
     // Origin 校验后完成 WS 握手
     let ws = {
@@ -119,8 +129,8 @@ async fn handle_conn(
         let _ = sink.close().await;
     });
 
-    let manager = SessionManager::new(stores.clone(), outbound.clone());
-    let ai = AiHandler::new(stores.clone(), outbound.clone());
+    let manager = SessionManager::new(stores.clone(), outbound.clone(), registry.clone());
+    let ai = AiHandler::new(stores.clone(), outbound.clone(), policy, registry);
 
     while let Some(msg) = source.next().await {
         let msg = match msg {
@@ -140,8 +150,8 @@ async fn handle_conn(
                 };
                 match frame_type {
                     DF_STDIN => {
-                        let data = payload.to_vec();
-                        manager.input(&sid, &data).await;
+                        // 入队即返回（会话 stdin 任务异步写入），分发循环永不被 SSH 写阻塞
+                        manager.input(&sid, payload);
                     }
                     DF_SFTP_UPLOAD => {
                         if let Some((op_id, chunk)) = protocol::decode_op_payload(payload) {
@@ -171,13 +181,18 @@ async fn dispatch(
     match frame {
         ClientFrame::Open { s, m } => manager.open(&s, &m.host_id, &m),
         ClientFrame::Resize { s, m } => {
-            manager.resize(&s, m.cols, m.rows).await;
+            // resize 在独立任务执行：写挂起（僵尸连接）不得阻塞 WS 帧分发循环
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager.resize(&s, m.cols, m.rows).await;
+            });
         }
         ClientFrame::Close { s, m } => {
             let reason = m.reason.unwrap_or_else(|| "user".into());
             manager.close(&s, &reason);
         }
         ClientFrame::ConfirmHostKey { s, m } => manager.resolve_host_key(&s, m.accepted),
+        ClientFrame::RetryAuth { s, m } => manager.resolve_auth(&s, m.password),
         ClientFrame::Hosts { m } => manager.handle_hosts_op(&m),
         ClientFrame::Sftp { s, m } => manager.handle_sftp(&s, &m),
         ClientFrame::Metrics { s, m } => {

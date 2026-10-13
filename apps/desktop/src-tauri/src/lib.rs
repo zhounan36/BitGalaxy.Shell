@@ -18,15 +18,18 @@ use crate::stores::Stores;
 
 pub mod ai;
 pub mod db;
+pub mod disk;
 pub mod mcp;
 pub mod metrics;
 pub mod policy;
+pub mod pool;
 pub mod protocol;
 pub mod server;
 pub mod session;
 pub mod sftp;
 pub mod ssh;
 pub mod stores;
+pub mod toolcore;
 pub mod wire;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -305,12 +308,13 @@ pub fn run() {
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
             let agent_ctl = make_agent_ctl(app.handle().clone(), stores.clone(), data_dir.clone());
             let stores_for_server = stores.clone();
+            let policy = policy::load_ai_policy(&data_dir, &stores);
             let port: u16 = std::env::var("BGSH_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(7777);
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = server::start_server(port, stores_for_server, agent_ctl, Some(ready_tx)).await {
+                if let Err(e) = server::start_server(port, stores_for_server, policy, agent_ctl, Some(ready_tx)).await {
                     eprintln!("[bgshell] WS 服务启动失败: {e}");
                 }
             });
