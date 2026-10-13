@@ -111,6 +111,10 @@ export interface TransferErrorText {
 }
 
 const ERROR_KIND_TEXT: Record<string, TransferErrorText> = {
+  local_io: {
+    title: '本地文件访问被拒',
+    hint: '本地临时文件（.part）或源文件被占用——常见于杀毒软件实时扫描、OneDrive 等同步盘锁定，或文件正被其他程序打开；请更换保存目录、稍后重试，或将应用加入杀毒软件白名单',
+  },
   permission_denied: {
     title: '没有权限',
     hint: '目标目录不可写或文件归属其他用户；请检查权限、换目标目录，或用更高权限账号重试',
