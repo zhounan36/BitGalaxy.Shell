@@ -17,7 +17,11 @@
     "targets": ["nsis"],
     "icon": ["icons/icon.ico", "icons/icon.png"],
     "windows": {
-      "webviewInstallMode": { "type": "downloadBootstrapper" }
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
     }
   }
 }
