@@ -1,16 +1,20 @@
 //! 会话管理器：一个 WS 连接对应一个实例。
-//! 三种会话 kind 共享 SSH 建连/TOFU/审计路径；sftp/metrics 通道按 kind 挂载。
+//! 三种会话 kind（shell/sftp/metrics）经统一连接注册表（[`crate::pool::ConnRegistry`]）
+//! 获取同主机共享的 SSH 连接：shell 各自开 PTY 通道，sftp/metrics 复用池连接；
+//! 会话关闭 release 持有者，连接由注册表在无引用后按空闲超时回收。
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::metrics;
+use crate::pool::{ConnRegistry, CreateCtx};
 use crate::protocol::{
     self, HostsResultM, ProbeResultM, ServerFrame, SessionOpenedM, SftpResultM, DF_STDOUT,
 };
 use crate::sftp::SftpController;
-use crate::ssh::{self, ConfirmSlot, HostKeyAsk, HostKeyCtx, SshConnection, SshKind};
+use crate::ssh::{AuthSlot, ConfirmSlot, HostKeyAsk, PtyShell, SshConnection};
 use crate::stores::Stores;
 use crate::wire::Outbound;
 
@@ -18,23 +22,36 @@ type SessionMap = Arc<StdMutex<HashMap<String, SessionEntry>>>;
 
 struct SessionEntry {
     kind: String,
+    /// 连接注册表持有者键（release 用）
+    host_id: Option<String>,
     conn: Option<Arc<SshConnection>>,
+    /// shell 会话的 PTY 通道（stdin/resize；与连接分离，同主机多 shell 各自独立）
+    pty: Option<Arc<PtyShell>>,
     sftp: Option<Arc<SftpController>>,
     metrics_task: Option<JoinHandle<()>>,
     /// 建连期间到达的 metrics 订阅，就绪后自动启动
     metrics_pending: Option<i64>,
     confirm_slot: ConfirmSlot,
+    /// 密码认证失败重试：connect 挂起等 retry-auth 回包
+    auth_slot: AuthSlot,
+    /// stdin 写入队列：独立任务按序写 PTY。僵尸连接上 pty.data() 会挂起，
+    /// 若在 WS 分发循环里直接 await 会连带阻塞所有后续帧（open/probe 全部失响应）
+    stdin_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
 }
 
 impl SessionEntry {
     fn new(kind: &str) -> SessionEntry {
         SessionEntry {
             kind: kind.to_string(),
+            host_id: None,
             conn: None,
+            pty: None,
             sftp: None,
             metrics_task: None,
             metrics_pending: None,
             confirm_slot: Arc::new(StdMutex::new(None)),
+            auth_slot: Arc::new(StdMutex::new(None)),
+            stdin_tx: None,
         }
     }
 }
@@ -43,14 +60,16 @@ impl SessionEntry {
 pub struct SessionManager {
     stores: Stores,
     out: Outbound,
+    registry: Arc<ConnRegistry>,
     sessions: SessionMap,
 }
 
 impl SessionManager {
-    pub fn new(stores: Stores, out: Outbound) -> SessionManager {
+    pub fn new(stores: Stores, out: Outbound, registry: Arc<ConnRegistry>) -> SessionManager {
         SessionManager {
             stores,
             out,
+            registry,
             sessions: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -81,87 +100,95 @@ impl SessionManager {
                 return;
             };
 
-            let confirm_slot = {
+            let slots = {
                 let sessions = this.sessions.lock().unwrap();
-                sessions.get(&session_id).map(|e| e.confirm_slot.clone())
+                sessions
+                    .get(&session_id)
+                    .map(|e| (e.confirm_slot.clone(), e.auth_slot.clone()))
             };
-            let Some(confirm_slot) = confirm_slot else { return };
+            let Some((confirm_slot, auth_slot)) = slots else { return };
 
-            let mismatch = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let ctx = Arc::new(HostKeyCtx {
-                known: this.stores.known.clone(),
-                host: host.input.host.clone(),
-                port: host.input.port,
+            let create = CreateCtx {
                 ask: HostKeyAsk::Interactive {
                     session_id: session_id.clone(),
                     out: this.out.clone(),
                     slot: confirm_slot,
+                    auth_slot,
                 },
-                mismatch: mismatch.clone(),
-            });
-
-            let ssh_kind = match kind.as_str() {
-                "sftp" => SshKind::Sftp,
-                "metrics" => SshKind::Metrics,
-                _ => SshKind::Shell,
+                initiator: "workbench".into(),
             };
-            let conn = match ssh::connect(&host, &ssh_kind, ctx).await {
+
+            // 统一连接注册表：同主机共享一条 TCP 连接（TOFU/密码重试走本会话弹窗）
+            let conn = match this.registry.acquire_session(&host_id, &session_id, create).await {
                 Ok(c) => c,
                 Err(e) => {
-                    let reason = if mismatch.load(std::sync::atomic::Ordering::Relaxed) {
+                    let reason = if e.code == crate::toolcore::ERR_HOSTKEY_MISMATCH {
                         "主机指纹校验未通过（疑似中间人攻击）".to_string()
                     } else {
-                        e.message()
+                        e.message
                     };
                     this.fail_open(&session_id, &reason);
                     return;
                 }
             };
-            let conn = Arc::new(conn);
 
-            // shell：接管读半部，stdout/stderr → 0x01 数据帧；流结束 → 会话关闭
+            // shell：在共享连接上开独立 PTY 通道，接管读半部转发为 0x01 数据帧；
+            // 流结束 → 会话关闭
+            let mut pty = None;
             if ssh_kind_matches(&kind, "shell") {
-                let reader = conn.shell_reader.lock().unwrap().take();
-                if let Some(mut reader) = reader {
-                    let this2 = this.clone();
-                    let sid = session_id.clone();
-                    tokio::spawn(async move {
-                        loop {
-                            let msg = reader.wait().await;
-                            match msg {
-                                Some(russh::ChannelMsg::Data { ref data }) => {
-                                    this2.out.send_binary(protocol::encode_data_frame(
-                                        DF_STDOUT,
-                                        &sid,
-                                        data,
-                                    ));
+                match conn.open_pty_shell().await {
+                    Ok(p) => {
+                        let reader = p.reader.lock().unwrap().take();
+                        if let Some(mut reader) = reader {
+                            let this2 = this.clone();
+                            let sid = session_id.clone();
+                            tokio::spawn(async move {
+                                loop {
+                                    let msg = reader.wait().await;
+                                    match msg {
+                                        Some(russh::ChannelMsg::Data { ref data }) => {
+                                            this2.out.send_binary(protocol::encode_data_frame(
+                                                DF_STDOUT,
+                                                &sid,
+                                                data,
+                                            ));
+                                        }
+                                        Some(russh::ChannelMsg::ExtendedData { ref data, .. }) => {
+                                            this2.out.send_binary(protocol::encode_data_frame(
+                                                DF_STDOUT,
+                                                &sid,
+                                                data,
+                                            ));
+                                        }
+                                        Some(_) => {}
+                                        None => {
+                                            this2.handle_closed(&sid, "shell-closed");
+                                            return;
+                                        }
+                                    }
                                 }
-                                Some(russh::ChannelMsg::ExtendedData { ref data, .. }) => {
-                                    this2.out.send_binary(protocol::encode_data_frame(
-                                        DF_STDOUT,
-                                        &sid,
-                                        data,
-                                    ));
-                                }
-                                Some(_) => {}
-                                None => {
-                                    this2.handle_closed(&sid, "shell-closed");
-                                    return;
-                                }
-                            }
+                            });
                         }
-                    });
+                        // 记录初始 PTY 尺寸
+                        let _ = p.resize(cols, rows).await;
+                        pty = Some(Arc::new(p));
+                    }
+                    Err(e) => {
+                        // 持有者已注册但 PTY 失败：先释放再报错
+                        this.registry.release(&host_id, &session_id);
+                        this.fail_open(&session_id, &e.message());
+                        return;
+                    }
                 }
-                // 记录初始 PTY 尺寸
-                let _ = conn.resize(cols, rows).await;
             }
 
-            // sftp：打开子系统控制器
+            // sftp：复用注册表缓存的共享 SFTP 通道（同主机与 AI/其他会话共用）
             let sftp = if ssh_kind_matches(&kind, "sftp") {
-                match conn.open_sftp().await {
-                    Ok(s) => Some(Arc::new(SftpController::new(s))),
+                match this.registry.shared_sftp(&host_id).await {
+                    Ok(s) => Some(Arc::new(SftpController::from_shared(s))),
                     Err(e) => {
-                        this.fail_open(&session_id, &e);
+                        this.registry.release(&host_id, &session_id);
+                        this.fail_open(&session_id, &e.message);
                         return;
                     }
                 }
@@ -169,8 +196,9 @@ impl SessionManager {
                 None
             };
 
-            // 非 shell 会话：连接断开监视（server 主动断开 → session-closed）
-            if !ssh_kind_matches(&kind, "shell") {
+            // 连接断开监视（所有 kind）：russh 检测到断开（keepalive 超时/对端断开）而
+            // shell reader 未触发时，由轮询兜底关闭会话并提示，避免「无提示假死」
+            {
                 let this2 = this.clone();
                 let sid = session_id.clone();
                 let conn2 = conn.clone();
@@ -178,8 +206,21 @@ impl SessionManager {
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         if !conn2.is_alive() {
-                            this2.handle_closed(&sid, "client-closed");
+                            this2.handle_closed(&sid, "connection-lost");
                             return;
+                        }
+                    }
+                });
+            }
+
+            // stdin 专用写入任务：按序消费队列写 PTY；写失败（超时/连接断开）即退出，
+            // 会话清理时 sender 被 drop 自然结束
+            let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            if let Some(pty_w) = pty.clone() {
+                tokio::spawn(async move {
+                    while let Some(data) = stdin_rx.recv().await {
+                        if pty_w.write_input(&data).await.is_err() {
+                            break;
                         }
                     }
                 });
@@ -187,14 +228,20 @@ impl SessionManager {
 
             let pending_metrics = {
                 let mut sessions = this.sessions.lock().unwrap();
-                match sessions.get_mut(&session_id) {
-                    None => return,
-                    Some(entry) => {
-                        entry.conn = Some(conn.clone());
-                        entry.sftp = sftp.clone();
-                        entry.metrics_pending.take()
-                    }
+                let Some(entry) = sessions.get_mut(&session_id) else {
+                    // 会话在建连期间被用户关闭：释放持有者，连接交还注册表
+                    drop(sessions);
+                    this.registry.release(&host_id, &session_id);
+                    return;
+                };
+                entry.host_id = Some(host_id.clone());
+                entry.conn = Some(conn.clone());
+                entry.pty = pty.clone();
+                entry.sftp = sftp.clone();
+                if pty.is_some() {
+                    entry.stdin_tx = Some(stdin_tx);
                 }
+                entry.metrics_pending.take()
             };
 
             this.send_control(ServerFrame::SessionOpened {
@@ -229,48 +276,115 @@ impl SessionManager {
 
     // ── terminal ───────────────────────────────────────────────────────────
 
-    pub async fn input(&self, session_id: &str, data: &[u8]) {
-        let conn = {
+    pub fn input(&self, session_id: &str, data: &[u8]) {
+        let tx = {
             let sessions = self.sessions.lock().unwrap();
-            sessions.get(session_id).and_then(|e| e.conn.clone())
+            sessions.get(session_id).and_then(|e| e.stdin_tx.clone())
         };
-        if let Some(conn) = conn {
-            let _ = conn.write_input(data).await;
+        // 入队即返回：实际写入由会话的 stdin 任务执行（写挂起不影响 WS 分发循环）
+        if let Some(tx) = tx {
+            let _ = tx.send(data.to_vec());
         }
     }
 
     pub async fn resize(&self, session_id: &str, cols: u32, rows: u32) {
-        let conn = {
+        let pty = {
             let sessions = self.sessions.lock().unwrap();
-            sessions.get(session_id).and_then(|e| e.conn.clone())
+            sessions.get(session_id).and_then(|e| e.pty.clone())
         };
-        if let Some(conn) = conn {
-            let _ = conn.resize(cols, rows).await;
+        if let Some(pty) = pty {
+            let _ = pty.resize(cols, rows).await;
         }
     }
 
     // ── sftp ───────────────────────────────────────────────────────────────
 
     pub fn handle_sftp(&self, session_id: &str, op: &protocol::SftpOpM) {
-        let reply = |m: SftpResultM| {
-            self.send_control(ServerFrame::SftpResult {
-                s: session_id.to_string(),
-                m,
-            })
-        };
-        let sftp = {
+        let (sftp, conn, host_id) = {
             let sessions = self.sessions.lock().unwrap();
-            sessions.get(session_id).and_then(|e| e.sftp.clone())
-        };
-        let Some(sftp) = sftp else {
-            reply(err_sftp(&op.op, Some(op.rid.clone()), "SFTP 会话未就绪"));
-            return;
+            let Some(entry) = sessions.get(session_id) else {
+                self.send_control(ServerFrame::SftpResult {
+                    s: session_id.to_string(),
+                    m: err_sftp(&op.op, Some(op.rid.clone()), "会话未就绪"),
+                });
+                return;
+            };
+            (entry.sftp.clone(), entry.conn.clone(), entry.host_id.clone())
         };
 
         let op_clone = op.clone();
         let session_id = session_id.to_string();
+        let this = self.clone();
         let out = self.out.clone();
         tokio::spawn(async move {
+            // pwd：在 shell 会话的连接上开独立 exec 通道取目录与主机名（登录目录；
+            // 交互式 cd 后的实时目录由前端 OSC 7 上报。主机名供前端校验 OSC 7
+            // 是否来自本连接的主机——嵌套 SSH 内层 shell 的上报会被拒绝）
+            if op_clone.op == "pwd" {
+                let m = match conn {
+                    Some(conn) => match conn.exec("pwd; hostname", 8_000, 4_096).await {
+                        Ok(r) if !r.timed_out => {
+                            let mut lines = r.stdout.lines();
+                            let dir = lines.next().unwrap_or_default().trim().to_string();
+                            let host = lines.next().unwrap_or_default().trim().to_string();
+                            if dir.is_empty() {
+                                err_sftp("pwd", Some(op_clone.rid.clone()), "获取远程目录失败")
+                            } else {
+                                ok_sftp("pwd", Some(op_clone.rid.clone()), |m| {
+                                    m.resolved_path = Some(dir);
+                                    // hostname 不可用（极简容器等）→ 缺省，前端跳过校验
+                                    if !host.is_empty() {
+                                        m.host = Some(host);
+                                    }
+                                })
+                            }
+                        }
+                        Ok(_) => err_sftp("pwd", Some(op_clone.rid.clone()), "获取远程目录超时"),
+                        Err(e) => err_sftp("pwd", Some(op_clone.rid.clone()), &e),
+                    },
+                    None => err_sftp("pwd", Some(op_clone.rid.clone()), "会话未就绪"),
+                };
+                out.send_frame(&ServerFrame::SftpResult { s: session_id, m });
+                return;
+            }
+
+            // SFTP 控制器：sftp 会话建连时已挂载；shell 会话（终端拖拽上传）在此惰性
+            // 取注册表缓存的共享 SFTP 通道（同主机所有使用方复用同一条）
+            let sftp = match sftp {
+                Some(s) => s,
+                None => {
+                    let Some(host_id) = host_id else {
+                        out.send_frame(&ServerFrame::SftpResult {
+                            s: session_id.clone(),
+                            m: err_sftp(&op_clone.op, Some(op_clone.rid.clone()), "会话未就绪"),
+                        });
+                        return;
+                    };
+                    match this.registry.shared_sftp(&host_id).await {
+                        Ok(s) => {
+                            let ctrl = Arc::new(SftpController::from_shared(s));
+                            // 双检：并发首个完成者生效；会话已关闭则放弃
+                            let mut sessions = this.sessions.lock().unwrap();
+                            match sessions.get_mut(&session_id) {
+                                Some(entry) if entry.sftp.is_none() => {
+                                    entry.sftp = Some(ctrl.clone());
+                                    ctrl
+                                }
+                                Some(entry) => entry.sftp.clone().unwrap_or(ctrl),
+                                None => return,
+                            }
+                        }
+                        Err(e) => {
+                            out.send_frame(&ServerFrame::SftpResult {
+                                s: session_id.clone(),
+                                m: err_sftp(&op_clone.op, Some(op_clone.rid.clone()), &e.message),
+                            });
+                            return;
+                        }
+                    }
+                }
+            };
+
             let m = match op_clone.op.as_str() {
                 "ls" => match sftp.ls(op_clone.path.as_deref().unwrap_or(".")).await {
                     Ok((resolved, entries)) => ok_sftp("ls", Some(op_clone.rid.clone()), |m| {
@@ -335,6 +449,113 @@ impl SessionManager {
                 "download-close" => {
                     sftp.download_close(op_clone.op_id.as_deref().unwrap_or_default());
                     ok_sftp("download-close", Some(op_clone.rid.clone()), |_| {})
+                }
+                // ── 传输预检：重名/权限/剩余空间/目标盘格式（前端与 AI 共用）──
+                "preflight" => {
+                    match require_paths(op_clone.path.as_deref(), op_clone.to.as_deref()) {
+                        Ok((path, to)) => {
+                            let direction = op_clone.direction.as_deref().unwrap_or("upload");
+                            match build_preflight_report(
+                                &sftp,
+                                direction,
+                                path,
+                                to,
+                                op_clone.size_b,
+                            )
+                            .await
+                            {
+                                Ok(report) => {
+                                    ok_sftp("preflight", Some(op_clone.rid.clone()), |m| {
+                                        m.preflight = Some(report);
+                                    })
+                                }
+                                Err(e) => err_sftp("preflight", Some(op_clone.rid.clone()), &e),
+                            }
+                        }
+                        Err(e) => err_sftp("preflight", Some(op_clone.rid.clone()), e),
+                    }
+                }
+                // ── 原生传输（Agent 直传 + 断点续传，进度/结束经 sftp-progress/transfer-done）──
+                "get-file" => match require_paths(
+                    op_clone.path.as_deref(),
+                    op_clone.to.as_deref(),
+                ) {
+                    Ok((remote, local)) => {
+                        let op_id = sftp.start_get_file(
+                            &session_id,
+                            remote,
+                            local,
+                            &out,
+                            op_clone.fresh.unwrap_or(false),
+                        );
+                        ok_sftp("get-file", Some(op_clone.rid.clone()), |m| {
+                            m.op_id = Some(op_id);
+                        })
+                    }
+                    Err(e) => err_sftp("get-file", Some(op_clone.rid.clone()), e),
+                },
+                "get-dir" => match require_paths(
+                    op_clone.path.as_deref(),
+                    op_clone.to.as_deref(),
+                ) {
+                    Ok((remote_dir, local_dir)) => {
+                        let op_id = sftp.start_get_dir(
+                            &session_id,
+                            remote_dir,
+                            local_dir,
+                            &out,
+                            op_clone.fresh.unwrap_or(false),
+                        );
+                        ok_sftp("get-dir", Some(op_clone.rid.clone()), |m| {
+                            m.op_id = Some(op_id);
+                        })
+                    }
+                    Err(e) => err_sftp("get-dir", Some(op_clone.rid.clone()), e),
+                },
+                "put-file" => match require_paths(
+                    op_clone.path.as_deref(),
+                    op_clone.to.as_deref(),
+                ) {
+                    Ok((local, remote)) => {
+                        let op_id = sftp.start_put_file(
+                            &session_id,
+                            local,
+                            remote,
+                            &out,
+                            op_clone.fresh.unwrap_or(false),
+                        );
+                        ok_sftp("put-file", Some(op_clone.rid.clone()), |m| {
+                            m.op_id = Some(op_id);
+                        })
+                    }
+                    Err(e) => err_sftp("put-file", Some(op_clone.rid.clone()), e),
+                },
+                "put-dir" => match require_paths(
+                    op_clone.path.as_deref(),
+                    op_clone.to.as_deref(),
+                ) {
+                    Ok((local_dir, remote_dir)) => {
+                        let op_id = sftp.start_put_dir(
+                            &session_id,
+                            local_dir,
+                            remote_dir,
+                            &out,
+                            op_clone.fresh.unwrap_or(false),
+                        );
+                        ok_sftp("put-dir", Some(op_clone.rid.clone()), |m| {
+                            m.op_id = Some(op_id);
+                        })
+                    }
+                    Err(e) => err_sftp("put-dir", Some(op_clone.rid.clone()), e),
+                },
+                "transfer-cancel" => {
+                    let cancelled =
+                        sftp.transfer_cancel(op_clone.op_id.as_deref().unwrap_or_default());
+                    ok_sftp("transfer-cancel", Some(op_clone.rid.clone()), |m| {
+                        if !cancelled {
+                            m.message = Some("任务不存在或已结束".into());
+                        }
+                    })
                 }
                 other => err_sftp(other, Some(op_clone.rid.clone()), "未知 SFTP 操作"),
             };
@@ -440,15 +661,33 @@ impl SessionManager {
         }
     }
 
-    pub fn close(&self, session_id: &str, reason: &str) {
-        // 先回应挂起的 TOFU 询问（拒绝），再走统一清理
+    /// 密码重试应答：Some(密码) = 用新密码重试；None = 取消（会话随即关闭）
+    pub fn resolve_auth(&self, session_id: &str, password: Option<String>) {
         let slot = {
             let sessions = self.sessions.lock().unwrap();
-            sessions.get(session_id).map(|e| e.confirm_slot.clone())
+            sessions.get(session_id).map(|e| e.auth_slot.clone())
         };
         if let Some(slot) = slot {
             if let Some(tx) = slot.lock().unwrap().take() {
+                let _ = tx.send(password);
+            }
+        }
+    }
+
+    pub fn close(&self, session_id: &str, reason: &str) {
+        // 先回应挂起的 TOFU 询问（拒绝）与密码重试（取消），再走统一清理
+        let slots = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions
+                .get(session_id)
+                .map(|e| (e.confirm_slot.clone(), e.auth_slot.clone()))
+        };
+        if let Some((confirm_slot, auth_slot)) = slots {
+            if let Some(tx) = confirm_slot.lock().unwrap().take() {
                 let _ = tx.send(false);
+            }
+            if let Some(tx) = auth_slot.lock().unwrap().take() {
+                let _ = tx.send(None);
             }
         }
         self.handle_closed(session_id, reason);
@@ -467,19 +706,25 @@ impl SessionManager {
         if let Some(tx) = entry.confirm_slot.lock().unwrap().take() {
             let _ = tx.send(false);
         }
+        if let Some(tx) = entry.auth_slot.lock().unwrap().take() {
+            let _ = tx.send(None);
+        }
         if let Some(task) = entry.metrics_task.take() {
             task.abort();
         }
+        // 传输/上传任务收尾；底层 SFTP 通道由注册表统一管理（多会话共享，不在此关闭）
         if let Some(sftp) = entry.sftp.take() {
             tokio::spawn(async move {
-                sftp.close().await;
+                sftp.close_ops().await;
             });
         }
-        if let Some(conn) = entry.conn.take() {
-            tokio::spawn(async move {
-                conn.close().await;
-            });
+        // 释放连接持有者：同主机无其他持有者时进入空闲回收计时
+        if let Some(host_id) = entry.host_id.take() {
+            self.registry.release(&host_id, session_id);
         }
+        // stdin 写入任务随 sender drop 结束；PTY 通道随 Arc drop 关闭（远端 shell 收 EOF）
+        entry.stdin_tx.take();
+        entry.pty.take();
         self.send_control(ServerFrame::SessionClosed {
             s: session_id.to_string(),
             m: protocol::SessionClosedM {
@@ -522,9 +767,16 @@ impl SessionManager {
                             self.stores.hosts.update(id, &input)
                         };
                         match result {
-                            Ok(Some(host)) => self.send_control(ServerFrame::Hosts {
-                                m: HostsResultM { op, ok: true, hosts: None, host: Some(host), message: None },
-                            }),
+                            Ok(Some(host)) => {
+                                // 主机档案变更（改密/改址/改端口）：驱逐池内旧连接，
+                                // 避免改密后残留旧凭据的连接继续可用
+                                if op == "update" {
+                                    self.registry.evict(&host.id, "host-updated");
+                                }
+                                self.send_control(ServerFrame::Hosts {
+                                    m: HostsResultM { op, ok: true, hosts: None, host: Some(host), message: None },
+                                })
+                            }
                             Ok(None) => self.send_control(ServerFrame::Hosts {
                                 m: HostsResultM { op, ok: false, hosts: None, host: None, message: Some("主机档案不存在".into()) },
                             }),
@@ -541,6 +793,10 @@ impl SessionManager {
             "delete" => {
                 let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
                 let ok = self.stores.hosts.delete(id);
+                if ok {
+                    // 档案删除：池内连接立即驱逐（持有方会话由存活检测自行感知关闭）
+                    self.registry.evict(id, "host-deleted");
+                }
                 self.send_control(ServerFrame::Hosts {
                     m: HostsResultM {
                         op,
@@ -563,7 +819,12 @@ impl SessionManager {
                 ms: None,
                 message: Some("主机档案不存在".into()),
             },
-            Some(host) => probe_tcp(&host.input.host, host.input.port).await,
+            // probe_tcp 不感知 hostId（其调用方 toolcore 也无需），此处回填以供前端按 hostId 匹配
+            Some(host) => {
+                let mut r = probe_tcp(&host.input.host, host.input.port).await;
+                r.host_id = host_id.to_string();
+                r
+            }
         };
         self.send_control(ServerFrame::ProbeResult { m: frame });
     }
@@ -584,7 +845,10 @@ fn ok_sftp(op: &str, rid: Option<String>, fill: impl FnOnce(&mut SftpResultM)) -
         resolved_path: None,
         entries: None,
         size_b: None,
+        host: None,
         message: None,
+        error_kind: None,
+        preflight: None,
     };
     fill(&mut m);
     m
@@ -599,7 +863,186 @@ fn err_sftp(op: &str, rid: Option<String>, message: &str) -> SftpResultM {
         resolved_path: None,
         entries: None,
         size_b: None,
+        host: None,
         message: Some(message.to_string()),
+        // 统一注入错误分类（权限/空间/重名/占用/网络），前端据此给友好提示与建议
+        error_kind: crate::sftp::classify_sftp_error(message),
+        preflight: None,
+    }
+}
+
+/// 组装传输预检报告（preflight op 与 AI 工具 sftp_*_file 共用）
+/// 方向语义：upload → path=本地源（Agent 本地盘，浏览器宿主用 size 提示）、to=远端目标；
+///          download → path=远端源、to=本地目标。
+pub(crate) async fn build_preflight_report(
+    ctrl: &SftpController,
+    direction: &str,
+    path: &str,
+    to: &str,
+    size_hint: Option<u64>,
+) -> Result<crate::protocol::PreflightReportM, String> {
+    use crate::protocol::{PreflightItemM, PreflightReportM};
+
+    const LARGE_FILE: u64 = 1024 * 1024 * 1024; // ≥1GB 提醒（交互阈值，双端一致）
+    fn item(code: &str, message: String) -> PreflightItemM {
+        PreflightItemM {
+            code: code.to_string(),
+            message,
+        }
+    }
+    fn fmt_b(n: u64) -> String {
+        const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+        let mut v = n as f64;
+        let mut i = 0usize;
+        while v >= 1024.0 && i < U.len() - 1 {
+            v /= 1024.0;
+            i += 1;
+        }
+        if i == 0 {
+            format!("{n} B")
+        } else {
+            format!("{v:.1} {}", U[i])
+        }
+    }
+
+    let mut report = PreflightReportM {
+        size_b: 0,
+        file_count: 1,
+        scan_truncated: false,
+        remote_exists: false,
+        remote_size_b: None,
+        remote_free_b: None,
+        remote_writable: true,
+        local_exists: false,
+        local_free_b: None,
+        local_fs: None,
+        local_max_file_b: None,
+        suggested_path: None,
+        warnings: Vec::new(),
+        blockers: Vec::new(),
+    };
+    let budget = crate::sftp::ScanBudget::new();
+
+    if direction == "download" {
+        // 远端源
+        let rc = ctrl.remote_preflight(path, false).await;
+        if !rc.exists {
+            report.blockers.push(item("not_found", "远端文件/目录不存在".into()));
+            return Ok(report);
+        }
+        let (size, count, truncated) = if rc.is_dir {
+            ctrl.scan_remote_size(path, &budget).await?
+        } else {
+            (rc.size_b.unwrap_or(0), 1, false)
+        };
+        report.size_b = size;
+        report.file_count = count;
+        report.scan_truncated = truncated;
+        if truncated {
+            report
+                .warnings
+                .push(item("scan_truncated", "目录过大，扫描被截断，大小为下限估计".into()));
+        }
+        // 本地目标
+        let local = std::path::Path::new(to);
+        report.local_exists = local.exists();
+        if let Some(free) = crate::disk::available_space(local) {
+            report.local_free_b = Some(free);
+            if size > free {
+                report.blockers.push(item(
+                    "no_space",
+                    format!("本地磁盘剩余空间不足：需 {}，仅剩 {}", fmt_b(size), fmt_b(free)),
+                ));
+            }
+        }
+        if let Some(fs) = crate::disk::fs_name(local) {
+            report.local_fs = Some(fs.clone());
+            if let Some(max) = crate::disk::max_file_bytes(&fs) {
+                report.local_max_file_b = Some(max);
+                // FAT32 单文件上限仅对单文件下载可判定（目录任务逐文件各异）
+                if count <= 1 && size > max {
+                    report.blockers.push(item(
+                        "fs_4gb_limit",
+                        format!("目标盘为 {}，单文件上限 {}，文件 {} 无法保存（换 NTFS/exFAT 目标）", fs, fmt_b(max), fmt_b(size)),
+                    ));
+                }
+            }
+        }
+    } else {
+        // 上传：本地源（Agent 本地盘）
+        let local = std::path::Path::new(path);
+        if local.exists() {
+            let md = tokio::fs::metadata(local)
+                .await
+                .map_err(|e| format!("读取本地路径失败：{e}"))?;
+            if md.is_dir() {
+                let (t, c, tr) = crate::sftp::scan_local_size(local, &budget)?;
+                report.size_b = t;
+                report.file_count = c;
+                report.scan_truncated = tr;
+                if tr {
+                    report
+                        .warnings
+                        .push(item("scan_truncated", "目录过大，扫描被截断，大小为下限估计".into()));
+                }
+            } else {
+                report.size_b = md.len();
+            }
+        } else {
+            // 浏览器宿主无本地路径：用调用方给出的总量提示
+            report.size_b = size_hint.unwrap_or(0);
+        }
+        // 远端目标
+        let rc = ctrl.remote_preflight(to, true).await;
+        report.remote_exists = rc.exists;
+        report.remote_size_b = if rc.exists { rc.size_b } else { None };
+        report.remote_free_b = rc.free_b;
+        report.remote_writable = rc.writable;
+        report.suggested_path = rc.suggested_path;
+        if rc.exists && rc.is_dir {
+            report
+                .blockers
+                .push(item("target_exists", "远端目标路径已是一个目录，无法覆盖".into()));
+        } else if rc.exists {
+            report.remote_size_b = rc.size_b;
+        }
+        if !rc.writable {
+            report
+                .blockers
+                .push(item("no_permission", "远端目标目录不可写（无权限或只读）".into()));
+        }
+        if let Some(free) = rc.free_b {
+            if report.size_b > free {
+                report.blockers.push(item(
+                    "no_space",
+                    format!("远端剩余空间不足：需 {}，仅剩 {}", fmt_b(report.size_b), fmt_b(free)),
+                ));
+            }
+        } else {
+            report.warnings.push(item(
+                "free_unknown",
+                "服务器不支持剩余空间查询，无法预检远端磁盘空间".into(),
+            ));
+        }
+    }
+
+    if report.blockers.is_empty() && report.size_b >= LARGE_FILE {
+        report.warnings.push(item(
+            "large_file",
+            format!("传输量较大（{}），耗时可能较长", fmt_b(report.size_b)),
+        ));
+    }
+    Ok(report)
+}
+
+/// 原生传输的 path/to 双路径校验
+fn require_paths<'a>(
+    path: Option<&'a str>,
+    to: Option<&'a str>,
+) -> Result<(&'a str, &'a str), &'a str> {
+    match (path.filter(|p| !p.is_empty()), to.filter(|t| !t.is_empty())) {
+        (Some(p), Some(t)) => Ok((p, t)),
+        _ => Err("缺少 path/to 路径"),
     }
 }
 

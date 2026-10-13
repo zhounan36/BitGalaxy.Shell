@@ -8,7 +8,7 @@ use russh::keys::{Algorithm, HashAlg, PrivateKeyWithHashAlg, PublicKey};
 use russh::{ChannelMsg, ChannelWriteHalf};
 use tokio::sync::oneshot;
 
-use crate::protocol::{HostKeyInfo, HostRecord, ServerFrame};
+use crate::protocol::{AuthRetryM, HostKeyInfo, HostRecord, ServerFrame};
 use crate::stores::KnownHosts;
 use crate::wire::Outbound;
 
@@ -36,6 +36,9 @@ impl SshError {
 
 /// 工作台交互确认槽：check_server_key 发帧后挂起等待 confirm-hostkey 回包
 pub type ConfirmSlot = Arc<StdMutex<Option<oneshot::Sender<bool>>>>;
+/// 工作台密码重试槽：密码认证被拒后发 auth-retry 帧，挂起等待 retry-auth 回包
+///（Some(新密码) = 重试；None = 取消；发送端 drop 视为取消）
+pub type AuthSlot = Arc<StdMutex<Option<oneshot::Sender<Option<String>>>>>;
 
 pub enum HostKeyAsk {
     /// 工作台 TOFU：发 hostkey-unknown 帧，等用户在 UI 确认
@@ -43,6 +46,7 @@ pub enum HostKeyAsk {
         session_id: String,
         out: Outbound,
         slot: ConfirmSlot,
+        auth_slot: AuthSlot,
     },
     /// AI/MCP 通道：fail-closed，未知指纹直接拒绝
     FailClosed,
@@ -86,7 +90,7 @@ impl Handler for ConnHandler {
 
         match &ctx.ask {
             HostKeyAsk::FailClosed => Ok(false),
-            HostKeyAsk::Interactive { session_id, out, slot } => {
+            HostKeyAsk::Interactive { session_id, out, slot, .. } => {
                 out.send_frame(&ServerFrame::HostKeyUnknown {
                     s: session_id.clone(),
                     m: HostKeyInfo {
@@ -133,20 +137,19 @@ fn ssh_key_fingerprint(pk: &PublicKey) -> String {
 
 // ── 连接 ──────────────────────────────────────────────────────────────────
 
-pub enum SshKind {
-    Shell,
-    Sftp,
-    Metrics,
-    Exec,
-}
-
+/// 一条 SSH 连接（连接注册表按主机共享复用）：
+/// PTY shell / SFTP / exec / metrics 均为连接上的独立通道，按需打开。
 pub struct SshConnection {
     handle: Handle<ConnHandler>,
-    /// shell 会话的写半部（stdin / resize）
-    pty: Option<ChannelWriteHalf<russh::client::Msg>>,
-    /// shell 会话的读半部（stdout/stderr → 上层 take 后转发为数据帧）
-    pub shell_reader: StdMutex<Option<russh::ChannelReadHalf>>,
     pub host_label: String,
+}
+
+/// 交互式 PTY shell 通道（从连接上按需打开；每个 shell 会话各自一条）
+pub struct PtyShell {
+    /// 读半部（stdout/stderr → 上层 take 后转发为数据帧）
+    pub reader: StdMutex<Option<russh::ChannelReadHalf>>,
+    /// 写半部（stdin / resize）
+    write: ChannelWriteHalf<russh::client::Msg>,
 }
 
 pub struct ExecOutput {
@@ -159,7 +162,6 @@ pub struct ExecOutput {
 
 pub async fn connect(
     host: &HostRecord,
-    kind: &SshKind,
     ctx: Arc<HostKeyCtx>,
 ) -> Result<SshConnection, SshError> {
     let config = Arc::new(Config {
@@ -182,7 +184,8 @@ pub async fn connect(
 
     let host_label = format!("{}@{}:{}", host.input.username, host.input.host, host.input.port);
 
-    // 认证
+    // 认证（单次认证交换 15s 超时：半死服务器不能让 open 任务无限挂起；
+    // 密码重试等待 UI 输入不受此限制）
     let user = host.input.username.clone();
     let auth_ok = match host.input.auth.kind.as_str() {
         "privateKey" => {
@@ -204,11 +207,52 @@ pub async fn connect(
                 None
             };
             let with_hash = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
-            handle.authenticate_publickey(user, with_hash).await
+            match tokio::time::timeout(
+                Duration::from_secs(15),
+                handle.authenticate_publickey(user, with_hash),
+            )
+            .await
+            {
+                Ok(r) => r.map_err(|e| SshError::Other(e.to_string())),
+                Err(_) => Err(SshError::Timeout),
+            }
         }
         _ => {
-            let password = host.input.auth.password.clone().unwrap_or_default();
-            handle.authenticate_password(user, password).await
+            // 密码认证：被拒时工作台交互模式弹窗重试（最多 3 次），AI/MCP 通道直接失败
+            let mut password = host.input.auth.password.clone().unwrap_or_default();
+            let mut retries_left = 3u8;
+            loop {
+                let auth_fut =
+                    tokio::time::timeout(
+                        Duration::from_secs(15),
+                        handle.authenticate_password(user.clone(), password.clone()),
+                    );
+                match auth_fut.await {
+                    Ok(Ok(res)) if matches!(res, russh::client::AuthResult::Success) => {
+                        break Ok(res)
+                    }
+                    Ok(Ok(_)) => {
+                        if retries_left == 0 {
+                            break Err(SshError::Auth(format!(
+                                "{}@{}（已重试 3 次）",
+                                host.input.username, host.input.host
+                            )));
+                        }
+                        retries_left -= 1;
+                        match ask_auth_retry(&ctx, &user, "密码认证被服务器拒绝").await {
+                            AuthRetryAnswer::Password(p) => password = p,
+                            AuthRetryAnswer::Cancelled => {
+                                break Err(SshError::Auth(format!(
+                                    "{}@{}: 已取消认证",
+                                    host.input.username, host.input.host
+                                )))
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => break Err(SshError::Auth(format!("认证中断: {e}"))),
+                    Err(_) => break Err(SshError::Timeout),
+                }
+            }
         }
     };
     match auth_ok {
@@ -219,35 +263,42 @@ pub async fn connect(
                 host.input.username, host.input.host
             )))
         }
-        Err(e) => return Err(SshError::Auth(e.to_string())),
+        Err(e) => return Err(e),
     }
 
-    // shell 会话：打开 PTY + shell；其余 kind 建连即返回
-    let mut pty = None;
-    let mut shell_reader = None;
-    if matches!(kind, SshKind::Shell) {
-        let channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| SshError::Other(e.to_string()))?;
-        channel
-            .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
-            .await
-            .map_err(|e| SshError::Other(e.to_string()))?;
-        channel
-            .request_shell(true)
-            .await
-            .map_err(|e| SshError::Other(e.to_string()))?;
-        let (read, write) = channel.split();
-        pty = Some(write);
-        shell_reader = Some(read);
+    Ok(SshConnection { handle, host_label })
+}
+
+pub enum AuthRetryAnswer {
+    Password(String),
+    Cancelled,
+}
+
+/// 密码认证被拒后向工作台请求重输密码：发 auth-retry 帧后挂起等待 retry-auth 回包。
+/// 非 Interactive（AI/MCP fail-closed）或等待被取消（会话关闭）时返回 Cancelled。
+async fn ask_auth_retry(ctx: &HostKeyCtx, user: &str, message: &str) -> AuthRetryAnswer {
+    let HostKeyAsk::Interactive { session_id, out, auth_slot, .. } = &ctx.ask else {
+        return AuthRetryAnswer::Cancelled;
+    };
+    out.send_frame(&ServerFrame::AuthRetry {
+        s: session_id.clone(),
+        m: AuthRetryM {
+            username: user.to_string(),
+            host: ctx.host.clone(),
+            port: ctx.port,
+            message: message.to_string(),
+        },
+    });
+    let (tx, rx) = oneshot::channel::<Option<String>>();
+    {
+        let mut guard = auth_slot.lock().unwrap();
+        *guard = Some(tx);
     }
-    Ok(SshConnection {
-        handle,
-        pty,
-        shell_reader: StdMutex::new(shell_reader),
-        host_label,
-    })
+    // 挂起等待 UI 决定；会话关闭（发送端 drop）视为取消
+    match rx.await {
+        Ok(Some(p)) => AuthRetryAnswer::Password(p),
+        _ => AuthRetryAnswer::Cancelled,
+    }
 }
 
 fn classify_connect(e: russh::Error, host: &str, port: u16) -> SshError {
@@ -269,35 +320,53 @@ impl SshConnection {
         !self.handle.is_closed()
     }
 
-    /// PTY stdin
-    pub async fn write_input(&self, data: &[u8]) -> Result<(), String> {
-        if let Some(pty) = &self.pty {
-            pty.data(data).await.map_err(|e| e.to_string())
-        } else {
-            Ok(())
-        }
-    }
-
-    /// PTY 尺寸
-    pub async fn resize(&self, cols: u32, rows: u32) -> Result<(), String> {
-        if let Some(pty) = &self.pty {
-            pty.window_change(cols, rows, 480, 240).await.map_err(|e| e.to_string())
-        } else {
-            Ok(())
-        }
+    /// 打开交互式 PTY shell 通道（整体 15s 超时，半死连接不让 open 任务挂起）。
+    /// 每个调用各自一条通道：同主机多 shell 互不干扰。
+    pub async fn open_pty_shell(&self) -> Result<PtyShell, SshError> {
+        let setup = async {
+            let channel = self
+                .handle
+                .channel_open_session()
+                .await
+                .map_err(|e| SshError::Other(e.to_string()))?;
+            channel
+                .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+                .await
+                .map_err(|e| SshError::Other(e.to_string()))?;
+            channel
+                .request_shell(true)
+                .await
+                .map_err(|e| SshError::Other(e.to_string()))?;
+            Ok::<_, SshError>(channel)
+        };
+        let channel = match tokio::time::timeout(Duration::from_secs(15), setup).await {
+            Ok(Ok(ch)) => ch,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(SshError::Timeout),
+        };
+        let (read, write) = channel.split();
+        Ok(PtyShell {
+            reader: StdMutex::new(Some(read)),
+            write,
+        })
     }
 
     /// 单次远程命令：超时不抛错，携带已收输出与 timedOut 标志返回
     pub async fn exec(&self, cmd: &str, timeout_ms: u64, max_bytes: usize) -> Result<ExecOutput, String> {
-        let mut channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|e| format!("SSH 连接未建立: {e}"))?;
-        channel
-            .exec(true, cmd)
-            .await
-            .map_err(|e| e.to_string())?;
+        // 通道打开 + 启动各 10s 超时：事件循环卡死的连接上 channel_open/exec 会永久挂起
+        let mut channel = match tokio::time::timeout(
+            Duration::from_secs(10),
+            self.handle.channel_open_session(),
+        )
+        .await
+        {
+            Ok(r) => r.map_err(|e| format!("SSH 连接未建立: {e}"))?,
+            Err(_) => return Err("SSH 通道打开超时".into()),
+        };
+        match tokio::time::timeout(Duration::from_secs(10), channel.exec(true, cmd)).await {
+            Ok(r) => r.map_err(|e| e.to_string())?,
+            Err(_) => return Err("命令启动超时".into()),
+        }
 
         let mut stdout_buf: Vec<u8> = Vec::new();
         let mut stderr_buf: Vec<u8> = Vec::new();
@@ -330,24 +399,54 @@ impl SshConnection {
         })
     }
 
-    /// 打开 SFTP 子系统会话
+    /// 打开 SFTP 子系统会话（整体 15s 超时）
     pub async fn open_sftp(&self) -> Result<russh_sftp::client::SftpSession, String> {
-        let channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|e| format!("SSH 连接未建立: {e}"))?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(|e| e.to_string())?;
-        russh_sftp::client::SftpSession::new(channel.into_stream())
-            .await
-            .map_err(|e| format!("SFTP 通道打开失败: {e}"))
+        let setup = async {
+            let channel = self
+                .handle
+                .channel_open_session()
+                .await
+                .map_err(|e| format!("SSH 连接未建立: {e}"))?;
+            channel
+                .request_subsystem(true, "sftp")
+                .await
+                .map_err(|e| e.to_string())?;
+            russh_sftp::client::SftpSession::new(channel.into_stream())
+                .await
+                .map_err(|e| format!("SFTP 通道打开失败: {e}"))
+        };
+        match tokio::time::timeout(Duration::from_secs(15), setup).await {
+            Ok(r) => r,
+            Err(_) => Err("SFTP 通道打开超时".into()),
+        }
     }
 
     pub async fn close(&self) {
         let _ = self.handle.disconnect(russh::Disconnect::ByApplication, "close", "en");
+    }
+}
+
+impl PtyShell {
+    /// PTY stdin（5s 写超时：僵尸连接的流控窗口打满时 data() 会无限挂起，
+    /// 快速失败避免上层写入任务堆积）
+    pub async fn write_input(&self, data: &[u8]) -> Result<(), String> {
+        match tokio::time::timeout(Duration::from_secs(5), self.write.data(data)).await {
+            Ok(r) => r.map_err(|e| e.to_string()),
+            Err(_) => Err("写入超时（连接可能已断开）".into()),
+        }
+    }
+
+    /// PTY 尺寸（同 write_input 的 5s 写超时）
+    pub async fn resize(&self, cols: u32, rows: u32) -> Result<(), String> {
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            self.write.window_change(cols, rows, 480, 240),
+        )
+        .await
+        {
+            Ok(r) => r.map_err(|e| e.to_string()),
+            Err(_) => Err("写入超时（连接可能已断开）".into()),
+        }
     }
 }
 

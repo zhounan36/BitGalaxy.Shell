@@ -44,7 +44,7 @@
                                        "loop":  true,
                                        "plannedFrames":  8,
                                        "frames":  8,
-                                       "fps":  8,
+                                       "fps":  6,
                                        "event":  "无会话 · 待机呼吸",
                                        "anchor":  {
                                                       "x":  0.5,
@@ -62,7 +62,7 @@
                                       "loop":  false,
                                       "plannedFrames":  3,
                                       "frames":  3,
-                                      "fps":  6,
+                                      "fps":  5,
                                       "event":  "待机中随机眨眼",
                                       "anchor":  {
                                                      "x":  0.5,
@@ -80,7 +80,7 @@
                                    "loop":  true,
                                    "plannedFrames":  8,
                                    "frames":  8,
-                                   "fps":  8,
+                                   "fps":  6,
                                    "event":  "会话有输出 · 打字+内心独白气泡",
                                    "anchor":  {
                                                   "x":  0.5,
@@ -98,7 +98,7 @@
                                       "loop":  true,
                                       "plannedFrames":  4,
                                       "frames":  4,
-                                      "fps":  6,
+                                      "fps":  5,
                                       "event":  "hostkey-unknown / 密库解锁 · 问号气泡",
                                       "anchor":  {
                                                      "x":  0.5,
@@ -116,7 +116,7 @@
                                  "loop":  false,
                                  "plannedFrames":  6,
                                  "frames":  6,
-                                 "fps":  10,
+                                 "fps":  8,
                                  "event":  "open-failed / probe 失败 · 3s 自愈",
                                  "line":  "真当我是便宜货？！",
                                  "anchor":  {
@@ -135,7 +135,7 @@
                                 "loop":  false,
                                 "plannedFrames":  6,
                                 "frames":  6,
-                                "fps":  8,
+                                "fps":  6,
                                 "event":  "hover / 出场问候",
                                 "anchor":  {
                                                "x":  0.5,
@@ -153,7 +153,7 @@
                                 "loop":  true,
                                 "plannedFrames":  8,
                                 "frames":  8,
-                                "fps":  10,
+                                "fps":  8,
                                 "event":  "被用户拖拽 · 鲸尾扑腾（drag_fwd 反放 ping-pong 展开）",
                                 "anchor":  {
                                                "x":  0.5,
@@ -171,7 +171,7 @@
                                   "loop":  true,
                                   "plannedFrames":  8,
                                   "frames":  8,
-                                  "fps":  8,
+                                  "fps":  6,
                                   "event":  "30s 无输出 · 干饭",
                                   "line":  "我先去吃饭，好了叫我",
                                   "anchor":  {
@@ -190,7 +190,7 @@
                                  "loop":  true,
                                  "plannedFrames":  8,
                                  "frames":  8,
-                                 "fps":  4,
+                                 "fps":  3,
                                  "event":  "空闲 5min · DeepSleep 深睡",
                                  "anchor":  {
                                                 "x":  0.5,
@@ -208,7 +208,7 @@
                                  "loop":  false,
                                  "plannedFrames":  4,
                                  "frames":  4,
-                                 "fps":  8,
+                                 "fps":  6,
                                  "event":  "唤醒/登录 · 登场亮相",
                                  "line":  "探索未至之境",
                                  "anchor":  {

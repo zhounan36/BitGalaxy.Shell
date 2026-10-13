@@ -25,7 +25,7 @@ export function usePet(): { view: PetView; dispatch: (ev: PetEvent) => void } {
   const machineRef = useRef<PetMachine>(null as unknown as PetMachine)
   if (!machineRef.current) machineRef.current = new PetMachine()
   const tailRef = useRef('')
-  const nextBlinkAtRef = useRef(Date.now() + 2500 + Math.random() * 4500)
+  const nextBlinkAtRef = useRef(Date.now() + 6000 + Math.random() * 6000)
   const [view, setView] = useState<PetView>(() => ({
     ...machineRef.current.snapshot(),
     outputTail: '',
@@ -102,7 +102,7 @@ export function usePet(): { view: PetView; dispatch: (ev: PetEvent) => void } {
         now >= nextBlinkAtRef.current
       ) {
         m.handle({ type: 'blink' })
-        nextBlinkAtRef.current = now + 2500 + Math.random() * 4500
+        nextBlinkAtRef.current = now + 6000 + Math.random() * 6000
       }
       m.handle({ type: 'tick', now })
       publish()

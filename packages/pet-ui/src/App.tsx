@@ -26,19 +26,21 @@ export function App() {
   const anchorStartRef = useRef<{ left: number; top: number } | null>(null)
   // 右键菜单（呼出工作台/主机会话）、AI 对话面板与文件拖放提示
   const [menuOpen, setMenuOpen] = useState(false)
+  // 右键菜单内的主机数量：PetMenu 上报，用于扩宠物窗高度（多主机时菜单不被窗口顶部裁剪）
+  const [menuHosts, setMenuHosts] = useState(0)
   const [chatOpen, setChatOpen] = useState(false)
   const [dropHover, setDropHover] = useState(false)
   // 精灵尺寸（滚轮缩放，localStorage 持久化；Tauri 宿主联动窗口尺寸，浏览器宿主仅缩 DOM）
   const [petSize, setPetSize] = useState(loadPetSize)
 
-  // 尺寸 / 对话面板开合变化 → 宠物窗随之扩/缩（右下角锚定，宠物本体屏幕位置不变；浏览器宿主 no-op）。
+  // 尺寸 / 对话面板开合 / 右键菜单变化 → 宠物窗随之扩/缩（右下角锚定，宠物本体屏幕位置不变；浏览器宿主 no-op）。
   // 串行执行：滚轮连滚时逐次应用，避免并发 IPC 读到过期的窗口位置
   const applyChainRef = useRef(Promise.resolve())
   useEffect(() => {
     applyChainRef.current = applyChainRef.current
-      .then(() => applyPetWindowSize(petSize, chatOpen))
+      .then(() => applyPetWindowSize(petSize, chatOpen, menuOpen ? menuHosts : 0))
       .catch((err) => console.error('applyPetWindowSize failed', err))
-  }, [petSize, chatOpen])
+  }, [petSize, chatOpen, menuOpen, menuHosts])
 
   // OS 级文件拖放（仅 Tauri 宿主）：悬停亮提示，落下转发工作台开上传面板
   useEffect(() => {
@@ -127,7 +129,11 @@ export function App() {
       {debug && <DebugPanel view={view} />}
       {dropHover && <div className="drop-hint">松手，交给工作台上传</div>}
       {menuOpen && (
-        <PetMenu onClose={() => setMenuOpen(false)} onOpenChat={() => setChatOpen(true)} />
+        <PetMenu
+          onClose={() => setMenuOpen(false)}
+          onOpenChat={() => setChatOpen(true)}
+          onHostsChange={setMenuHosts}
+        />
       )}
       <ChatPanel open={chatOpen} onClose={() => setChatOpen(false)} />
       <div

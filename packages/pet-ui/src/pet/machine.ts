@@ -39,9 +39,12 @@ export const ACTION_PRIORITY: Record<PetActionKey, number> = {
 export const ACTION_MS: Record<PetActionKey, number> = {
   ready: 1600,
   wave: 1500,
-  idle_blink: 450,
+  idle_blink: 600,
   angry: 3000,
 }
+
+/** wave 冷却：悬停反复进出不重复招手；poke 等主动交互不受限 */
+const WAVE_COOLDOWN_MS = 15_000
 
 /** drag 兜底：drag-end 丢失（如原生拖窗吞掉 pointerup）时最迟回落时间 */
 const DRAG_STUCK_MS = 10_000
@@ -96,6 +99,7 @@ export class PetMachine {
   private base: PetBaseState = 'sleep'
   private action: PetActionKey | null = null
   private actionStartedAt = 0
+  private lastWaveAt = 0
   private connected = false
   private sessions = 0
   private pendingHostkey: string | null = null
@@ -176,7 +180,12 @@ export class PetMachine {
         this.playAction('angry') // 最高优先级，可打断一切动作
         return
       case 'pointer-enter':
-        if (this.base === 'idle_breath') this.playAction('wave')
+        if (
+          this.base === 'idle_breath' &&
+          Date.now() - this.lastWaveAt >= WAVE_COOLDOWN_MS
+        ) {
+          this.playAction('wave')
+        }
         return
       case 'poke':
         this.touch()
@@ -261,6 +270,7 @@ export class PetMachine {
     if (this.action && ACTION_PRIORITY[next] <= ACTION_PRIORITY[this.action]) return
     this.action = next
     this.actionStartedAt = Date.now()
+    if (next === 'wave') this.lastWaveAt = this.actionStartedAt
   }
 
   private clearAction(): void {

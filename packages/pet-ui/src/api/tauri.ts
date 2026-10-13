@@ -10,6 +10,16 @@ export async function startWindowDrag(): Promise<void> {
   await getCurrentWindow().startDragging()
 }
 
+/** 写系统剪贴板（Tauri 壳走原生插件 IPC；浏览器宿主回退 Web Clipboard API） */
+export async function writeClipboardText(text: string): Promise<void> {
+  if (isTauri) {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('plugin:clipboard-manager|write_text', { text })
+    return
+  }
+  await navigator.clipboard.writeText(text)
+}
+
 /** ── 桌宠缩放 ─────────────────────────────────────────────────────────────
  * 精灵尺寸持久化在 localStorage（默认 256，步进 16，范围 160..480）；
  * 窗口尺寸由「精灵尺寸 + 对话面板开合」动态推导，宠物本体始终贴右下角。
@@ -36,24 +46,30 @@ export function savePetSize(v: number): void {
 }
 
 /**
- * 由精灵尺寸 + 对话面板开合推导窗口尺寸（逻辑像素）：
+ * 由精灵尺寸 + 对话面板开合 + 右键菜单推导窗口尺寸（逻辑像素）：
  * - rest：气泡区（最高约 164px）+ 精灵盒；宽兜底 340（气泡 max-width）
  * - chat：再容纳右侧 (petSize-46) 偏移 + 360px 宽的对话面板，高度按 rest+80 收敛
+ * - menu：右键菜单打开且主机列表非空时，窗口加高以容纳完整菜单
+ *   （菜单 bottom 偏移 petSize-40，固定项约 160px，每台主机行约 34px；超出屏幕由
+ *   applyPetWindowSize 的屏幕收敛 + CSS 滚动兜底处理）
  * 与旧常量在 petSize=256 时完全一致（340×420 / 596×500）。
  */
-export function petWindowSize(petSize: number, chat: boolean): { w: number; h: number } {
+export function petWindowSize(petSize: number, chat: boolean, menuHosts = 0): { w: number; h: number } {
   const restW = Math.max(340, petSize + 84)
   const restH = petSize + 164
-  const chatW = Math.max(596, restW + 256)
-  const chatH = Math.max(500, restH + 80)
-  return chat ? { w: chatW, h: chatH } : { w: restW, h: restH }
+  if (chat) return { w: Math.max(596, restW + 256), h: Math.max(500, restH + 80) }
+  if (menuHosts > 0) {
+    const menuH = 160 + 34 * menuHosts
+    return { w: restW, h: Math.max(restH, petSize - 40 + menuH + 12) }
+  }
+  return { w: restW, h: restH }
 }
 
 /**
  * 把宠物窗调整为目标尺寸：右下角锚定（扩窗向左上生长、收窗向右下缩回，宠物本体不动）。
- * 仅扩窗（对话面板打开）时做屏幕收敛，避免面板被顶出屏幕。浏览器宿主 no-op。
+ * 仅扩窗（对话面板 / 右键菜单）时做屏幕收敛，避免被顶出屏幕。浏览器宿主 no-op。
  */
-export async function applyPetWindowSize(petSize: number, chat: boolean): Promise<void> {
+export async function applyPetWindowSize(petSize: number, chat: boolean, menuHosts = 0): Promise<void> {
   if (!isTauri) return
   const { getCurrentWindow, currentMonitor } = await import('@tauri-apps/api/window')
   const { LogicalSize, LogicalPosition } = await import('@tauri-apps/api/dpi')
@@ -61,12 +77,12 @@ export async function applyPetWindowSize(petSize: number, chat: boolean): Promis
   const scale = await win.scaleFactor()
   const toLogical = (v: number) => v / scale
   const [pos, size, monitor] = await Promise.all([win.outerPosition(), win.outerSize(), currentMonitor()])
-  const { w, h } = petWindowSize(petSize, chat)
+  const { w, h } = petWindowSize(petSize, chat, menuHosts)
   // 右下角锚定：统一按逻辑坐标计算
   let nx = toLogical(pos.x) + toLogical(size.width) - w
   let ny = toLogical(pos.y) + toLogical(size.height) - h
-  // 屏幕收敛（仅扩窗）：宠物被拖到屏幕边缘时，扩窗不得把对话面板顶出屏幕外
-  if (chat && monitor) {
+  // 屏幕收敛（仅扩窗）：宠物被拖到屏幕边缘时，扩窗不得把面板/菜单顶出屏幕外
+  if ((chat || menuHosts > 0) && monitor) {
     const ms = monitor.scaleFactor
     const mx = monitor.position.x / ms
     const my = monitor.position.y / ms

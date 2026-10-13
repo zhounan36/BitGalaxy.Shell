@@ -189,8 +189,128 @@ body {
 
 /* 终端宿主 */
 .terminal-holder {
+  position: relative;
   height: 100%;
   padding: 8px;
+}
+
+/* 文件拖入终端面板（拖拽上传到当前目录）高亮 */
+.terminal-holder.drag-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+}
+
+/* ============================================================
+   终端拖拽上传浮层（右下角进度卡片）
+   ============================================================ */
+.term-drop-card {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1100;
+  width: 380px;
+  max-height: 46vh;
+  overflow: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+}
+
+.term-drop-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.term-drop-card-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font: 600 13px/1.3 var(--font-ui);
+}
+
+.term-drop-card-note {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: help;
+}
+
+.term-drop-card-close {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.term-drop-card-close:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.term-drop-card-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.term-drop-card-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary, var(--text-primary));
+  font: 12px/1.3 var(--font-mono);
+}
+
+.term-drop-card-summary {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ============================================================
+   终端选区下载浮层（右键「下载」后的右下角进度卡片）
+   ============================================================ */
+.term-dl-card {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1100;
+  width: 340px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+}
+
+.term-dl-card-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font: 12px/1.3 var(--font-mono);
 }
 
 /* ============================================================
