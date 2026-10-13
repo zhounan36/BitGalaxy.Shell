@@ -59,6 +59,8 @@ pub struct HostKeyCtx {
     pub ask: HostKeyAsk,
     /// 指纹不匹配（防中间人）标记，供上层区分错误
     pub mismatch: Arc<std::sync::atomic::AtomicBool>,
+    /// 密码重试认证成功且与档案不同时回写主机档案（None = 不回写）
+    pub save_password: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 }
 
 struct ConnHandler {
@@ -220,6 +222,8 @@ pub async fn connect(
         _ => {
             // 密码认证：被拒时工作台交互模式弹窗重试（最多 3 次），AI/MCP 通道直接失败
             let mut password = host.input.auth.password.clone().unwrap_or_default();
+            // 档案存储的密码：重试成功后与之不同则回写（下次连接免重输）
+            let stored = host.input.auth.password.clone();
             let mut retries_left = 3u8;
             loop {
                 let auth_fut =
@@ -229,6 +233,11 @@ pub async fn connect(
                     );
                 match auth_fut.await {
                     Ok(Ok(res)) if matches!(res, russh::client::AuthResult::Success) => {
+                        if Some(password.as_str()) != stored.as_deref() {
+                            if let Some(save) = &ctx.save_password {
+                                save(&password);
+                            }
+                        }
                         break Ok(res)
                     }
                     Ok(Ok(_)) => {

@@ -17,7 +17,7 @@ use crate::protocol::{
 };
 use crate::session::SessionManager;
 use crate::stores::Stores;
-use crate::wire::{OutMsg, Outbound};
+use crate::wire::{OutMsg, Outbound, OutHub};
 
 /// Agent 自身控制（桌面形态注入：自启/退出等）
 pub type AgentCtl = Arc<dyn Fn(protocol::AgentOp) -> BoxFuture<'static, AgentResult> + Send + Sync>;
@@ -53,21 +53,26 @@ pub async fn start_server(
     // 全局连接注册表：本进程所有 WS 连接共享（工作台会话与 AI 工具同主机复用连接；
     // MCP stdio 为独立子进程，自建实例）
     let registry = Arc::new(ConnRegistry::new(stores.clone(), policy.limits.idle_close_sec));
+    // AiHandler 进程级单例：审批卡片 / 对话状态跨 WS 连接（断线重连后的新连接）
+    // 依然路由到同一份登记表——否则重连后批准回包会落进空表被静默丢弃，
+    // 120s 审批超时被误判为「用户拒绝」。AI 帧经 OutHub 广播到所有活跃连接。
+    let out_hub = OutHub::default();
+    let ai = Arc::new(AiHandler::new(stores.clone(), out_hub, policy.clone(), registry.clone()));
     loop {
         let (stream, _addr) = match listener.accept().await {
             Ok(x) => x,
             Err(_) => continue,
         };
         let stores = stores.clone();
-        let policy = policy.clone();
         let agent_ctl = agent_ctl.clone();
         let allowed = allowed.clone();
         let registry = registry.clone();
+        let ai = ai.clone();
         tokio::spawn(async move {
             if cfg!(debug_assertions) {
                 eprintln!("[bgshell][debug] WS 接入新连接");
             }
-            handle_conn(stream, stores, policy, agent_ctl, allowed, registry).await;
+            handle_conn(stream, stores, agent_ctl, allowed, registry, ai).await;
         });
     }
 }
@@ -75,10 +80,10 @@ pub async fn start_server(
 async fn handle_conn(
     stream: tokio::net::TcpStream,
     stores: Stores,
-    policy: AiPolicy,
     agent_ctl: AgentCtl,
     allowed: Vec<String>,
     registry: Arc<ConnRegistry>,
+    ai: Arc<AiHandler>,
 ) {
     // Origin 校验后完成 WS 握手
     let ws = {
@@ -128,7 +133,8 @@ async fn handle_conn(
     });
 
     let manager = SessionManager::new(stores.clone(), outbound.clone(), registry.clone());
-    let ai = AiHandler::new(stores.clone(), outbound.clone(), policy, registry);
+    // 本连接加入 AI 广播组（断开时由 OutHub 发送路径自动清理）
+    ai.register_conn(outbound.clone());
 
     while let Some(msg) = source.next().await {
         let msg = match msg {
@@ -165,7 +171,8 @@ async fn handle_conn(
     }
 
     manager.close_all("socket-closed");
-    ai.dispose();
+    // 注意：不撤 AI 审批——AiHandler 是进程级的，断线重连后的新连接
+    // 依然可以回包；审批的 fail-closed 由 120s 超时兜底
 }
 
 async fn dispatch(

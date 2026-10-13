@@ -401,6 +401,10 @@ pub enum ServerFrame {
     AiApproval {
         m: AiApprovalM,
     },
+    #[serde(rename = "ai-tool")]
+    AiTool {
+        m: AiToolM,
+    },
     #[serde(rename = "settings-result")]
     SettingsResult {
         m: SettingsResultM,
@@ -611,6 +615,28 @@ pub struct AiApprovalM {
     pub command: String,
 }
 
+/// AI 工具调用事件（广播到所有连接；聊天里渲染为可折叠执行卡片）。
+/// running 先推（卡片带 spinner + 单条终止按钮），终态再推一次同 toolCallId 更新。
+#[derive(Debug, Clone, Serialize)]
+pub struct AiToolM {
+    #[serde(rename = "chatId")]
+    pub chat_id: String,
+    #[serde(rename = "toolCallId")]
+    pub tool_call_id: String,
+    pub name: String,
+    /// 操作摘要（命令文本 / 路径）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// running | done | failed | cancelled
+    pub stage: &'static str,
+    /// 一行结果摘要（退出码 / 字节数 / 错误要点）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// 可展开的完整输出（stdout+stderr 或错误详情，已截断）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsResultM {
     pub ok: bool,
@@ -652,6 +678,30 @@ mod tests {
         assert!(matches!(hosts, ClientFrame::Hosts { .. }));
         let ai: ClientFrame = serde_json::from_str(r#"{"t":"ai","m":{"op":"chat","chatId":"c1","text":"hi"}}"#).unwrap();
         assert!(matches!(ai, ClientFrame::Ai { .. }));
+        let cancel: ClientFrame = serde_json::from_str(r#"{"t":"ai","m":{"op":"cancel","chatId":"c1"}}"#).unwrap();
+        assert!(matches!(cancel, ClientFrame::Ai { .. }));
+    }
+
+    #[test]
+    fn ai_tool_event_serializes_camel_case() {
+        let frame = ServerFrame::AiTool {
+            m: AiToolM {
+                chat_id: "c1".into(),
+                tool_call_id: "tc1".into(),
+                name: "exec_command".into(),
+                detail: Some("mkdir /home/test".into()),
+                stage: "running",
+                summary: None,
+                output: None,
+            },
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains(r#""t":"ai-tool""#), "{json}");
+        assert!(json.contains(r#""chatId":"c1""#), "{json}");
+        assert!(json.contains(r#""toolCallId":"tc1""#), "{json}");
+        assert!(json.contains(r#""stage":"running""#), "{json}");
+        assert!(!json.contains("chat_id"), "{json}");
+        assert!(!json.contains("tool_call_id"), "{json}");
     }
 
     #[test]
