@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 import './index.css'
 import { App } from './App'
 
-// 深海蓝暗色令牌：与 packages/pet-ui/src/index.css 保持一致，统一两套 UI 的设计语言
+// 深海蓝暗色令牌：与 src/pet/index.css 保持一致，统一两套 UI 的设计语言
 const tokens = {
   colorPrimary: '#3ba6d8',
   colorInfo: '#3ba6d8',

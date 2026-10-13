@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type { PetStateKey } from '../pet/machine'
 
-/** 素材根：随 vite base（dev '/'、build '/pet/'）变化，保证双宿主路径一致 */
+/** 素材根：base 恒为 '/'（MPA 合并后 dev/生产一致），public/pet → /pet/** */
 const SPRITE_BASE = `${import.meta.env.BASE_URL}pet/`
 
 /** 帧表：与 public/pet/manifest.json 的 states.*.frames/fps/loop 保持同步 */

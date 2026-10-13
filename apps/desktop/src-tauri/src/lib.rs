@@ -34,7 +34,7 @@ pub mod wire;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// 宠物窗尺寸（逻辑像素，pet-ui 素材 256 + 气泡余量）
+/// 宠物窗尺寸（逻辑像素，桌宠精灵素材 256 + 气泡余量）
 const PET_W: f64 = 340.0;
 const PET_H: f64 = 420.0;
 
@@ -367,8 +367,8 @@ pub fn run() {
             // ── 工作台主窗 ─────────────────────────────────────────────
             // dev：vite dev server 可达（tauri dev / npm run dev:ui）→ 加载 devUrl；
             // 直跑 exe / release：加载随包分发的构建产物（apps/desktop/ui）。
-            let main_url = if cfg!(debug_assertions) && dev_server_ready(5177) {
-                WebviewUrl::External("http://localhost:5177".parse().unwrap())
+            let main_url = if cfg!(debug_assertions) && dev_server_ready(17177) {
+                WebviewUrl::External("http://localhost:17177".parse().unwrap())
             } else {
                 WebviewUrl::App("index.html".into())
             };
@@ -394,9 +394,9 @@ pub fn run() {
                 .build()?;
 
             // ── 鲸鱼娘桌宠窗：透明置顶 · 无边框 · 不进任务栏 ──────────
-            let pet_url = if cfg!(debug_assertions) && dev_server_ready(5178) {
-                // pet-ui vite base 为 /pet/（与随包分发路径一致）
-                WebviewUrl::External("http://localhost:5178/pet/".parse().unwrap())
+            // 与主窗同一 dev server（workbench-ui MPA：`/` 工作台 + `/pet/` 桌宠）
+            let pet_url = if cfg!(debug_assertions) && dev_server_ready(17177) {
+                WebviewUrl::External("http://localhost:17177/pet/".parse().unwrap())
             } else {
                 WebviewUrl::App("pet/index.html".into())
             };

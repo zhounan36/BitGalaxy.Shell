@@ -1,4 +1,4 @@
-/** Tauri 宿主桥：浏览器宿主下全部 no-op/降级，保证 pet-ui 双宿主可运行 */
+/** Tauri 宿主桥：浏览器宿主下全部 no-op/降级，保证桌宠页双宿主可运行 */
 
 export const isTauri =
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window

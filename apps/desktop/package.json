@@ -1,6 +1,6 @@
 {
   "name": "@bgshell/desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "BitGalaxy Shell 桌面应用（Tauri 2 单进程）：内嵌 Agent（SSH/WS/MCP）+ 工作台 + 桌宠 + 托盘",
   "scripts": {
