@@ -3,6 +3,9 @@ import type { HostRecord } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
 import { openHostSession, openWorkbench, hidePet, quitApp } from '../api/tauri'
 
+/** 菜单内主机最多显示的行数：再多会把窗口/屏幕撑爆，其余收进「更多主机」去工作台看 */
+const MAX_MENU_HOSTS = 6
+
 /** 宠物右键菜单：呼出 AI 对话 / 工作台 / 已存主机（点击开 SSH 终端，"文件"开文件管理） */
 export function PetMenu({
   onClose,
@@ -11,14 +14,17 @@ export function PetMenu({
 }: {
   onClose: () => void
   onOpenChat: () => void
-  /** 主机数量上报：App 据此扩宠物窗高度，菜单才不会被窗口顶部裁剪 */
+  /** 主机行数上报：App 据此扩宠物窗高度，菜单才不会被窗口顶部裁剪（已封顶，不会无限增长） */
   onHostsChange: (n: number) => void
 }) {
   const [hosts, setHosts] = useState<HostRecord[]>()
+  const shown = hosts?.slice(0, MAX_MENU_HOSTS) ?? []
+  const restCount = hosts ? hosts.length - shown.length : 0
 
   useEffect(() => {
-    onHostsChange(hosts?.length ?? 0)
-  }, [hosts, onHostsChange])
+    // 上报实际渲染行数（超出上限时含「更多主机」一行）
+    onHostsChange(hosts === undefined ? 0 : shown.length + (restCount > 0 ? 1 : 0))
+  }, [hosts, shown.length, restCount, onHostsChange])
 
   useEffect(() => {
     let alive = true
@@ -79,9 +85,9 @@ export function PetMenu({
         ) : hosts.length === 0 ? (
           <div className="pet-menu-empty">暂无主机，请在工作台添加</div>
         ) : (
-          /* 屏幕高度放不下完整列表时在菜单内滚动，固定项（工作台/对话/隐藏/退出）始终可见 */
+          /* 最多渲染 MAX_MENU_HOSTS 行 + 「更多主机」；屏幕极矮时仍由 pet-menu-hosts 内部滚动兜底 */
           <div className="pet-menu-hosts">
-            {hosts.map((h) => (
+            {shown.map((h) => (
               <div key={h.id} className="pet-menu-row">
                 <button
                   type="button"
@@ -107,6 +113,19 @@ export function PetMenu({
                 </button>
               </div>
             ))}
+            {restCount > 0 && (
+              <button
+                type="button"
+                className="pet-menu-btn pet-menu-more"
+                title="打开工作台查看全部主机"
+                onClick={() => {
+                  void openWorkbench()
+                  onClose()
+                }}
+              >
+                更多主机（{restCount} 台）…
+              </button>
+            )}
           </div>
         )}
         <div className="pet-menu-sep" />

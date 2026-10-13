@@ -27,10 +27,27 @@ fn sftp_err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// 本地（Windows）文件操作失败的消息前缀：与远端 SFTP 错误区分归类
+const LOCAL_IO_PREFIXES: [&str; 8] = [
+    "读取本地文件失败",
+    "读取本地目录失败",
+    "打开本地文件失败",
+    "写本地文件失败",
+    "重置部分文件失败",
+    "落盘失败",
+    "定位本地文件失败",
+    "读本地文件失败",
+];
+
 /// SFTP v3 无专用错误状态码（ENOSPC/EACCES 等以 Failure+errno 文本返回），
 /// 按子串归类；本地 IO 错误（Windows 中文文案）一并覆盖。
-/// 返回：permission_denied / no_space / quota / file_exists / text_file_busy / network / unknown
+/// 返回：local_io / permission_denied / no_space / quota / file_exists / text_file_busy / network / unknown
 pub(crate) fn classify_sftp_error(msg: &str) -> Option<String> {
+    // 本地文件操作失败（下载写 .part / 上传读源）与远端账号权限无关：
+    // 单独归类，避免 Windows"拒绝访问 (os error 5)"被误映射为远端 permission_denied 建议
+    if LOCAL_IO_PREFIXES.iter().any(|p| msg.contains(p)) {
+        return Some("local_io".to_string());
+    }
     let m = msg.to_ascii_lowercase();
     let kind = if m.contains("permission denied")
         || m.contains("access denied")
@@ -993,18 +1010,40 @@ pub(crate) async fn xfer_download_one(
             .await
             .map_err(sftp_err)?;
     }
-    let mut local_file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&part)
-        .await
-        .map_err(|e| format!("打开本地文件失败：{e}"))?;
-    if resume_from == 0 {
-        local_file
-            .set_len(0)
+    // 打开本地 .part：续传 → append 追加；全新 → truncate 截断式一步打开
+    // （替代先 append 再 set_len 的两步，缩小被锁窗口；杀软/同步盘瞬时锁定时重试）
+    let mut local_file = if resume_from > 0 {
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&part)
             .await
-            .map_err(|e| format!("重置部分文件失败：{e}"))?;
-    }
+            .map_err(|e| format!("打开本地文件失败：{e}"))?
+    } else {
+        let mut last_err = None;
+        let mut opened = None;
+        for attempt in 0..3u32 {
+            match tokio::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&part)
+                .await
+            {
+                Ok(f) => {
+                    opened = Some(f);
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                }
+            }
+        }
+        opened.ok_or_else(|| format!("打开本地文件失败：{}", last_err.unwrap()))?
+    };
     state.transferred.fetch_add(resume_from, Ordering::Relaxed);
     state.emit(display, true);
     let mut buf = vec![0u8; XFER_CHUNK];
@@ -1280,7 +1319,11 @@ mod tests {
         );
         assert_eq!(
             classify_sftp_error("打开本地文件失败：拒绝访问。"),
-            Some("permission_denied".to_string())
+            Some("local_io".to_string())
+        );
+        assert_eq!(
+            classify_sftp_error("重置部分文件失败：拒绝访问。 (os error 5)"),
+            Some("local_io".to_string())
         );
         assert_eq!(classify_sftp_error("whatever"), None);
     }
