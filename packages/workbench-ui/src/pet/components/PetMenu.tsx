@@ -10,10 +10,13 @@ const MAX_MENU_HOSTS = 6
 export function PetMenu({
   onClose,
   onOpenChat,
+  onOpenPacks,
   onHostsChange,
 }: {
   onClose: () => void
   onOpenChat: () => void
+  /** 打开动作包管理面板（DIY 宠物动画） */
+  onOpenPacks: () => void
   /** 主机行数上报：App 据此扩宠物窗高度，菜单才不会被窗口顶部裁剪（已封顶，不会无限增长） */
   onHostsChange: (n: number) => void
 }) {
@@ -78,6 +81,17 @@ export function PetMenu({
           }}
         >
           对话 · AI 助手
+        </button>
+        <button
+          type="button"
+          className="pet-menu-btn"
+          title="导入/启用/删除 DIY 动作包，换掉宠物动画"
+          onClick={() => {
+            onOpenPacks()
+            onClose()
+          }}
+        >
+          动作包管理
         </button>
         <div className="pet-menu-sep" />
         {hosts === undefined ? (

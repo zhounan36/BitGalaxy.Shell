@@ -1,34 +1,16 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import type { PetStateKey } from '../pet/machine'
-
-/** 素材根：base 恒为 '/'（MPA 合并后 dev/生产一致），public/pet → /pet/** */
-const SPRITE_BASE = `${import.meta.env.BASE_URL}pet/`
-
-/** 帧表：与 public/pet/manifest.json 的 states.*.frames/fps/loop 保持同步 */
-const FRAME_TABLE: Record<PetStateKey, { frames: number; fps: number; loop: boolean }> = {
-  sleep: { frames: 8, fps: 3, loop: true },
-  ready: { frames: 4, fps: 6, loop: false },
-  idle_breath: { frames: 8, fps: 6, loop: true },
-  idle_blink: { frames: 3, fps: 5, loop: false },
-  wave: { frames: 6, fps: 6, loop: false },
-  working: { frames: 8, fps: 6, loop: true },
-  need_input: { frames: 4, fps: 5, loop: true },
-  eating: { frames: 8, fps: 6, loop: true },
-  angry: { frames: 6, fps: 8, loop: false },
-  drag: { frames: 8, fps: 8, loop: true },
-}
-
-const ALL_STATES = Object.keys(FRAME_TABLE) as PetStateKey[]
+import { PET_STATE_KEYS } from '../pack/builtinClips'
+import type { PackRuntime } from '../pack/packRuntime'
 
 /** 呼吸微动：周期 3.6s（贴近真人静息呼吸），scaleY ±1.5%，以脚底为轴（Live2D 式程序化微动） */
 const BREATH_MS = 3600
 const BREATH_AMP = 0.015
 
-const frameUrl = (state: PetStateKey, frame: number) =>
-  `${SPRITE_BASE}${state}/${state}_${String(frame).padStart(2, '0')}.png`
-
 interface PetSpriteProps {
   state: PetStateKey
+  /** 动画解析运行时：动作 → clip（用户动作包覆盖，缺失回落内置） */
+  runtime: PackRuntime
   size?: number
   onPointerEnter?: () => void
   onPoke?: () => void
@@ -55,6 +37,7 @@ interface PetLayer {
  */
 export function PetSprite({
   state,
+  runtime,
   size = 256,
   onPointerEnter,
   onPoke,
@@ -66,16 +49,20 @@ export function PetSprite({
   const nextIdRef = useRef(1)
   const topImgRef = useRef<HTMLImageElement | null>(null)
   const accRef = useRef(0)
+  // runtime 热读（rAF 循环内用），动作包切换后引用更新即生效
+  const runtimeRef = useRef(runtime)
+  runtimeRef.current = runtime
 
   // 预载全部状态的所有帧，避免状态切换/翻帧闪白
   useEffect(() => {
-    for (const s of ALL_STATES) {
-      for (let i = 0; i < FRAME_TABLE[s].frames; i++) {
+    for (const s of PET_STATE_KEYS) {
+      const clip = runtime.clip(s)
+      for (let i = 0; i < clip.frames; i++) {
         const img = new Image()
-        img.src = frameUrl(s, i)
+        img.src = clip.frameUrl(i)
       }
     }
-  }, [])
+  }, [runtime])
 
   // 状态切换：旧层冻结末帧淡出，新层从第 0 帧起播；帧相位归零
   useEffect(() => {
@@ -104,7 +91,7 @@ export function PetSprite({
     const advance = () => {
       setLayers((prev) => {
         const top = prev[prev.length - 1]
-        const spec = FRAME_TABLE[top.state]
+        const spec = runtimeRef.current.clip(top.state)
         const next = top.frame + 1
         const f = next < spec.frames ? next : spec.loop ? 0 : top.frame
         if (f === top.frame) return prev // 非循环已驻留末帧，不触发渲染
@@ -118,7 +105,7 @@ export function PetSprite({
       last = now
       accRef.current += dt
       const top = layersRef.current[layersRef.current.length - 1]
-      const frameMs = 1000 / FRAME_TABLE[top.state].fps
+      const frameMs = 1000 / runtimeRef.current.clip(top.state).fps
       while (accRef.current >= frameMs) {
         accRef.current -= frameMs
         advance()
@@ -185,7 +172,7 @@ export function PetSprite({
             key={l.id}
             ref={isTop ? topImgRef : undefined}
             className={l.fading ? 'pet-fade-out' : undefined}
-            src={frameUrl(l.state, l.frame)}
+            src={runtimeRef.current.clip(l.state).frameUrl(l.frame)}
             alt={l.state}
             draggable={false}
             onAnimationEnd={l.fading ? () => handleFadeEnd(l.id) : undefined}

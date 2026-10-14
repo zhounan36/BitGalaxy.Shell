@@ -362,6 +362,17 @@ impl SshConnection {
 
     /// 单次远程命令：超时不抛错，携带已收输出与 timedOut 标志返回
     pub async fn exec(&self, cmd: &str, timeout_ms: u64, max_bytes: usize) -> Result<ExecOutput, String> {
+        self.exec_with_stdin(cmd, &[], timeout_ms, max_bytes).await
+    }
+
+    /// 同 exec，但启动后先向 stdin 写入一段数据（sudo -S 从 stdin 读密码用），随后发 EOF
+    pub async fn exec_with_stdin(
+        &self,
+        cmd: &str,
+        stdin_data: &[u8],
+        timeout_ms: u64,
+        max_bytes: usize,
+    ) -> Result<ExecOutput, String> {
         // 通道打开 + 启动各 10s 超时：事件循环卡死的连接上 channel_open/exec 会永久挂起
         let mut channel = match tokio::time::timeout(
             Duration::from_secs(10),
@@ -375,6 +386,16 @@ impl SshConnection {
         match tokio::time::timeout(Duration::from_secs(10), channel.exec(true, cmd)).await {
             Ok(r) => r.map_err(|e| e.to_string())?,
             Err(_) => return Err("命令启动超时".into()),
+        }
+        if !stdin_data.is_empty() {
+            let feed = async {
+                channel.data(stdin_data).await.map_err(|e| e.to_string())?;
+                channel.eof().await.map_err(|e| e.to_string())
+            };
+            match tokio::time::timeout(Duration::from_secs(10), feed).await {
+                Ok(r) => r?,
+                Err(_) => return Err("stdin 写入超时".into()),
+            }
         }
 
         let mut stdout_buf: Vec<u8> = Vec::new();
@@ -459,7 +480,7 @@ impl PtyShell {
     }
 }
 
-fn collect_text(buf: &mut Vec<u8>, chunk: &[u8], max_bytes: usize, truncated: &mut bool) {
+pub(crate) fn collect_text(buf: &mut Vec<u8>, chunk: &[u8], max_bytes: usize, truncated: &mut bool) {
     if buf.len() >= max_bytes {
         *truncated = true;
         return;

@@ -59,7 +59,18 @@ impl Db {
                     ts   TEXT NOT NULL,
                     type TEXT NOT NULL,
                     meta TEXT NOT NULL
-                );",
+                );
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id    TEXT NOT NULL,
+                    role       TEXT NOT NULL,
+                    content    TEXT,
+                    thinking   TEXT,
+                    error      INTEGER NOT NULL DEFAULT 0,
+                    tool_json  TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, id);",
             )
             .expect("初始化数据库 schema 失败");
     }

@@ -1,4 +1,7 @@
 //! 业务存储：主机档案 / 已知主机(TOFU) / 键值设置 / 审计队列（全部 SQLite）。
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
+
 use rusqlite::OptionalExtension;
 
 use crate::db::Db;
@@ -257,6 +260,24 @@ impl AuditQueue {
     }
 }
 
+/// 进程内敏感信息缓存（sudo 密码等；不落盘，Agent 退出即清空）
+#[derive(Clone, Default)]
+pub struct Secrets(Arc<StdMutex<HashMap<String, String>>>);
+
+impl Secrets {
+    pub fn get(&self, key: &str) -> Option<String> {
+        self.0.lock().unwrap().get(key).cloned()
+    }
+
+    pub fn set(&self, key: &str, value: &str) {
+        self.0.lock().unwrap().insert(key.to_string(), value.to_string());
+    }
+
+    pub fn remove(&self, key: &str) {
+        self.0.lock().unwrap().remove(key);
+    }
+}
+
 /// 聚合句柄：克隆廉价，进程内共享同一 SQLite 连接
 #[derive(Clone)]
 pub struct Stores {
@@ -264,6 +285,8 @@ pub struct Stores {
     pub known: KnownHosts,
     pub settings: SettingsStore,
     pub audit: AuditQueue,
+    pub chat: ChatStore,
+    pub secrets: Secrets,
 }
 
 impl Stores {
@@ -272,7 +295,144 @@ impl Stores {
             hosts: HostStore { db: db.clone() },
             known: KnownHosts { db: db.clone() },
             settings: SettingsStore { db: db.clone() },
-            audit: AuditQueue { db },
+            audit: AuditQueue { db: db.clone() },
+            chat: ChatStore { db },
+            secrets: Secrets::default(),
         }
     }
+}
+
+// ── AI 对话记录（持久化，供重开应用后查阅/续聊）────────────────────────────
+
+/// 一条对话记录（与前端 ChatMsg 结构对应；tool_json 反序列化后即工具卡片数据）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessageRow {
+    pub id: i64,
+    pub chat_id: String,
+    pub role: String,
+    pub content: Option<String>,
+    pub thinking: Option<String>,
+    pub error: bool,
+    pub tool: Option<serde_json::Value>,
+    pub created_at: String,
+}
+
+#[derive(Clone)]
+pub struct ChatStore {
+    db: Db,
+}
+
+impl ChatStore {
+    /// 落库（失败不阻断对话主流程）
+    pub fn append(
+        &self,
+        chat_id: &str,
+        role: &str,
+        content: Option<&str>,
+        thinking: Option<&str>,
+        error: bool,
+        tool: Option<&serde_json::Value>,
+    ) {
+        let _ = self.db.with(|c| {
+            c.execute(
+                "INSERT INTO chat_messages (chat_id, role, content, thinking, error, tool_json, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                rusqlite::params![
+                    chat_id,
+                    role,
+                    content,
+                    thinking,
+                    error as i64,
+                    tool.map(|t| serde_json::to_string(t).unwrap_or_default()),
+                    now_iso(),
+                ],
+            )
+        });
+    }
+
+    /// 某会话最近 limit 条消息（按写入顺序返回）
+    pub fn list(&self, chat_id: &str, limit: i64) -> Vec<ChatMessageRow> {
+        let mut rows: Vec<ChatMessageRow> = self
+            .db
+            .with(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT id, chat_id, role, content, thinking, error, tool_json, created_at
+                     FROM chat_messages WHERE chat_id = ?1 ORDER BY id DESC LIMIT ?2",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![chat_id, limit], |row| {
+                        let tool_json: Option<String> = row.get("tool_json")?;
+                        Ok(ChatMessageRow {
+                            id: row.get("id")?,
+                            chat_id: row.get("chat_id")?,
+                            role: row.get("role")?,
+                            content: row.get("content")?,
+                            thinking: row.get("thinking")?,
+                            error: row.get::<_, i64>("error")? != 0,
+                            tool: tool_json.and_then(|t| serde_json::from_str(&t).ok()),
+                            created_at: row.get("created_at")?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .unwrap_or_default();
+        rows.reverse();
+        rows
+    }
+
+    /// 最近一条记录所属会话（重开应用后恢复「上次的对话」）
+    pub fn latest_chat(&self) -> Option<String> {
+        self.db
+            .with(|c| c.query_row("SELECT chat_id FROM chat_messages ORDER BY id DESC LIMIT 1", [], |r| r.get(0)))
+            .ok()
+    }
+
+    /// 历史会话列表（最近活跃在前）：preview = 该会话第一条用户消息，作为列表标题
+    pub fn list_chats(&self, limit: i64) -> Vec<ChatSummaryRow> {
+        self.db
+            .with(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT m.chat_id,
+                            (SELECT content FROM chat_messages u
+                              WHERE u.chat_id = m.chat_id AND u.role = 'user' ORDER BY u.id ASC LIMIT 1),
+                            COUNT(*) AS msg_count,
+                            (SELECT created_at FROM chat_messages l
+                              WHERE l.chat_id = m.chat_id ORDER BY l.id DESC LIMIT 1) AS last_at
+                     FROM chat_messages m
+                     GROUP BY m.chat_id
+                     ORDER BY MAX(m.id) DESC
+                     LIMIT ?1",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![limit], |row| {
+                        Ok(ChatSummaryRow {
+                            chat_id: row.get("chat_id")?,
+                            preview: row.get("preview")?,
+                            msg_count: row.get("msg_count")?,
+                            last_at: row.get("last_at")?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .unwrap_or_default()
+    }
+
+    /// 删除整个会话记录，返回删除的行数（失败不阻断，返回 0）
+    pub fn delete_chat(&self, chat_id: &str) -> usize {
+        self.db
+            .with(|c| c.execute("DELETE FROM chat_messages WHERE chat_id = ?1", rusqlite::params![chat_id]))
+            .unwrap_or(0) as usize
+    }
+}
+
+/// 历史会话列表条目（ai-chats 帧）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSummaryRow {
+    pub chat_id: String,
+    pub preview: Option<String>,
+    pub msg_count: i64,
+    pub last_at: String,
 }

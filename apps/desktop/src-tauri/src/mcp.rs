@@ -252,13 +252,15 @@ async fn call_tool(state: &mut McpState, name: &str, args: &serde_json::Value) -
         next_id: state.next_id.clone(),
         pending: state.pending.clone(),
     };
-    let ctx = ToolCtx {
+    let mut ctx = ToolCtx {
         stores: &state.stores,
         policy: &state.policy,
         registry: &state.registry,
         client: &state.client_label,
+        // MCP 通道无控制台介入 UI，不提供交互桥
+        console: None,
     };
-    let payload = toolcore::execute(&ctx, &approver, name, args).await;
+    let payload = toolcore::execute(&mut ctx, &approver, name, args).await;
     let ok = payload.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     serde_json::json!({
         "content": [ { "type": "text", "text": payload.to_string() } ],

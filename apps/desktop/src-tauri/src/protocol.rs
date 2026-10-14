@@ -401,9 +401,25 @@ pub enum ServerFrame {
     AiApproval {
         m: AiApprovalM,
     },
+    #[serde(rename = "ai-input")]
+    AiInput {
+        m: AiInputM,
+    },
     #[serde(rename = "ai-tool")]
     AiTool {
         m: AiToolM,
+    },
+    #[serde(rename = "ai-history")]
+    AiHistory {
+        m: AiHistoryM,
+    },
+    #[serde(rename = "ai-chats")]
+    AiChats {
+        m: AiChatsM,
+    },
+    #[serde(rename = "ai-console")]
+    AiConsole {
+        m: AiConsoleM,
     },
     #[serde(rename = "settings-result")]
     SettingsResult {
@@ -487,6 +503,9 @@ pub struct SftpResultM {
     /// preflight op 的预检报告
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preflight: Option<PreflightReportM>,
+    /// dl-open op 附带：拖出下载能力基址（http://127.0.0.1:port/dl/{token}）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dl_base: Option<String>,
 }
 
 /// 预检单项（警告或阻断原因，code 供前端/AI 程序化判断）
@@ -615,6 +634,18 @@ pub struct AiApprovalM {
     pub command: String,
 }
 
+/// 敏感信息输入请求（如 sudo 密码）：弹卡片让用户输入，回包走 Ai op:"input-reply"
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiInputM {
+    pub chat_id: String,
+    pub req_id: String,
+    pub title: String,
+    pub prompt: String,
+    /// true = 密码框（前端 type=password，不回显）
+    pub secret: bool,
+}
+
 /// AI 工具调用事件（广播到所有连接；聊天里渲染为可折叠执行卡片）。
 /// running 先推（卡片带 spinner + 单条终止按钮），终态再推一次同 toolCallId 更新。
 #[derive(Debug, Clone, Serialize)]
@@ -635,6 +666,30 @@ pub struct AiToolM {
     /// 可展开的完整输出（stdout+stderr 或错误详情，已截断）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+}
+
+/// 对话历史查询回包（op:"history"；chatId 缺省 = 最近一次对话）
+#[derive(Debug, Clone, Serialize)]
+pub struct AiHistoryM {
+    #[serde(rename = "chatId")]
+    pub chat_id: String,
+    pub messages: Vec<crate::stores::ChatMessageRow>,
+}
+
+/// 历史会话列表（op:"history-list"；删除后也回此帧刷新列表）
+#[derive(Debug, Clone, Serialize)]
+pub struct AiChatsM {
+    pub chats: Vec<crate::stores::ChatSummaryRow>,
+}
+
+/// SSH 控制台输出增量（console_command 运行中流式回传，前端实时追加显示）
+#[derive(Debug, Clone, Serialize)]
+pub struct AiConsoleM {
+    #[serde(rename = "chatId")]
+    pub chat_id: String,
+    #[serde(rename = "toolCallId")]
+    pub tool_call_id: String,
+    pub delta: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -702,6 +757,30 @@ mod tests {
         assert!(json.contains(r#""stage":"running""#), "{json}");
         assert!(!json.contains("chat_id"), "{json}");
         assert!(!json.contains("tool_call_id"), "{json}");
+    }
+
+    #[test]
+    fn ai_history_serializes_camel_case() {
+        let frame = ServerFrame::AiHistory {
+            m: AiHistoryM {
+                chat_id: "c1".into(),
+                messages: vec![crate::stores::ChatMessageRow {
+                    id: 7,
+                    chat_id: "c1".into(),
+                    role: "tool".into(),
+                    content: None,
+                    thinking: None,
+                    error: false,
+                    tool: Some(serde_json::json!({"id":"tc1","stage":"done"})),
+                    created_at: "t".into(),
+                }],
+            },
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains(r#""t":"ai-history""#), "{json}");
+        assert!(json.contains(r#""chatId":"c1""#), "{json}");
+        assert!(json.contains(r#""toolCallId""#) || json.contains(r#""tool":"#), "{json}");
+        assert!(!json.contains("chat_id"), "{json}");
     }
 
     #[test]

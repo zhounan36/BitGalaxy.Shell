@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { agentSocket } from '../api/ws'
 import { writeClipboardText } from '../api/tauri'
+import type { AiChatSummary, AiHistoryMessage } from '@bgshell/protocol'
 
 interface ChatMsg {
   id: string
@@ -25,8 +28,39 @@ interface Approval {
   command: string
 }
 
-/** 单会话（Agent 侧按 chatId 记忆上下文；重置即清空记忆） */
-const CHAT_ID = 'pet-main'
+/** 敏感信息输入请求（sudo 密码等） */
+interface SecretReq {
+  reqId: string
+  title: string
+  prompt: string
+  secret: boolean
+}
+
+/** 每次「新对话」生成独立 chatId；Agent 侧按 chatId 记忆上下文并把消息落库 SQLite */
+function newChatId(): string {
+  return `pet-${crypto.randomUUID()}`
+}
+
+/** RFC3339 UTC → 本地 "MM-DD HH:mm"（历史列表展示） */
+function fmtTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/** 持久化记录 → 界面消息（工具记录还原为终态卡片；瞬态「已终止」提示不还原） */
+function historyToMsg(r: AiHistoryMessage): ChatMsg | null {
+  if (r.error && (r.content === '已终止' || !r.content)) return null
+  return {
+    id: `h-${r.id}`,
+    role: r.role === 'user' ? 'user' : 'assistant',
+    text: r.content ?? '',
+    thinking: r.thinking || undefined,
+    error: r.error || undefined,
+    tool: r.tool ?? undefined,
+  }
+}
 
 /** 可折叠思考块：流式期间自动展开，回答结束后自动折叠，点击可切换（与主流对话框一致） */
 function ThinkBlock({ text, streaming }: { text: string; streaming: boolean }) {
@@ -63,12 +97,23 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState<string>()
   const [approval, setApproval] = useState<Approval | null>(null)
+  const [secretReq, setSecretReq] = useState<SecretReq | null>(null)
+  const [secretInput, setSecretInput] = useState('')
   const [copiedId, setCopiedId] = useState<string>()
   const listRef = useRef<HTMLDivElement>(null)
   const streamIdRef = useRef<string | undefined>(undefined)
+  // 当前会话 id：ref 供回调/发送读取，「新对话」时整体替换
+  const chatIdRef = useRef<string>(newChatId())
   // 流式消息 id 的渲染镜像：ref 供回调读取，state 驱动 ThinkBlock 展开状态
   const [streamingId, setStreamingId] = useState<string>()
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set())
+  // 历史会话管理抽屉：列表数据 + 待二次确认删除的 chatId
+  const [histOpen, setHistOpen] = useState(false)
+  const [chatList, setChatList] = useState<AiChatSummary[]>([])
+  const [confirmDel, setConfirmDel] = useState<string>()
+  // SSH 控制台实时输出（toolCallId → 累积文本）与介入输入框内容
+  const [consoleOut, setConsoleOut] = useState<Record<string, string>>({})
+  const [consoleInput, setConsoleInput] = useState('')
 
   // 创建/复用当前流式消息，写入正文或思考内容（多轮工具循环的思考以空行分隔）
   const streamInto = (delta: string, thinking: boolean) => {
@@ -95,6 +140,21 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
 
   useEffect(() => {
     const off = agentSocket.onControl((frame) => {
+      if (frame.t === 'ai-history') {
+        // 恢复上次的对话（Agent 重启后记录仍在）：接管服务端返回的 chatId 继续聊
+        chatIdRef.current = frame.m.chatId
+        streamIdRef.current = undefined
+        setStreamingId(undefined)
+        setConsoleOut({})
+        setExpandedTools(new Set())
+        setMsgs(frame.m.messages.map(historyToMsg).filter((m): m is ChatMsg => m !== null))
+        return
+      }
+      if (frame.t === 'ai-chats') {
+        // 历史会话列表（打开抽屉 / 删除后刷新）
+        setChatList(frame.m.chats)
+        return
+      }
       if (frame.t === 'ai-status') {
         setBusy(frame.m.stage === 'tool' ? (frame.m.detail ?? '执行工具中…') : '思考中…')
         return
@@ -102,6 +162,13 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
       if (frame.t === 'ai-approval') {
         setBusy(undefined)
         setApproval({ reqId: frame.m.reqId, host: frame.m.host, command: frame.m.command })
+        return
+      }
+      if (frame.t === 'ai-input') {
+        // sudo 密码等敏感输入：工具在等这份输入，卡片置顶弹出
+        setBusy(undefined)
+        setSecretInput('')
+        setSecretReq({ reqId: frame.m.reqId, title: frame.m.title, prompt: frame.m.prompt, secret: frame.m.secret })
         return
       }
       if (frame.t === 'ai-thinking') {
@@ -112,21 +179,32 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
         streamInto(frame.m.delta, false)
         return
       }
+      if (frame.t === 'ai-console') {
+        // SSH 控制台实时输出：按 toolCallId 累积（终态帧会带完整 output 并清掉这里）
+        const { toolCallId, delta } = frame.m
+        setConsoleOut((prev) => ({ ...prev, [toolCallId]: (prev[toolCallId] ?? '') + delta }))
+        return
+      }
       if (frame.t === 'ai-tool') {
         const ev = frame.m
         // 工具卡片独立成条：先终止当前流式消息，保证「思考 → 工具 → 思考」时序清晰
         streamIdRef.current = undefined
         setStreamingId(undefined)
         if (ev.stage === 'running') {
-          setMsgs((prev) => [
-            ...prev,
-            {
-              id: `tool-${ev.toolCallId}`,
-              role: 'assistant',
-              text: '',
-              tool: { id: ev.toolCallId, name: ev.name, detail: ev.detail, stage: 'running' },
-            },
-          ])
+          // 幂等：同一 toolCallId 的 running 帧只建一张卡片（防御重复帧）
+          setMsgs((prev) =>
+            prev.some((m) => m.tool?.id === ev.toolCallId)
+              ? prev
+              : [
+                  ...prev,
+                  {
+                    id: `tool-${ev.toolCallId}`,
+                    role: 'assistant',
+                    text: '',
+                    tool: { id: ev.toolCallId, name: ev.name, detail: ev.detail, stage: 'running' },
+                  },
+                ],
+          )
         } else {
           // 终态：按 toolCallId 更新同一张卡片
           setMsgs((prev) =>
@@ -136,18 +214,35 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
                 : m,
             ),
           )
+          // 控制台卡片：终态帧带完整 output 时以服务端为准清掉实时累积；
+          // 取消/超时（output 只是一句提示）保留已滚出的实时记录，便于回看
+          setConsoleOut((prev) => {
+            const live = prev[ev.toolCallId]
+            if (live === undefined) return prev
+            const final = ev.output ?? ''
+            if (final.length >= live.length) {
+              const next = { ...prev }
+              delete next[ev.toolCallId]
+              return next
+            }
+            return prev
+          })
           // 命令被终止后，等待中的审批卡片随之失效
           if (ev.stage === 'cancelled') setApproval(null)
         }
         return
       }
       if (frame.t === 'ai-result') {
+        // 先记录流式状态再清（下方判断要用）：本轮文本若已通过流式气泡输出，
+        // 结果帧就不重复追加
+        const hadStream = streamIdRef.current !== undefined
         streamIdRef.current = undefined
         setStreamingId(undefined)
         setBusy(undefined)
-        // 本轮对话已结束：审批超时被服务端自动拒绝时也要撤下卡片，
-        // 否则输入框被 approval 永久禁用，表现为「卡死」
+        // 本轮对话已结束：审批/输入超时被服务端自动取消时也要撤下卡片，
+        // 否则输入框被 approval/secretReq 永久禁用，表现为「卡死」
         setApproval(null)
+        setSecretReq(null)
         setMsgs((prev) => {
           // 兜底：终态帧丢失/整轮被 abort 时，running 卡片不能永远转圈
           const patched = prev.map((m) =>
@@ -157,11 +252,15 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
           )
           const tail = patched[patched.length - 1]
           let next = patched
-          if (frame.m.text && streamIdRef.current === undefined && tail?.role !== 'assistant') {
+          if (frame.m.text && !hadStream && tail?.role !== 'assistant') {
             next = [...next, { id: crypto.randomUUID(), role: 'assistant' as const, text: frame.m.text }]
           }
           if (!frame.m.ok && frame.m.message) {
-            next = [...next, { id: crypto.randomUUID(), role: 'assistant' as const, text: frame.m.message, error: true }]
+            // 查重：同一结果帧被重复分发（多连接/重连竞态）时只保留一条
+            const dup = tail?.role === 'assistant' && tail.error && tail.text === frame.m.message
+            if (!dup) {
+              next = [...next, { id: crypto.randomUUID(), role: 'assistant' as const, text: frame.m.message, error: true }]
+            }
           }
           return next
         })
@@ -170,11 +269,19 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
     return off
   }, [])
 
-  // 消息变化滚到底部
+  // 挂载即请求历史（面板常驻挂载、关闭只是不渲染）：恢复上次的对话记录
+  useEffect(() => {
+    agentSocket
+      .connect()
+      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'history' } }))
+      .catch(() => {})
+  }, [])
+
+  // 消息变化滚到底部（控制台实时输出也跟随）
   useEffect(() => {
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [msgs, busy, approval])
+  }, [msgs, busy, approval, secretReq, consoleOut])
 
   if (!open) return null
 
@@ -186,7 +293,7 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
     setBusy('思考中…')
     agentSocket
       .connect()
-      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'chat', chatId: CHAT_ID, text } }))
+      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'chat', chatId: chatIdRef.current, text } }))
       .catch((err: Error) => {
         setBusy(undefined)
         setMsgs((prev) => [...prev, { id: crypto.randomUUID(), role: 'assistant', text: `连接 Agent 失败：${err.message}`, error: true }])
@@ -218,7 +325,7 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
     void agentSocket
       .connect()
       .then(() =>
-        agentSocket.sendControl({ t: 'ai-approve', m: { chatId: CHAT_ID, reqId: snapshot.reqId, approved } }),
+        agentSocket.sendControl({ t: 'ai-approve', m: { chatId: chatIdRef.current, reqId: snapshot.reqId, approved } }),
       )
       .catch((err: Error) => {
         // 发送失败（Agent 不可达/断线重连中）：恢复卡片让用户稍后重点，
@@ -232,13 +339,48 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
       })
   }
 
+  /** 回复敏感输入请求（sudo 密码）：确认发送 / 取消（value 缺省） */
+  const answerSecret = (send: boolean) => {
+    if (!secretReq) return
+    const snapshot = secretReq
+    const value = send ? secretInput : undefined
+    setSecretReq(null)
+    setSecretInput('')
+    if (send) {
+      setMsgs((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', text: `（已提供 ${snapshot.title}所需的输入）` }])
+      setBusy('执行中…')
+    } else {
+      setMsgs((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', text: `（取消了 ${snapshot.title}）` }])
+    }
+    void agentSocket
+      .connect()
+      .then(() =>
+        agentSocket.sendControl({
+          t: 'ai',
+          m: send
+            ? { op: 'input-reply', chatId: chatIdRef.current, reqId: snapshot.reqId, value }
+            : { op: 'input-reply', chatId: chatIdRef.current, reqId: snapshot.reqId },
+        }),
+      )
+      .catch((err: Error) => {
+        // 发送失败：恢复卡片让用户稍后重试（连接恢复前工具会一直等待）
+        setSecretReq(snapshot)
+        setBusy(undefined)
+        setMsgs((prev) => [
+          ...prev,
+          { id: crypto.randomUUID(), role: 'assistant', text: `输入发送失败：${err.message}（连接恢复后请再提交一次）`, error: true },
+        ])
+      })
+  }
+
   /** 终止本轮对话/执行：后端 abort 工具循环、撤下审批卡片并回「已终止」 */
   const stopTurn = () => {
     setBusy('正在停止…')
     setApproval(null)
+    setSecretReq(null)
     void agentSocket
       .connect()
-      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'cancel', chatId: CHAT_ID } }))
+      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'cancel', chatId: chatIdRef.current } }))
       .catch((err: Error) => {
         setBusy(undefined)
         setMsgs((prev) => [
@@ -253,29 +395,90 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
     void agentSocket
       .connect()
       .then(() =>
-        agentSocket.sendControl({ t: 'ai', m: { op: 'cancel-tool', chatId: CHAT_ID, toolCallId } }),
+        agentSocket.sendControl({ t: 'ai', m: { op: 'cancel-tool', chatId: chatIdRef.current, toolCallId } }),
       )
       .catch(() => {
         // 连接断开时后端整轮也会因超时收尾；卡片由 ai-result 兜底清理
       })
   }
 
+  /** 介入 SSH 控制台（console_command 运行中）：把文本写进 PTY stdin（"\x03" = Ctrl+C） */
+  const sendConsole = (toolCallId: string, text: string) => {
+    void agentSocket
+      .connect()
+      .then(() =>
+        agentSocket.sendControl({ t: 'ai', m: { op: 'console-input', chatId: chatIdRef.current, toolCallId, text } }),
+      )
+      .catch(() => {})
+  }
+
+  /** 打开历史会话抽屉：执行中禁止切换/删除（旧轮次的流式帧会串进新会话视图） */
+  const openHistory = () => {
+    if (busy || approval || secretReq) return
+    setConfirmDel(undefined)
+    setHistOpen(true)
+    void agentSocket
+      .connect()
+      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'history-list' } }))
+      .catch(() => {})
+  }
+
+  /** 复原一段历史对话：接管服务端返回的 chatId，继续在此会话上聊（上下文由 Agent 从库恢复） */
+  const restoreChat = (id: string) => {
+    setHistOpen(false)
+    void agentSocket
+      .connect()
+      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'history', chatId: id } }))
+      .catch(() => {})
+  }
+
+  /** 删除历史会话：二次确认防误删；删到当前打开的会话时本地换新 chatId 并清空界面 */
+  const deleteChat = (id: string) => {
+    if (confirmDel !== id) {
+      setConfirmDel(id)
+      // 2.5s 未再点击自动撤销确认态
+      window.setTimeout(() => setConfirmDel((c) => (c === id ? undefined : c)), 2500)
+      return
+    }
+    setConfirmDel(undefined)
+    if (chatIdRef.current === id) {
+      chatIdRef.current = newChatId()
+      streamIdRef.current = undefined
+      setStreamingId(undefined)
+      setMsgs([])
+      setExpandedTools(new Set())
+      setConsoleOut({})
+    }
+    void agentSocket
+      .connect()
+      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'history-delete', chatId: id } }))
+      .catch(() => setHistOpen(false))
+  }
+
   return (
     <div className="chat-panel">
       <div className="chat-head">
         <span>鲸鱼娘 · AI 助手</span>
-        <button type="button" className="chat-close" title="清空对话记忆" onClick={() => {
+        <button type="button" className="chat-close" title="开启新对话（历史记录保留在数据库中）" onClick={() => {
+          const old = chatIdRef.current
+          // 结束旧会话：终止进行中的任务并清掉 Agent 侧记忆（记录本身保留，可随时查阅）
           void agentSocket
             .connect()
-            .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'reset', chatId: CHAT_ID } }))
+            .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'reset', chatId: old } }))
             .catch(() => {})
+          chatIdRef.current = newChatId()
           streamIdRef.current = undefined
           setStreamingId(undefined)
           setMsgs([])
           setBusy(undefined)
           setApproval(null)
+          setExpandedTools(new Set())
+          setConsoleOut({})
         }}>
           新对话
+        </button>
+        <button type="button" className="chat-close" title="查看与管理历史对话（复原 / 删除）" onClick={openHistory} disabled={!!busy || !!approval || !!secretReq}>
+          历史
         </button>
         <button type="button" className="chat-close" onClick={onClose}>
           ×
@@ -291,50 +494,103 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
           <div key={m.id} className={`chat-msg chat-${m.role}${m.error ? ' chat-err' : ''}`}>
             {m.thinking && <ThinkBlock text={m.thinking} streaming={m.id === streamingId} />}
             {m.tool ? (
-              <div
-                className={`chat-tool chat-tool-${m.tool.stage}${m.tool.stage === 'failed' || m.tool.stage === 'cancelled' ? ' chat-tool-fail' : ''}`}
-              >
-                <button
-                  type="button"
-                  className="chat-tool-bar"
-                  title={m.tool.output ? '展开/收起输出' : undefined}
-                  onClick={() =>
-                    m.tool?.output &&
-                    setExpandedTools((prev) => {
-                      const next = new Set(prev)
-                      if (next.has(m.tool!.id)) next.delete(m.tool!.id)
-                      else next.add(m.tool!.id)
-                      return next
-                    })
-                  }
-                >
-                  {m.tool.stage === 'running' ? (
-                    <span className="chat-tool-spinner" aria-label="执行中" />
-                  ) : (
-                    <span className={`chat-tool-dot chat-tool-dot-${m.tool.stage}`} aria-hidden />
-                  )}
-                  <span className="chat-tool-name">{m.tool.name}</span>
-                  {m.tool.detail && <code className="chat-tool-detail">{m.tool.detail}</code>}
-                  <span className={`chat-tool-summary chat-tool-summary-${m.tool.stage}`}>
-                    {m.tool.stage === 'running' ? '执行中…' : (m.tool.summary ?? '')}
-                  </span>
-                  {m.tool.output && (
-                    <span className={`chat-tool-caret${expandedTools.has(m.tool.id) ? ' chat-tool-caret-open' : ''}`} aria-hidden>
-                      ▸
+              m.tool.name === 'console_command' ? (
+                /* SSH 控制台卡片：终端样式（与 MCP 工具卡片区分），实时输出 + 用户介入输入 */
+                <div className={`chat-tool chat-tool-console chat-tool-console-${m.tool.stage}`}>
+                  <button type="button" className="chat-tool-bar">
+                    {m.tool.stage === 'running' ? (
+                      <span className="chat-tool-spinner" aria-label="执行中" />
+                    ) : (
+                      <span className={`chat-tool-dot chat-tool-dot-${m.tool.stage}`} aria-hidden />
+                    )}
+                    <span className="chat-tool-name">SSH 控制台</span>
+                    {m.tool.detail && <code className="chat-tool-detail">{m.tool.detail}</code>}
+                    <span className={`chat-tool-summary chat-tool-summary-${m.tool.stage}`}>
+                      {m.tool.stage === 'running' ? '运行中…' : (m.tool.summary ?? '')}
                     </span>
-                  )}
-                </button>
-                {m.tool.stage === 'running' && (
-                  <button type="button" className="chat-tool-stop" title="终止这条命令（对话继续）" onClick={() => cancelTool(m.tool!.id)}>
-                    终止
                   </button>
-                )}
-                {m.tool.output && expandedTools.has(m.tool.id) && (
-                  <pre className="chat-tool-output">{m.tool.output}</pre>
-                )}
-              </div>
-            ) : (
+                  {m.tool.stage === 'running' && (
+                    <button type="button" className="chat-tool-stop" title="关闭这个控制台会话（对话继续）" onClick={() => cancelTool(m.tool!.id)}>
+                      终止
+                    </button>
+                  )}
+                  <pre className="chat-console-out">{consoleOut[m.tool.id] ?? m.tool.output ?? ''}</pre>
+                  {m.tool.stage === 'running' && (
+                    <div className="chat-console-input">
+                      <input
+                        className="chat-console-field"
+                        value={consoleInput}
+                        placeholder="介入控制台：输入后回车发送（与 AI 共用同一会话）"
+                        onChange={(e) => setConsoleInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && consoleInput) {
+                            sendConsole(m.tool!.id, `${consoleInput}\n`)
+                            setConsoleInput('')
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="chat-console-ctrl"
+                        title="发送 Ctrl+C（中断当前命令）"
+                        onClick={() => sendConsole(m.tool!.id, '\x03')}
+                      >
+                        ^C
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div
+                  className={`chat-tool chat-tool-${m.tool.stage}${m.tool.stage === 'failed' || m.tool.stage === 'cancelled' ? ' chat-tool-fail' : ''}`}
+                >
+                  <button
+                    type="button"
+                    className="chat-tool-bar"
+                    title={m.tool.output ? '展开/收起输出' : undefined}
+                    onClick={() =>
+                      m.tool?.output &&
+                      setExpandedTools((prev) => {
+                        const next = new Set(prev)
+                        if (next.has(m.tool!.id)) next.delete(m.tool!.id)
+                        else next.add(m.tool!.id)
+                        return next
+                      })
+                    }
+                  >
+                    {m.tool.stage === 'running' ? (
+                      <span className="chat-tool-spinner" aria-label="执行中" />
+                    ) : (
+                      <span className={`chat-tool-dot chat-tool-dot-${m.tool.stage}`} aria-hidden />
+                    )}
+                    <span className="chat-tool-name">{m.tool.name}</span>
+                    {m.tool.detail && <code className="chat-tool-detail">{m.tool.detail}</code>}
+                    <span className={`chat-tool-summary chat-tool-summary-${m.tool.stage}`}>
+                      {m.tool.stage === 'running' ? '执行中…' : (m.tool.summary ?? '')}
+                    </span>
+                    {m.tool.output && (
+                      <span className={`chat-tool-caret${expandedTools.has(m.tool.id) ? ' chat-tool-caret-open' : ''}`} aria-hidden>
+                        ▸
+                      </span>
+                    )}
+                  </button>
+                  {m.tool.stage === 'running' && (
+                    <button type="button" className="chat-tool-stop" title="终止这条命令（对话继续）" onClick={() => cancelTool(m.tool!.id)}>
+                      终止
+                    </button>
+                  )}
+                  {m.tool.output && expandedTools.has(m.tool.id) && (
+                    <pre className="chat-tool-output">{m.tool.output}</pre>
+                  )}
+                </div>
+              )
+            ) : m.error || m.role === 'user' ? (
+              // 错误详情/用户输入保持纯文本（错误串里的路径下划线等不该被 Md 误格式化）
               m.text
+            ) : (
+              <div className="chat-md">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
+              </div>
             )}
             {!m.tool && (
               <button
@@ -351,12 +607,56 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
         {busy && (
           <div className="chat-busy">
             {busy}
-            <button type="button" className="chat-stop" title="终止本轮对话与执行" onClick={stopTurn}>
-              停止
-            </button>
+            {/* 「正在停止…」阶段隐藏按钮：终止在后端是幂等的，但连点会在界面上
+                产生多条「已终止」气泡，等 ai-result 清掉 busy 后自然恢复 */}
+            {busy !== '正在停止…' && (
+              <button type="button" className="chat-stop" title="终止本轮对话与执行" onClick={stopTurn}>
+                停止
+              </button>
+            )}
           </div>
         )}
       </div>
+      {histOpen && (
+        <div className="chat-hist">
+          <div className="chat-head">
+            <span>历史对话</span>
+            <button type="button" className="chat-close" onClick={() => setHistOpen(false)}>
+              ×
+            </button>
+          </div>
+          <div className="chat-hist-list">
+            {chatList.length === 0 && <div className="chat-empty">还没有历史对话</div>}
+            {chatList.map((c) => (
+              <div
+                key={c.chatId}
+                className={`chat-hist-item${confirmDel === c.chatId ? ' chat-hist-item-danger' : ''}`}
+              >
+                <button
+                  type="button"
+                  className="chat-hist-main"
+                  title="复原这段对话（在原会话上继续聊）"
+                  onClick={() => restoreChat(c.chatId)}
+                >
+                  <span className="chat-hist-preview">{c.preview || '（无文字内容）'}</span>
+                  <span className="chat-hist-meta">
+                    {fmtTime(c.lastAt)} · {c.msgCount} 条消息
+                    {c.chatId === chatIdRef.current ? ' · 当前会话' : ''}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`chat-hist-del${confirmDel === c.chatId ? ' chat-hist-del-confirm' : ''}`}
+                  title={confirmDel === c.chatId ? '再次点击确认删除（不可恢复）' : '删除这段对话'}
+                  onClick={() => deleteChat(c.chatId)}
+                >
+                  {confirmDel === c.chatId ? '确认' : '删除'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {approval && (
         <div className="chat-approval">
           <div className="chat-approval-title">AI 请求执行命令（{approval.host}）</div>
@@ -375,18 +675,52 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
           </div>
         </div>
       )}
+      {secretReq && (
+        <div className="chat-approval">
+          <div className="chat-approval-title">{secretReq.title}（{secretReq.secret ? '密码输入' : '信息输入'}）</div>
+          <div className="chat-approval-hint">{secretReq.prompt}</div>
+          <input
+            className="chat-input"
+            type={secretReq.secret ? 'password' : 'text'}
+            value={secretInput}
+            autoFocus
+            placeholder={secretReq.secret ? '输入密码…' : '输入内容…'}
+            onChange={(e) => setSecretInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && secretInput) answerSecret(true)
+            }}
+          />
+          <div className="chat-approval-hint">等待你的输入，5 分钟内未处理将自动取消（密码仅用于本次 sudo，不会展示或存盘）</div>
+          <div className="chat-approval-btns">
+            <button type="button" className="chat-kill" title="终止本轮对话（撤销输入请求）" onClick={stopTurn}>
+              终止本轮
+            </button>
+            <button type="button" className="chat-no" onClick={() => answerSecret(false)}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="chat-ok"
+              disabled={!secretInput}
+              onClick={() => answerSecret(true)}
+            >
+              提交
+            </button>
+          </div>
+        </div>
+      )}
       <div className="chat-input-row">
         <input
           className="chat-input"
           value={input}
           placeholder={busy ? '鲸鱼娘正在忙…' : '对鲸鱼娘说点什么…'}
-          disabled={!!busy || !!approval}
+          disabled={!!busy || !!approval || !!secretReq}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') send()
           }}
         />
-        <button type="button" className="chat-send" disabled={!!busy || !!approval || !input.trim()} onClick={send}>
+        <button type="button" className="chat-send" disabled={!!busy || !!approval || !!secretReq || !input.trim()} onClick={send}>
           发送
         </button>
       </div>
