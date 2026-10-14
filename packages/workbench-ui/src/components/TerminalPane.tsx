@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Modal, Progress, Typography, message } from 'antd'
-import { CloseOutlined, DownloadOutlined } from '@ant-design/icons'
+import { CloseOutlined, CompressOutlined, DownloadOutlined, ExpandOutlined } from '@ant-design/icons'
 import { DataFrameType } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
 import { readClipboardText, writeClipboardText } from '../api/clipboard'
@@ -33,17 +33,26 @@ interface TerminalPaneProps {
   sessionId: string
   /** HTML5 拖放兜底（浏览器 dev 宿主；Tauri 壳内原生拖放接管、不会触发） */
   onFilesDrop?: (files: File[]) => void
+  /** 专注模式（App 层隐藏侧栏/标签栏，把宽度让给终端增加列数） */
+  focusMode?: boolean
+  onFocusToggle?: () => void
 }
 
 /** 单个终端面板：xterm ↔ Agent（stdin/stdout 二进制帧，按 sessionId 复用同一条 WS）
- *  右键呼出自定义菜单：复制 / 下载所选（SFTP）/ 删除所选（SFTP，删除前确认）/ 粘贴 / 全选 / 清屏；
+ *  右键呼出自定义菜单：复制 / 下载所选（SFTP）/ 删除所选（SFTP，删除前确认）/ 粘贴 / 全选 / 清屏 / 专注模式；
  *  另支持终端惯例快捷键。
- *  OSC 7（shell 集成上报当前目录）→ termUpload 目录缓存，供拖拽上传与选区下载定位远端路径。 */
-export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
+ *  OSC 7（shell 集成上报当前目录）→ termUpload 目录缓存，供拖拽上传与选区下载定位远端路径。
+ *  折行视觉层：被列宽折断的续行标 ↳ + 折行块左侧竖线 + 块结束分隔线（docker ps 等长输出更易读）。 */
+export function TerminalPane({ sessionId, onFilesDrop, focusMode, onFocusToggle }: TerminalPaneProps) {
   const holderRef = useRef<HTMLDivElement>(null)
+  const hostRef = useRef<HTMLDivElement>(null)
+  const layerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const [menu, setMenu] = useState<TermMenuState | null>(null)
   const [dl, setDl] = useState<TermDownloadState | null>(null)
+  // 快捷键回调存 ref：避免 effect 闭包捕获旧的 onFocusToggle
+  const focusToggleRef = useRef(onFocusToggle)
+  focusToggleRef.current = onFocusToggle
 
   // ── 剪贴板动作（菜单与快捷键共用）─────────────────────────────────────
   const copySelection = () => {
@@ -77,7 +86,7 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
     termRef.current = term
     const fit = new FitAddon()
     term.loadAddon(fit)
-    term.open(holderRef.current!)
+    term.open(hostRef.current!)
     fit.fit()
     term.focus()
 
@@ -120,6 +129,70 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
     const ro = new ResizeObserver(resizeTo)
     ro.observe(holderRef.current!)
 
+    // ── 折行视觉层：被列宽折断的续行标 ↳、折行块左侧竖线、块结束分隔线 ──
+    // 只读 isWrapped 重绘覆盖层，不动 buffer（复制文本不受影响）。
+    // 全屏程序（交替屏幕：vim/top 等）不标注；用 rAF 合并高频渲染帧。
+    const layer = layerRef.current!
+    let wrapRaf = 0
+    const paintWrapLayer = () => {
+      wrapRaf = 0
+      const screenEl = term.element?.querySelector('.xterm-screen')
+      if (!screenEl) return
+      const buf = term.buffer.active
+      const layerRect = layer.getBoundingClientRect()
+      const screenRect = screenEl.getBoundingClientRect()
+      if (buf.type === 'alternate' || layerRect.width === 0 || screenRect.height === 0) {
+        layer.innerHTML = ''
+        return
+      }
+      const cellH = screenRect.height / term.rows
+      const ox = screenRect.left - layerRect.left
+      const oy = screenRect.top - layerRect.top
+      // 左侧留出的行号槽位（.term-gutter 宽度），标记画在这里不遮内容
+      const gx = ox - 22
+      const parts: string[] = []
+      let i = 0
+      while (i < term.rows) {
+        const line = buf.getLine(buf.viewportY + i)
+        if (!line) {
+          i++
+          continue
+        }
+        // 折行块 = 一整条逻辑行（被列宽折成的连续行）
+        let s = i
+        while (s > 0 && buf.getLine(buf.viewportY + s)?.isWrapped) s--
+        let e = i
+        while (e + 1 < term.rows && buf.getLine(buf.viewportY + e + 1)?.isWrapped) e++
+        if (e > s) {
+          const top = oy + s * cellH
+          const bottom = oy + (e + 1) * cellH
+          parts.push(
+            `<div class="wrap-bar" style="top:${top + 1}px;height:${bottom - top - 2}px;left:${ox - 6}px"></div>`,
+          )
+          for (let y = s + 1; y <= e; y++) {
+            parts.push(
+              `<div class="wrap-arrow" style="top:${oy + y * cellH}px;height:${cellH}px;left:${gx}px">↳</div>`,
+            )
+          }
+          // 块结束分隔线：与下一排拉开视觉距离（最后一行下方是屏幕外，不必画）
+          if (e < term.rows - 1) {
+            parts.push(
+              `<div class="wrap-sep" style="top:${bottom - 1}px;left:${gx}px;width:${layerRect.width - gx}px"></div>`,
+            )
+          }
+        }
+        i = e + 1
+      }
+      layer.innerHTML = parts.join('')
+    }
+    const scheduleWrapPaint = () => {
+      if (!wrapRaf) wrapRaf = requestAnimationFrame(paintWrapLayer)
+    }
+    const offRender = term.onRender(scheduleWrapPaint)
+    const offScroll = term.onScroll(scheduleWrapPaint)
+    const offResize = term.onResize(scheduleWrapPaint)
+    scheduleWrapPaint()
+
     // ── 快捷键：Ctrl+Shift+C/V/A / Ctrl+Insert / Shift+Insert ──
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== 'keydown') return true
@@ -127,6 +200,7 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
       const wantCopy = (ctrl && ev.shiftKey && ev.key.toLowerCase() === 'c') || (ctrl && ev.key === 'Insert')
       const wantPaste = (ctrl && ev.shiftKey && ev.key.toLowerCase() === 'v') || (ev.shiftKey && ev.key === 'Insert')
       const wantSelectAll = ctrl && ev.shiftKey && ev.key.toLowerCase() === 'a'
+      const wantFocus = ctrl && ev.shiftKey && ev.key.toLowerCase() === 'f'
       // 必须显式 preventDefault：返回 false 只是不让 xterm 处理该键，
       // 浏览器默认动作仍会触发（Ctrl+Shift+V / Shift+Insert = 原生粘贴 →
       // xterm textarea 的 paste 事件再粘贴一次，表现为粘贴两遍）
@@ -143,6 +217,11 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
       if (wantSelectAll) {
         ev.preventDefault()
         term.selectAll()
+        return false
+      }
+      if (wantFocus) {
+        ev.preventDefault()
+        focusToggleRef.current?.()
         return false
       }
       return true
@@ -169,6 +248,10 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
       offData()
       dataSub.dispose()
       ro.disconnect()
+      offRender.dispose()
+      offScroll.dispose()
+      offResize.dispose()
+      if (wrapRaf) cancelAnimationFrame(wrapRaf)
       term.dispose()
       termRef.current = null
     }
@@ -240,7 +323,7 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
   const menuStyle: React.CSSProperties | undefined = menu
     ? {
         left: Math.max(8, Math.min(menu.x, window.innerWidth - 200)),
-        top: Math.max(8, Math.min(menu.y, window.innerHeight - 242)),
+        top: Math.max(8, Math.min(menu.y, window.innerHeight - 312)),
       }
     : undefined
 
@@ -262,6 +345,16 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
         if (files.length > 0) onFilesDrop?.(files)
       }}
     >
+      <div ref={hostRef} className="term-host" />
+      <div ref={layerRef} className="term-wrap-layer" aria-hidden="true" />
+      <button
+        type="button"
+        className="term-focus-btn"
+        title={focusMode ? '退出专注模式（Ctrl+Shift+F）' : '专注模式：隐藏侧栏，加宽终端（Ctrl+Shift+F）'}
+        onClick={() => onFocusToggle?.()}
+      >
+        {focusMode ? <CompressOutlined /> : <ExpandOutlined />}
+      </button>
       {menu && (
         <div className="term-menu" style={menuStyle} onContextMenu={(e) => e.preventDefault()}>
           <button
@@ -345,6 +438,18 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
             }}
           >
             <span>清屏</span>
+          </button>
+          <div className="term-menu-sep" />
+          <button
+            type="button"
+            className="term-menu-item"
+            onClick={() => {
+              setMenu(null)
+              onFocusToggle?.()
+            }}
+          >
+            <span>{focusMode ? '退出专注模式' : '专注模式'}</span>
+            <span className="term-menu-key">Ctrl+Shift+F</span>
           </button>
         </div>
       )}
