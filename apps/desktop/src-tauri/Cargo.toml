@@ -37,6 +37,9 @@ russh = { version = "0.59", default-features = false, features = ["ring", "flate
 # rsa 0.10.0-rc.12 与当前解析的 pkcs8 不兼容（russh 按 rc.10 开发），钉住
 rsa = "=0.10.0-rc.10"
 russh-sftp = "2"
+# 串口会话（kind="serial"）：serialport 枚举/参数 + tokio-serial 异步读写（SerialStream）
+serialport = "4"
+tokio-serial = "5"
 rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"

@@ -247,6 +247,9 @@ pub enum ClientFrame {
     Settings {
         m: serde_json::Value,
     },
+    /// 枚举本机串口（serial-ports 回包）
+    #[serde(rename = "serial-list")]
+    SerialList,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -261,6 +264,38 @@ pub struct OpenOptions {
     pub rows: Option<u32>,
     #[serde(default)]
     pub term: Option<String>,
+    /// kind="serial" 时的串口参数（其他 kind 忽略）
+    #[serde(default)]
+    pub serial: Option<SerialOptions>,
+}
+
+/// 串口连接参数（与 serialport crate 枚举对应；除 port/baudRate 外均可缺省）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialOptions {
+    pub port: String,
+    #[serde(default = "default_serial_baud")]
+    pub baud_rate: u32,
+    /// 5-8，缺省 8
+    #[serde(default = "default_serial_data_bits")]
+    pub data_bits: u8,
+    /// none / odd / even，缺省 none
+    #[serde(default)]
+    pub parity: Option<String>,
+    /// 1 / 2，缺省 1
+    #[serde(default)]
+    pub stop_bits: Option<u8>,
+    /// none / software / hardware，缺省 none
+    #[serde(default)]
+    pub flow_control: Option<String>,
+}
+
+fn default_serial_baud() -> u32 {
+    115_200
+}
+
+fn default_serial_data_bits() -> u8 {
+    8
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -438,6 +473,10 @@ pub enum ServerFrame {
     #[serde(rename = "settings-result")]
     SettingsResult {
         m: SettingsResultM,
+    },
+    #[serde(rename = "serial-ports")]
+    SerialPorts {
+        m: SerialPortsM,
     },
     #[serde(rename = "error")]
     Error {
@@ -747,6 +786,32 @@ pub struct SettingsResultM {
     pub items: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// 本机串口描述（serial-ports 帧）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialPortM {
+    /// 端口名（Windows: COM3；Unix: /dev/ttyUSB0）
+    pub name: String,
+    /// usb / bluetooth / pci / unknown
+    pub kind: String,
+    /// USB 设备描述（厂商 + 产品名，如 "wch.cn CH340"）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
+}
+
+/// serial-ports 回包
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialPortsM {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ports: Option<Vec<SerialPortM>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }

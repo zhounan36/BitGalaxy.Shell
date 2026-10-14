@@ -235,6 +235,21 @@ async fn dispatch(
         }
         ClientFrame::Ai { m } => ai.handle_ai(m),
         ClientFrame::AiApprove { m } => ai.handle_approve(&m),
+        ClientFrame::SerialList => {
+            let m = match crate::serial::list_ports() {
+                Ok(ports) => protocol::SerialPortsM {
+                    ok: true,
+                    ports: Some(ports),
+                    message: None,
+                },
+                Err(e) => protocol::SerialPortsM {
+                    ok: false,
+                    ports: None,
+                    message: Some(e),
+                },
+            };
+            out.send_frame(&ServerFrame::SerialPorts { m });
+        }
         ClientFrame::Settings { m } => {
             let m = handle_settings(stores, &m);
             out.send_frame(&ServerFrame::SettingsResult { m });

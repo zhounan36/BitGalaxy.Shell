@@ -28,6 +28,7 @@ pub mod metrics;
 pub mod policy;
 pub mod pool;
 pub mod protocol;
+pub mod serial;
 pub mod server;
 pub mod session;
 pub mod sftp;

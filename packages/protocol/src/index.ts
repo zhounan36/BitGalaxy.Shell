@@ -12,7 +12,42 @@
 export type Origination = 'auto' | 'local' | 'cloud'
 
 // ── 会话种类 ─────────────────────────────────────────────────────────────
-export type SessionKind = 'shell' | 'sftp' | 'metrics'
+
+export type SessionKind = 'shell' | 'sftp' | 'metrics' | 'serial'
+
+// ── 串口（COM 口控制台透传）──────────────────────────────────────────────
+
+/** 串口连接参数（kind='serial' 时随 open 帧下发；除 port/baudRate 外可缺省） */
+export interface SerialOptions {
+  /** 端口名（Windows: COM3；Unix: /dev/ttyUSB0） */
+  port: string
+  baudRate: number
+  /** 5-8，缺省 8 */
+  dataBits?: number
+  /** none / odd / even，缺省 none */
+  parity?: 'none' | 'odd' | 'even'
+  /** 1 / 2，缺省 1 */
+  stopBits?: number
+  /** none / software / hardware，缺省 none */
+  flowControl?: 'none' | 'software' | 'hardware'
+}
+
+/** 本机串口描述（serial-ports 帧） */
+export interface SerialPortInfo {
+  name: string
+  /** usb / bluetooth / pci / unknown */
+  kind: string
+  /** USB 设备描述（厂商 + 产品名） */
+  description?: string
+  serialNumber?: string
+}
+
+/** serial-ports 回包 */
+export interface SerialPortsResult {
+  ok: boolean
+  ports?: SerialPortInfo[]
+  message?: string
+}
 
 // ── 主机档案（M1：本地 hosts.json；M2 起与云端档案同步，设计稿 §5.4）──────────
 
@@ -348,6 +383,8 @@ export interface OpenOptions {
   term?: string
   /** 发起位置（M4 云端网关生效；直连/NM 恒为 local） */
   origination?: Origination
+  /** kind='serial' 时的串口参数（hostId 传固定占位 'serial'） */
+  serial?: SerialOptions
 }
 
 export type ClientFrame =
@@ -364,6 +401,7 @@ export type ClientFrame =
   | { t: 'agent'; m: AgentOp }
   | { t: 'ai'; m: AiOp }
   | { t: 'ai-approve'; m: { chatId: string; reqId: string; approved: boolean } }
+  | { t: 'serial-list' } // 枚举本机串口（serial-ports 回包）
   | { t: 'settings'; m: SettingsOp }
 
 // ── 控制帧：Agent → 客户端 ───────────────────────────────────────────────
@@ -409,6 +447,7 @@ export type ServerFrame =
   /** SSH 控制台输出增量（console_command 运行中流式回传） */
   | { t: 'ai-console'; m: { chatId: string; toolCallId: string; delta: string } }
   | { t: 'settings-result'; m: SettingsResult }
+  | { t: 'serial-ports'; m: SerialPortsResult }
   | { t: 'error'; s?: string; m: { code: string; message: string } }
 
 // ── 数据帧（WS 二进制帧）────────────────────────────────────────────────
