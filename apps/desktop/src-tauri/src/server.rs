@@ -10,6 +10,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::ai::AiHandler;
+use crate::dl_http;
 use crate::policy::AiPolicy;
 use crate::pool::ConnRegistry;
 use crate::protocol::{
@@ -53,6 +54,8 @@ pub async fn start_server(
     // 全局连接注册表：本进程所有 WS 连接共享（工作台会话与 AI 工具同主机复用连接；
     // MCP stdio 为独立子进程，自建实例）
     let registry = Arc::new(ConnRegistry::new(stores.clone(), policy.limits.idle_close_sec));
+    // 拖出下载能力令牌表（dl-open 签发，HTTP /dl 端点消费）：进程级单例
+    let dl = Arc::new(dl_http::DlTickets::new(port));
     // AiHandler 进程级单例：审批卡片 / 对话状态跨 WS 连接（断线重连后的新连接）
     // 依然路由到同一份登记表——否则重连后批准回包会落进空表被静默丢弃，
     // 120s 审批超时被误判为「用户拒绝」。AI 帧经 OutHub 广播到所有活跃连接。
@@ -68,11 +71,17 @@ pub async fn start_server(
         let allowed = allowed.clone();
         let registry = registry.clone();
         let ai = ai.clone();
+        let dl = dl.clone();
         tokio::spawn(async move {
             if cfg!(debug_assertions) {
                 eprintln!("[bgshell][debug] WS 接入新连接");
             }
-            handle_conn(stream, stores, agent_ctl, allowed, registry, ai).await;
+            let mut stream = stream;
+            // /dl 请求（拖出下载）在同端口分流：消费整条连接；其余（WS 握手等）不消费字节
+            if dl_http::try_handle(&mut stream, &dl, &registry).await {
+                return;
+            }
+            handle_conn(stream, stores, agent_ctl, allowed, registry, ai, dl).await;
         });
     }
 }
@@ -84,6 +93,7 @@ async fn handle_conn(
     allowed: Vec<String>,
     registry: Arc<ConnRegistry>,
     ai: Arc<AiHandler>,
+    dl: Arc<dl_http::DlTickets>,
 ) {
     // Origin 校验后完成 WS 握手
     let ws = {
@@ -132,7 +142,7 @@ async fn handle_conn(
         let _ = sink.close().await;
     });
 
-    let manager = SessionManager::new(stores.clone(), outbound.clone(), registry.clone());
+    let manager = SessionManager::new(stores.clone(), outbound.clone(), registry.clone(), dl);
     // 本连接加入 AI 广播组（断开时由 OutHub 发送路径自动清理）
     ai.register_conn(outbound.clone());
 

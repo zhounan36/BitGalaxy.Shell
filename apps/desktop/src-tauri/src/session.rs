@@ -37,6 +37,10 @@ struct SessionEntry {
     /// stdin 写入队列：独立任务按序写 PTY。僵尸连接上 pty.data() 会挂起，
     /// 若在 WS 分发循环里直接 await 会连带阻塞所有后续帧（open/probe 全部失响应）
     stdin_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    /// 建连期间到达的终端尺寸：PTY 未就绪时 resize 帧先缓存在此，
+    /// open 完成后补发，避免远端停留在 open 帧占位 80x24（与前端 xterm
+    /// 实际尺寸不一致 → readline 光标/折行错位，历史被覆盖遮挡）
+    pending_size: Option<(u32, u32)>,
 }
 
 impl SessionEntry {
@@ -52,6 +56,7 @@ impl SessionEntry {
             confirm_slot: Arc::new(StdMutex::new(None)),
             auth_slot: Arc::new(StdMutex::new(None)),
             stdin_tx: None,
+            pending_size: None,
         }
     }
 }
@@ -62,15 +67,23 @@ pub struct SessionManager {
     out: Outbound,
     registry: Arc<ConnRegistry>,
     sessions: SessionMap,
+    /// 拖出下载能力令牌表（dl-open 签发；HTTP 端点消费）
+    dl: Arc<crate::dl_http::DlTickets>,
 }
 
 impl SessionManager {
-    pub fn new(stores: Stores, out: Outbound, registry: Arc<ConnRegistry>) -> SessionManager {
+    pub fn new(
+        stores: Stores,
+        out: Outbound,
+        registry: Arc<ConnRegistry>,
+        dl: Arc<crate::dl_http::DlTickets>,
+    ) -> SessionManager {
         SessionManager {
             stores,
             out,
             registry,
             sessions: Arc::new(StdMutex::new(HashMap::new())),
+            dl,
         }
     }
 
@@ -169,8 +182,16 @@ impl SessionManager {
                                 }
                             });
                         }
-                        // 记录初始 PTY 尺寸
-                        let _ = p.resize(cols, rows).await;
+                        // 记录初始 PTY 尺寸：优先取建连期间缓存的 resize
+                        //（前端 TerminalPane 挂载即上报真实尺寸，往往先于建连完成）
+                        let init_size = {
+                            let mut sessions = this.sessions.lock().unwrap();
+                            sessions
+                                .get_mut(&session_id)
+                                .and_then(|e| e.pending_size.take())
+                                .unwrap_or((cols, rows))
+                        };
+                        let _ = p.resize(init_size.0, init_size.1).await;
                         pty = Some(Arc::new(p));
                     }
                     Err(e) => {
@@ -226,7 +247,7 @@ impl SessionManager {
                 });
             }
 
-            let pending_metrics = {
+            let (pending_metrics, leftover_size) = {
                 let mut sessions = this.sessions.lock().unwrap();
                 let Some(entry) = sessions.get_mut(&session_id) else {
                     // 会话在建连期间被用户关闭：释放持有者，连接交还注册表
@@ -241,8 +262,14 @@ impl SessionManager {
                 if pty.is_some() {
                     entry.stdin_tx = Some(stdin_tx);
                 }
-                entry.metrics_pending.take()
+                (entry.metrics_pending.take(), entry.pending_size.take())
             };
+
+            // 补发窗口期到达的 resize：从初始尺寸计算到 entry.pty 登记之间
+            // 到达的帧只被缓存不消费，PTY 就绪登记后再补一次（此后走直达路径）
+            if let (Some(pty), Some((c, r))) = (pty.as_ref(), leftover_size) {
+                let _ = pty.resize(c, r).await;
+            }
 
             this.send_control(ServerFrame::SessionOpened {
                 s: session_id.clone(),
@@ -289,8 +316,19 @@ impl SessionManager {
 
     pub async fn resize(&self, session_id: &str, cols: u32, rows: u32) {
         let pty = {
-            let sessions = self.sessions.lock().unwrap();
-            sessions.get(session_id).and_then(|e| e.pty.clone())
+            let mut sessions = self.sessions.lock().unwrap();
+            match sessions.get_mut(session_id) {
+                Some(e) if e.pty.is_some() => e.pty.clone(),
+                // PTY 未就绪（open 建连中）：缓存尺寸，open 完成后补发。
+                // 此前直接丢弃会让远端永远停留在占位 80x24，与前端实际
+                // 尺寸不一致 → 方向键调历史时 readline 折行/光标错位，
+                // 表现为历史被覆盖遮挡、长句截断、字符重叠
+                Some(e) => {
+                    e.pending_size = Some((cols, rows));
+                    None
+                }
+                None => None,
+            }
         };
         if let Some(pty) = pty {
             let _ = pty.resize(cols, rows).await;
@@ -311,6 +349,22 @@ impl SessionManager {
             };
             (entry.sftp.clone(), entry.conn.clone(), entry.host_id.clone())
         };
+
+        // dl-open：只依赖会话的 host_id（签发拖出下载能力令牌），无需 sftp 控制器，
+        // 在入口同步处理即可
+        if op.op == "dl-open" {
+            let m = match host_id.as_deref() {
+                Some(hid) => ok_sftp("dl-open", Some(op.rid.clone()), |m| {
+                    m.dl_base = Some(self.dl.issue(hid));
+                }),
+                None => err_sftp("dl-open", Some(op.rid.clone()), "会话未就绪"),
+            };
+            self.send_control(ServerFrame::SftpResult {
+                s: session_id.to_string(),
+                m,
+            });
+            return;
+        }
 
         let op_clone = op.clone();
         let session_id = session_id.to_string();
@@ -353,14 +407,14 @@ impl SessionManager {
             let sftp = match sftp {
                 Some(s) => s,
                 None => {
-                    let Some(host_id) = host_id else {
+                    let Some(hid) = host_id.as_deref() else {
                         out.send_frame(&ServerFrame::SftpResult {
                             s: session_id.clone(),
                             m: err_sftp(&op_clone.op, Some(op_clone.rid.clone()), "会话未就绪"),
                         });
                         return;
                     };
-                    match this.registry.shared_sftp(&host_id).await {
+                    match this.registry.shared_sftp(hid).await {
                         Ok(s) => {
                             let ctrl = Arc::new(SftpController::from_shared(s));
                             // 双检：并发首个完成者生效；会话已关闭则放弃
@@ -418,10 +472,17 @@ impl SessionManager {
                     Err(e) => err_sftp("rename", Some(op_clone.rid.clone()), &e),
                 },
                 "upload-open" => {
-                    let op_id = sftp.upload_open(op_clone.path.as_deref().unwrap_or_default());
-                    ok_sftp("upload-open", Some(op_clone.rid.clone()), |m| {
-                        m.op_id = Some(op_id);
-                    })
+                    match sftp
+                        .upload_open(op_clone.path.as_deref().unwrap_or_default())
+                        .await
+                    {
+                        Ok(op_id) => ok_sftp("upload-open", Some(op_clone.rid.clone()), |m| {
+                            m.op_id = Some(op_id);
+                        }),
+                        // create 被拒（无写权限）/死连接在此即刻失败，前端不必
+                        // 推完全部块才在 upload-close 发现
+                        Err(e) => err_sftp("upload-open", Some(op_clone.rid.clone()), &e),
+                    }
                 }
                 "upload-close" => match sftp
                     .upload_close(op_clone.op_id.as_deref().unwrap_or_default())
@@ -455,21 +516,31 @@ impl SessionManager {
                     match require_paths(op_clone.path.as_deref(), op_clone.to.as_deref()) {
                         Ok((path, to)) => {
                             let direction = op_clone.direction.as_deref().unwrap_or("upload");
-                            match build_preflight_report(
-                                &sftp,
-                                direction,
-                                path,
-                                to,
-                                op_clone.size_b,
+                            // 内部多为远端元数据操作：整体 15s 兜底，半开死连接快速
+                            // 失败（"timeout" → network → 下方统一驱逐），权限探针毫秒级
+                            match tokio::time::timeout(
+                                crate::sftp::SFTP_META_DEADLINE,
+                                build_preflight_report(
+                                    &sftp,
+                                    direction,
+                                    path,
+                                    to,
+                                    op_clone.size_b,
+                                ),
                             )
                             .await
                             {
-                                Ok(report) => {
+                                Ok(Ok(report)) => {
                                     ok_sftp("preflight", Some(op_clone.rid.clone()), |m| {
                                         m.preflight = Some(report);
                                     })
                                 }
-                                Err(e) => err_sftp("preflight", Some(op_clone.rid.clone()), &e),
+                                Ok(Err(e)) => err_sftp("preflight", Some(op_clone.rid.clone()), &e),
+                                Err(_) => err_sftp(
+                                    "preflight",
+                                    Some(op_clone.rid.clone()),
+                                    "preflight timeout (15s)",
+                                ),
                             }
                         }
                         Err(e) => err_sftp("preflight", Some(op_clone.rid.clone()), e),
@@ -559,6 +630,14 @@ impl SessionManager {
                 }
                 other => err_sftp(other, Some(op_clone.rid.clone()), "未知 SFTP 操作"),
             };
+            // 半开死连接快速恢复：网络类失败（含 15s 操作超时）→ 驱逐池条目
+            // （各会话看门狗 5s 内感知断开并提示重连），避免死连接被反复复用、
+            // 每个操作都白等一遍超时。权限被拒（permission_denied）不在此列
+            if !m.ok && m.error_kind.as_deref() == Some("network") {
+                if let Some(hid) = host_id.as_deref() {
+                    this.registry.evict(hid, "connection-error");
+                }
+            }
             out.send_frame(&ServerFrame::SftpResult {
                 s: session_id,
                 m,
@@ -849,6 +928,7 @@ fn ok_sftp(op: &str, rid: Option<String>, fill: impl FnOnce(&mut SftpResultM)) -
         message: None,
         error_kind: None,
         preflight: None,
+        dl_base: None,
     };
     fill(&mut m);
     m
@@ -868,6 +948,7 @@ fn err_sftp(op: &str, rid: Option<String>, message: &str) -> SftpResultM {
         // 统一注入错误分类（权限/空间/重名/占用/网络），前端据此给友好提示与建议
         error_kind: crate::sftp::classify_sftp_error(message),
         preflight: None,
+        dl_base: None,
     }
 }
 

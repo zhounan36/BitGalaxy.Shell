@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 
 use crate::policy::AiPolicy;
 use crate::pool::ConnRegistry;
-use crate::protocol::{AiApprovalM, AiApproveM, AiDeltaM, AiResultM, AiStatusM, AiThinkingM, AiToolM, ServerFrame};
+use crate::protocol::{AiApprovalM, AiApproveM, AiChatsM, AiConsoleM, AiDeltaM, AiHistoryM, AiInputM, AiResultM, AiStatusM, AiThinkingM, AiToolM, ServerFrame};
 use crate::stores::Stores;
 use crate::toolcore::{self, ApproveFuture, Approver, ToolCtx};
 use crate::wire::OutHub;
@@ -20,6 +20,10 @@ use crate::wire::OutHub;
 const MAX_HISTORY: usize = 40;
 const MAX_TOOL_ROUNDS: usize = 8;
 const APPROVAL_TIMEOUT_MS: u64 = 120_000;
+/// 敏感输入（sudo 密码）等待时长：给用户找密码留足时间
+const INPUT_TIMEOUT_MS: u64 = 300_000;
+/// 历史查询单次最多返回的消息条数（防止超大对话拖垮 WS 帧）
+const HISTORY_LOAD_LIMIT: usize = 500;
 
 // ── 配置（SQLite settings 优先，环境变量兜底）─────────────────────────────
 
@@ -75,12 +79,13 @@ fn system_prompt() -> String {
         "你是 BitGalaxy Shell 的桌宠助手「鲸鱼娘」，帮用户管理 SSH 主机，也能操作用户本机（Windows）。",
         "风格：中文、简短、活泼但专业；汇报命令结果时给出要点总结，不要大段贴原文（超 20 行只说关键部分）。",
         "远程工具：list_hosts 查主机；probe_host 测连通；get_metrics 采指标；exec_command 在主机上执行命令；list_dir 列远程目录；read_file 读远程小文件；write_file 写远程文件；sftp_download_file 下载远程文件到本机。",
+        "控制台工具：console_command 在主机的交互式 SSH 控制台（PTY）中执行命令——输出实时显示给用户，用户可以中途介入输入或 Ctrl+C，结束后你拿到完整输出与退出码。交互式/长驻命令（top、tail -f、向导式安装）、或希望用户现场输入（如亲手输 sudo 密码）时用它；普通一次性命令仍用 exec_command。",
         "本地工具：local_exec 在本机执行 PowerShell（打包用 Compress-Archive 或 tar）；local_read_file/local_write_file 读写本机文件；sftp_upload_file 把本机文件上传到主机。",
         "典型流程：用户说「打包 X 上传到服务器」→ local_exec 打包 → sftp_upload_file 上传 →（可选）exec_command 解压/运行。",
         "安全：危险命令会被黑名单直接拒绝；写文件、上传下载及未识别命令会弹卡片请求用户批准，被拒时如实告知用户。文件大小超限时建议分卷或改用压缩。",
         "主机 id 必须先用 list_hosts 查询；用户说\"web 服务器\"这类称呼时按名称/标签匹配。",
         "路径规则：SFTP 工具（list_dir/read_file/write_file/make_dir/rename_path/delete_path）不支持 ~ 波浪号展开（会被当作字面目录名）；相对路径相对登录用户家目录。不确定实际位置时先用 list_dir 查看 resolvedPath。",
-        "权限规则：远程 exec 无终端（无 TTY），sudo 需要密码会直接失败，禁止执行 sudo 命令；遇到 Permission denied / 权限不足时如实报告原因，建议用户改到家目录等有权限的位置、在工作台终端手动 sudo，或配置 sudoers NOPASSWD 后再试。",
+        "权限规则：需要 root 权限的操作（系统目录建删/写 /etc / systemctl 等）在 exec_command 传 sudo=true——已配 NOPASSWD 时直接执行，否则会弹卡片请你输入 sudo 密码；被取消或密码错误时如实报告。SFTP 工具（make_dir/write_file/delete_path/rename_path 等）无法提权，遇到 Permission denied 时改用 exec_command + sudo（建目录 mkdir -p、删 rm -rf、写文件 tee、移动 mv）。",
         "执行失败时如实说明原因（退出码 / stderr 要点）；不要编造输出，不要把失败说成被拒绝。",
     ]
     .join("\n")
@@ -94,10 +99,17 @@ struct PendingApproval {
     tx: oneshot::Sender<bool>,
 }
 
+/// 待输入项（sudo 密码等）：None = 用户取消/超时
+struct PendingInput {
+    chat_id: String,
+    tx: oneshot::Sender<Option<String>>,
+}
+
 struct PetApprover {
     chat_id: String,
     out: OutHub,
     approvals: Arc<StdMutex<HashMap<String, PendingApproval>>>,
+    inputs: Arc<StdMutex<HashMap<String, PendingInput>>>,
 }
 
 impl Approver for PetApprover {
@@ -134,6 +146,35 @@ impl Approver for PetApprover {
             Ok(approved)
         })
     }
+
+    fn request_secret(&self, title: &str, prompt: &str) -> toolcore::SecretFuture {
+        let chat_id = self.chat_id.clone();
+        let out = self.out.clone();
+        let inputs = self.inputs.clone();
+        let title = title.to_string();
+        let prompt = prompt.to_string();
+        Box::pin(async move {
+            let req_id = uuid::Uuid::new_v4().to_string();
+            let (tx, rx) = oneshot::channel::<Option<String>>();
+            inputs.lock().unwrap().insert(req_id.clone(), PendingInput { chat_id: chat_id.clone(), tx });
+            out.send_frame(&ServerFrame::AiInput {
+                m: AiInputM {
+                    chat_id,
+                    req_id: req_id.clone(),
+                    title,
+                    prompt,
+                    secret: true,
+                },
+            });
+            let value = match tokio::time::timeout(Duration::from_millis(INPUT_TIMEOUT_MS), rx).await {
+                Ok(Ok(v)) => v,
+                // 超时=取消；清理登记避免 map 泄漏
+                _ => None,
+            };
+            inputs.lock().unwrap().remove(&req_id);
+            Ok(value)
+        })
+    }
 }
 
 // ── handler ──────────────────────────────────────────────────────────────
@@ -145,6 +186,7 @@ struct Shared {
     /// 广播出站：AI 帧发到所有活跃连接（断线重连后的新连接也能收到）
     out: OutHub,
     approvals: Arc<StdMutex<HashMap<String, PendingApproval>>>,
+    inputs: Arc<StdMutex<HashMap<String, PendingInput>>>,
     chats: StdMutex<HashMap<String, Vec<LlmMessage>>>,
     busy: StdMutex<HashSet<String>>,
     /// 运行中的对话轮任务（chat_id → JoinHandle），供「终止」abort
@@ -156,7 +198,10 @@ struct Shared {
 /// 执行中工具的取消通道（记录归属会话，便于整轮终止时批量清理）
 struct RunningTool {
     chat_id: String,
+    /// 单条终止唤醒
     tx: oneshot::Sender<()>,
+    /// 控制台介入输入（console_command 工具独有；其他工具为 None）
+    console: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 /// busy 占用守卫：任务结束 / 被 abort / panic 都会 Drop，杜绝 busy 永久泄漏
@@ -190,6 +235,7 @@ impl AiHandler {
                 registry,
                 out,
                 approvals: Arc::new(StdMutex::new(HashMap::new())),
+                inputs: Arc::new(StdMutex::new(HashMap::new())),
                 chats: StdMutex::new(HashMap::new()),
                 busy: StdMutex::new(HashSet::new()),
                 turns: StdMutex::new(HashMap::new()),
@@ -218,6 +264,58 @@ impl AiHandler {
                 let tool_call_id =
                     m.get("toolCallId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                 self.cancel_tool(&chat_id, &tool_call_id);
+            }
+            "console-input" => {
+                // 用户介入 SSH 控制台（console_command 运行中）：文本直接写入 PTY stdin
+                let tool_call_id =
+                    m.get("toolCallId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let text = m.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let tools = self.shared.running_tools.lock().unwrap();
+                if let Some(rt) = tools.get(&tool_call_id).filter(|r| r.chat_id == chat_id) {
+                    if let Some(tx) = &rt.console {
+                        let _ = tx.send(text);
+                    }
+                }
+            }
+            "input-reply" => {
+                // sudo 密码等敏感输入回包：value 缺省/空 = 取消
+                let req_id = m.get("reqId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let value = m.get("value").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                if let Some(pending) = self.shared.inputs.lock().unwrap().remove(&req_id) {
+                    let _ = pending.tx.send(value);
+                }
+            }
+            "history" => {
+                // chatId 缺省 = 最近一次对话（重开应用后恢复上次的聊天记录）
+                let chat_id = match m.get("chatId").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    Some(c) => c.to_string(),
+                    None => match self.shared.stores.chat.latest_chat() {
+                        Some(c) => c,
+                        None => return, // 还没有任何记录
+                    },
+                };
+                let messages = self.shared.stores.chat.list(&chat_id, HISTORY_LOAD_LIMIT as i64);
+                self.shared.out.send_frame(&ServerFrame::AiHistory {
+                    m: AiHistoryM { chat_id, messages },
+                });
+            }
+            "history-list" => {
+                // 历史会话列表（管理面板：复原 / 删除）
+                let chats = self.shared.stores.chat.list_chats(HISTORY_LOAD_LIMIT as i64);
+                self.shared.out.send_frame(&ServerFrame::AiChats { m: AiChatsM { chats } });
+            }
+            "history-delete" => {
+                // 删除整个会话：先终止进行中的轮次并清掉内存上下文，再删记录，
+                // 最后回最新的列表让前端刷新（当前会话被删时前端自行换新 id）
+                let target = m.get("chatId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                if target.is_empty() {
+                    return;
+                }
+                self.cancel_turn(&target);
+                self.shared.chats.lock().unwrap().remove(&target);
+                self.shared.stores.chat.delete_chat(&target);
+                let chats = self.shared.stores.chat.list_chats(HISTORY_LOAD_LIMIT as i64);
+                self.shared.out.send_frame(&ServerFrame::AiChats { m: AiChatsM { chats } });
             }
             "chat" => {
                 let text = m.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string();
@@ -260,6 +358,7 @@ impl AiHandler {
         let Some(rt) = running else { return };
         let _ = rt.tx.send(());
         self.reject_pending_approvals(chat_id);
+        self.reject_pending_inputs(chat_id);
     }
 
     /// 撤下某会话全部待审批卡片（单条取消 / 整轮终止共用）
@@ -275,6 +374,22 @@ impl AiHandler {
         drop(approvals);
         for tx in txs {
             let _ = tx.send(false);
+        }
+    }
+
+    /// 撤下某会话全部待输入卡片（sudo 密码等），一律按「取消」处理
+    fn reject_pending_inputs(&self, chat_id: &str) {
+        let mut inputs = self.shared.inputs.lock().unwrap();
+        let keys: Vec<String> = inputs
+            .iter()
+            .filter(|(_, p)| p.chat_id == chat_id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let txs: Vec<oneshot::Sender<Option<String>>> =
+            keys.iter().filter_map(|k| inputs.remove(k)).map(|p| p.tx).collect();
+        drop(inputs);
+        for tx in txs {
+            let _ = tx.send(None);
         }
     }
 
@@ -313,9 +428,10 @@ impl AiHandler {
                 let _ = rt.tx.send(());
             }
         }
-        // 撤下该会话的待审批卡片 → 工具收到「拒绝」，对话循环自然收尾
+        // 撤下该会话的待审批/待输入卡片 → 工具收到「拒绝/取消」，对话循环自然收尾
         // （只移除本会话的条目，不影响其他会话的待审批项）
         self.reject_pending_approvals(chat_id);
+        self.reject_pending_inputs(chat_id);
         // 给悬挂的 tool_calls 补结果，保持 LLM 历史配对
         {
             let mut chats = self.shared.chats.lock().unwrap();
@@ -350,6 +466,7 @@ impl AiHandler {
                 message: Some("已终止".into()),
             },
         });
+        // 「已终止」是瞬态 UI 事件，不落库（多次停止会在历史恢复时堆叠成噪音）
     }
 
     pub fn handle_approve(&self, m: &AiApproveM) {
@@ -411,25 +528,42 @@ impl AiHandler {
             chat_id: chat_id.to_string(),
             out: self.shared.out.clone(),
             approvals: self.shared.approvals.clone(),
+            inputs: self.shared.inputs.clone(),
         };
-        let ctx = ToolCtx {
+        // 控制台桥：emit 把 PTY 输出增量发成 ai-console 流式帧；
+        // input 由 handle_ai 的 "console-input" op 喂入（用户在控制台卡片介入输入）
+        let (console_tx, mut console_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let emit: Box<dyn Fn(String) + Send + Sync> = {
+            let this = self.clone();
+            let chat_id = chat_id.to_string();
+            let tcid = tool_call_id.to_string();
+            Box::new(move |delta: String| this.send_console_delta(&chat_id, &tcid, delta))
+        };
+        let mut ctx = ToolCtx {
             stores: &self.shared.stores,
             policy: &self.shared.policy,
             registry: self.shared.registry.as_ref(),
             client: "pet",
+            console: Some(toolcore::ConsoleCtx { emit, input: &mut console_rx }),
         };
         let detail = tool_detail(name, args);
         self.send_tool_event(chat_id, tool_call_id, name, &detail, "running", None, None);
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
         self.shared.running_tools.lock().unwrap().insert(
             tool_call_id.to_string(),
-            RunningTool { chat_id: chat_id.to_string(), tx: cancel_tx },
+            RunningTool { chat_id: chat_id.to_string(), tx: cancel_tx, console: Some(console_tx) },
         );
         let result = tokio::select! {
-            r = toolcore::execute(&ctx, &approver, name, args) => r,
+            r = toolcore::execute(&mut ctx, &approver, name, args) => r,
             // 用户点了这张卡片的「终止」：软取消，模型看到结果后继续对话
             _ = cancel_rx => serde_json::json!({
                 "ok": false, "code": "tool-cancelled", "message": "用户终止了该命令执行"
+            }),
+            // 兜底超时：SFTP/exec 底层挂起时不能让对话永久卡死
+            // （传输类工具与 termUpload 一致给 10 分钟，其余 60s）
+            _ = tokio::time::sleep(tool_budget(name)) => serde_json::json!({
+                "ok": false, "code": "tool-timeout",
+                "message": format!("工具 {name} 执行超时（{}），已中止；请检查主机网络后重试", tool_budget(name).as_secs())
             }),
         };
         self.shared.running_tools.lock().unwrap().remove(tool_call_id);
@@ -439,16 +573,39 @@ impl AiHandler {
             _ if ok => "done",
             _ => "failed",
         };
+        let summary = tool_result_summary(&result);
+        let output = tool_output(&result);
         self.send_tool_event(
             chat_id,
             tool_call_id,
             name,
             &detail,
             stage,
-            Some(tool_result_summary(&result)),
-            tool_output(&result),
+            Some(summary.clone()),
+            output.clone(),
         );
+        // 工具终态落库（running 阶段不落，重开应用后还原为终态卡片）
+        let tool_json = serde_json::json!({
+            "id": tool_call_id,
+            "name": name,
+            "detail": detail,
+            "stage": stage,
+            "summary": summary,
+            "output": output,
+        });
+        self.shared.stores.chat.append(chat_id, "tool", None, None, false, Some(&tool_json));
         result
+    }
+
+    /// 控制台输出增量（console_command 运行中）：前端控制台卡片实时追加显示
+    fn send_console_delta(&self, chat_id: &str, tool_call_id: &str, delta: String) {
+        self.shared.out.send_frame(&ServerFrame::AiConsole {
+            m: AiConsoleM {
+                chat_id: chat_id.to_string(),
+                tool_call_id: tool_call_id.to_string(),
+                delta,
+            },
+        });
     }
 
     fn send_tool_event(
@@ -492,14 +649,19 @@ impl AiHandler {
 
         {
             let mut chats = self.shared.chats.lock().unwrap();
-            let messages = chats.entry(chat_id.to_string()).or_default();
-            messages.push(LlmMessage {
+            let entry = chats.entry(chat_id.to_string()).or_insert_with(|| {
+                // Agent 重启后内存历史为空：从 SQLite 恢复最近的问答上下文
+                //（工具明细无法还原 tool_calls 配对，只取用户/助手文本，足够模型接上话头）
+                self.seed_history_from_db(chat_id)
+            });
+            entry.push(LlmMessage {
                 role: "user".into(),
                 content: Some(text.to_string()),
                 tool_calls: None,
                 tool_call_id: None,
             });
         }
+        self.shared.stores.chat.append(chat_id, "user", Some(text), None, false, None);
         self.status(chat_id, "thinking", None);
 
         let client = match reqwest::Client::builder()
@@ -513,6 +675,8 @@ impl AiHandler {
             }
         };
         let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+        // 本轮全部思考内容（多轮工具循环合并，落库与前端展示一致以空行分隔）
+        let mut thinking_acc = String::new();
 
         for _round in 0..MAX_TOOL_ROUNDS {
             // 组装消息（首条 system）
@@ -578,6 +742,10 @@ impl AiHandler {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
             if let Some(think) = reasoning.as_deref() {
+                if !thinking_acc.is_empty() {
+                    thinking_acc.push_str("\n\n");
+                }
+                thinking_acc.push_str(think);
                 self.push_stream(chat_id, think, true);
             }
             let msg: LlmMessage = match serde_json::from_value(msg_value) {
@@ -631,10 +799,13 @@ impl AiHandler {
                 m: AiResultM {
                     chat_id: chat_id.to_string(),
                     ok: true,
-                    text: full,
+                    text: full.clone(),
                     message: None,
                 },
             });
+            // 助手最终回复落库（含全部思考过程，重开应用后可展开查看）
+            let thinking = if thinking_acc.is_empty() { None } else { Some(thinking_acc.as_str()) };
+            self.shared.stores.chat.append(chat_id, "assistant", Some(&full), thinking, false, None);
             let mut chats = self.shared.chats.lock().unwrap();
             if let Some(history) = chats.get_mut(chat_id) {
                 if history.len() > MAX_HISTORY {
@@ -648,14 +819,66 @@ impl AiHandler {
     }
 
     fn send_ai_error(&self, chat_id: &str, message: impl Into<String>) {
+        let message = message.into();
+        // 失败原因也落库：重开应用后错误提示与对话一起还原
+        self.shared.stores.chat.append(chat_id, "assistant", Some(&message), None, true, None);
         self.shared.out.send_frame(&ServerFrame::AiResult {
             m: AiResultM {
                 chat_id: chat_id.to_string(),
                 ok: false,
                 text: String::new(),
-                message: Some(message.into()),
+                message: Some(message),
             },
         });
+    }
+
+    /// Agent 重启后首次收到该会话消息：从 SQLite 恢复最近上下文
+    /// （只取用户/助手文本问答，跳过工具卡片与错误提示）
+    fn seed_history_from_db(&self, chat_id: &str) -> Vec<LlmMessage> {
+        self.shared
+            .stores
+            .chat
+            .list(chat_id, MAX_HISTORY as i64)
+            .into_iter()
+            .filter(|r| !r.error && r.tool.is_none())
+            .filter_map(|r| {
+                let role = match r.role.as_str() {
+                    "user" => "user",
+                    "assistant" => "assistant",
+                    _ => return None,
+                };
+                r.content
+                    .filter(|c| !c.is_empty())
+                    .map(|content| LlmMessage {
+                        role: role.into(),
+                        content: Some(content),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    })
+            })
+            .collect()
+    }
+}
+
+/// 工具执行预算：传输/文件类给长预算（与 termUpload 10 分钟一致），其余 60s。
+/// exec_command 因 sudo 提权可能等待用户输入密码（最长 5 分钟），同样给长预算。
+/// 这是挂起兜底（select 分支），工具内部正常的短超时不受影响。
+fn tool_budget(name: &str) -> Duration {
+    const TRANSFER_TOOLS: &[&str] = &[
+        "sftp_upload_file",
+        "sftp_download_file",
+        "write_file",
+        "read_file",
+        "local_read_file",
+        "local_write_file",
+        "exec_command",
+        // 控制台命令可能长驻交互（top/tail -f）或等用户现场介入，同样给长预算
+        "console_command",
+    ];
+    if TRANSFER_TOOLS.contains(&name) {
+        Duration::from_secs(600)
+    } else {
+        Duration::from_secs(60)
     }
 }
 
@@ -675,7 +898,7 @@ fn truncate(s: &str, max: usize) -> String {
 fn tool_detail(name: &str, args: &serde_json::Value) -> Option<String> {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|v| v.to_string());
     match name {
-        "exec_command" | "local_exec" => s("command"),
+        "exec_command" | "local_exec" | "console_command" => s("command"),
         "make_dir" | "read_file" | "write_file" | "delete_path" | "local_read_file" | "local_write_file" => {
             s("path")
         }

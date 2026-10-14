@@ -19,8 +19,10 @@ use crate::stores::Stores;
 pub mod ai;
 pub mod db;
 pub mod disk;
+pub mod dl_http;
 pub mod mcp;
 pub mod metrics;
+pub mod pet_pack;
 pub mod policy;
 pub mod pool;
 pub mod protocol;
@@ -294,7 +296,11 @@ pub fn run() {
             set_pet_visible,
             quit_app,
             stat_file,
-            read_file_chunk
+            read_file_chunk,
+            pet_pack::pet_pack_import,
+            pet_pack::pet_packs_list,
+            pet_pack::pet_pack_delete,
+            pet_pack::pet_pack_set_enabled
         ])
         .setup(move |app| {
             let data_dir = resolve_data_dir();

@@ -355,6 +355,16 @@ body {
   cursor: default;
 }
 
+/* 删除类危险菜单项（hover 用红色系，区别于常规 accent 高亮） */
+.term-menu-item-danger {
+  color: var(--danger, #f2555a);
+}
+
+.term-menu-item-danger:hover:not(:disabled) {
+  background: rgba(242, 85, 90, 0.16);
+  color: var(--danger, #f2555a);
+}
+
 .term-menu-key {
   color: var(--text-muted);
   font-family: var(--font-mono);
@@ -371,6 +381,55 @@ body {
 /* SFTP / 指标面板内容底：与标签页一致 */
 .pane-surface {
   background: var(--bg-deep);
+}
+
+/* ============================================================
+   SFTP 面板桌面化交互（拖入高亮 / 移动目标行 / 右键菜单 / 多选条）
+   ============================================================ */
+.sftp-pane.drag-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+}
+
+/* 面板内拖动的目标行/面包屑项高亮 */
+.sftp-row-drop-hover {
+  background: var(--accent-soft) !important;
+  outline: 1px solid var(--accent-border);
+  outline-offset: -1px;
+}
+
+/* 多选浮动条（工具栏下方） */
+.sftp-selbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+/* 右键菜单浮层（antd Menu 套壳） */
+.sftp-ctx-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 184px;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  user-select: none;
+}
+
+.sftp-ctx-menu .ant-menu {
+  background: transparent;
+  border-inline-end: none;
 }
 
 /* 滚动条（WebView2/Chromium） */

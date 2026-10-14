@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { Progress, Typography } from 'antd'
+import { Modal, Progress, Typography, message } from 'antd'
 import { CloseOutlined, DownloadOutlined } from '@ant-design/icons'
 import { DataFrameType } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
@@ -10,9 +10,11 @@ import {
   cancelTermDownload,
   cleanSelectedName,
   clearSessionCwd,
+  deleteRemoteTarget,
   downloadSelectionFromSession,
   parseOsc7,
   reportOsc7,
+  resolveSelectionTarget,
   setSessionAltScreen,
   type TermDownloadState,
 } from '../api/termUpload'
@@ -34,7 +36,8 @@ interface TerminalPaneProps {
 }
 
 /** 单个终端面板：xterm ↔ Agent（stdin/stdout 二进制帧，按 sessionId 复用同一条 WS）
- *  右键呼出自定义菜单：复制 / 下载所选（SFTP）/ 粘贴 / 全选 / 清屏；另支持终端惯例快捷键。
+ *  右键呼出自定义菜单：复制 / 下载所选（SFTP）/ 删除所选（SFTP，删除前确认）/ 粘贴 / 全选 / 清屏；
+ *  另支持终端惯例快捷键。
  *  OSC 7（shell 集成上报当前目录）→ termUpload 目录缓存，供拖拽上传与选区下载定位远端路径。 */
 export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
   const holderRef = useRef<HTMLDivElement>(null)
@@ -91,6 +94,14 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
 
     // 打开后立即上报实际尺寸（open 帧先用占位 80x24）
     agentSocket.sendControl({ t: 'resize', s: sessionId, m: { cols: term.cols, rows: term.rows } })
+    // 兜底：open 建连完成（session-opened）后再补发一次当前尺寸，
+    // 确保远端 PTY 与 xterm 实际尺寸一致（不一致时 readline 折行/光标错位，
+    // 方向键调历史会覆盖遮挡旧内容；后端 open 期间也会缓存 resize，双保险）
+    const offOpened = agentSocket.onControl((frame) => {
+      if (frame.t === 'session-opened' && frame.s === sessionId) {
+        agentSocket.sendControl({ t: 'resize', s: sessionId, m: { cols: term.cols, rows: term.rows } })
+      }
+    })
 
     const offData = agentSocket.onData((sid, type, payload) => {
       if (sid !== sessionId || type !== DataFrameType.Stdout) return
@@ -116,15 +127,21 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
       const wantCopy = (ctrl && ev.shiftKey && ev.key.toLowerCase() === 'c') || (ctrl && ev.key === 'Insert')
       const wantPaste = (ctrl && ev.shiftKey && ev.key.toLowerCase() === 'v') || (ev.shiftKey && ev.key === 'Insert')
       const wantSelectAll = ctrl && ev.shiftKey && ev.key.toLowerCase() === 'a'
+      // 必须显式 preventDefault：返回 false 只是不让 xterm 处理该键，
+      // 浏览器默认动作仍会触发（Ctrl+Shift+V / Shift+Insert = 原生粘贴 →
+      // xterm textarea 的 paste 事件再粘贴一次，表现为粘贴两遍）
       if (wantCopy && term.hasSelection()) {
+        ev.preventDefault()
         copySelection()
         return false
       }
       if (wantPaste) {
+        ev.preventDefault()
         void pasteFromClipboard()
         return false
       }
       if (wantSelectAll) {
+        ev.preventDefault()
         term.selectAll()
         return false
       }
@@ -148,6 +165,7 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
     return () => {
       holder.removeEventListener('contextmenu', onContextMenu)
       clearSessionCwd(sessionId)
+      offOpened()
       offData()
       dataSub.dispose()
       ro.disconnect()
@@ -168,6 +186,31 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
         }, 5000)
       }
     })
+  }
+
+  // ── 选区删除（右键菜单触发）：ls 自动识别文件/文件夹 → 确认后 rm（目录递归）──
+  const startDelete = (name: string) => {
+    void (async () => {
+      const target = await resolveSelectionTarget(sessionId, name)
+      if ('error' in target) {
+        message.error(target.error)
+        return
+      }
+      Modal.confirm({
+        title: target.isDir ? `删除文件夹「${target.name}」？` : `删除文件「${target.name}」？`,
+        content: target.isDir
+          ? `将递归删除远端目录 ${target.remotePath} 及其全部内容，操作不可恢复。`
+          : `将删除远端文件 ${target.remotePath}，操作不可恢复。`,
+        okText: '删除',
+        okButtonProps: { danger: true },
+        cancelText: '取消',
+        onOk: async () => {
+          const r = await deleteRemoteTarget(sessionId, target)
+          if (r.ok) message.success(`已删除 ${target.name}`)
+          else message.error(r.message ?? '删除失败')
+        },
+      })
+    })()
   }
 
   // 菜单打开期间：点击菜单外 / Esc / 终端滚动 / 窗口失焦或缩放 → 关闭
@@ -197,7 +240,7 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
   const menuStyle: React.CSSProperties | undefined = menu
     ? {
         left: Math.max(8, Math.min(menu.x, window.innerWidth - 200)),
-        top: Math.max(8, Math.min(menu.y, window.innerHeight - 210)),
+        top: Math.max(8, Math.min(menu.y, window.innerHeight - 242)),
       }
     : undefined
 
@@ -248,6 +291,24 @@ export function TerminalPane({ sessionId, onFilesDrop }: TerminalPaneProps) {
               {menu.selName
                 ? `下载「${menu.selName.length > 12 ? `${menu.selName.slice(0, 11)}…` : menu.selName}」`
                 : '下载所选'}
+            </span>
+            <span className="term-menu-key">SFTP</span>
+          </button>
+          <button
+            type="button"
+            className="term-menu-item term-menu-item-danger"
+            disabled={!menu.selName}
+            title={menu.selName ?? undefined}
+            onClick={() => {
+              const name = menu.selName
+              setMenu(null)
+              if (name) startDelete(name)
+            }}
+          >
+            <span>
+              {menu.selName
+                ? `删除「${menu.selName.length > 12 ? `${menu.selName.slice(0, 11)}…` : menu.selName}」`
+                : '删除所选'}
             </span>
             <span className="term-menu-key">SFTP</span>
           </button>

@@ -71,13 +71,28 @@ pub fn decision_of(code: &str) -> &'static str {
 
 /// 审批 future：实现方把所需状态 clone 进闭包，不借用外部生命周期
 pub type ApproveFuture = Pin<Box<dyn Future<Output = Result<bool, ToolError>> + Send>>;
+/// 敏感输入 future（如 sudo 密码）：Ok(Some)=用户输入，Ok(None)=取消/超时，Err=通道不支持
+pub type SecretFuture = Pin<Box<dyn Future<Output = Result<Option<String>, ToolError>> + Send>>;
 
 pub trait Approver: Send + Sync {
     /// 请求人工审批；Err 仅表示该通道不支持审批（fail-closed），false 表示被拒/超时
     fn approve(&self, describe: &str) -> ApproveFuture;
+    /// 请求用户输入敏感信息（sudo 密码等）；默认不支持（MCP 等通道走NOPASSWD探测）
+    fn request_secret(&self, title: &str, prompt: &str) -> SecretFuture {
+        let _ = (title, prompt);
+        Box::pin(async { Err(ToolError::new(ERR_ELICIT_UNSUPPORTED, "该通道不支持敏感信息输入")) })
+    }
 }
 
 // ── 执行上下文与统一入口 ─────────────────────────────────────────────────
+
+/// SSH 控制台交互桥（仅桌宠通道提供；MCP 通道无 UI 介入能力，不暴露控制台工具）
+pub struct ConsoleCtx<'a> {
+    /// 每收到一块 PTY 输出调用一次（桌宠通道 → 发 ai-console 流式帧，前端实时显示）
+    pub emit: Box<dyn Fn(String) + Send + Sync + 'a>,
+    /// 用户介入输入（前端 console-input op 转发进来，直接写入 PTY stdin；"\x03" = Ctrl+C）
+    pub input: &'a mut tokio::sync::mpsc::UnboundedReceiver<String>,
+}
 
 pub struct ToolCtx<'a> {
     pub stores: &'a Stores,
@@ -85,6 +100,8 @@ pub struct ToolCtx<'a> {
     pub registry: &'a ConnRegistry,
     /// 审计标识：通道名（"pet" / MCP clientInfo）
     pub client: &'a str,
+    /// 交互式控制台桥（None = 该通道不支持控制台工具）
+    pub console: Option<ConsoleCtx<'a>>,
 }
 
 fn host_label_of(stores: &Stores, host_id: &str) -> String {
@@ -95,8 +112,9 @@ fn host_label_of(stores: &Stores, host_id: &str) -> String {
 }
 
 /// 统一工具入口：分发 → 审计（ai.tool）→ 返回结果 JSON（含 ok:true）
+/// （ctx 需可变：console_command 要从 ctx.console 取出输入接收端供 select 消费）
 pub async fn execute(
-    ctx: &ToolCtx<'_>,
+    ctx: &mut ToolCtx<'_>,
     approver: &dyn Approver,
     name: &str,
     args: &serde_json::Value,
@@ -140,7 +158,7 @@ pub async fn execute(
 }
 
 async fn dispatch(
-    ctx: &ToolCtx<'_>,
+    ctx: &mut ToolCtx<'_>,
     approver: &dyn Approver,
     name: &str,
     args: &serde_json::Value,
@@ -154,6 +172,7 @@ async fn dispatch(
         "list_dir" => run_list_dir(ctx, args).await,
         "read_file" => run_read_file(ctx, args).await,
         "exec_command" => run_exec_command(ctx, approver, args, detail).await,
+        "console_command" => run_console_command(ctx, approver, args, detail).await,
         "write_file" => run_write_file(ctx, approver, args, detail).await,
         "make_dir" => run_make_dir(ctx, approver, args, detail).await,
         "rename_path" => run_rename_path(ctx, approver, args, detail).await,
@@ -165,6 +184,28 @@ async fn dispatch(
         "sftp_upload_file" => run_sftp_transfer(ctx, approver, args, true, detail).await,
         "sftp_download_file" => run_sftp_transfer(ctx, approver, args, false, detail).await,
         _ => Err(ToolError::new("unknown-tool", format!("未知工具: {name}"))),
+    }
+}
+
+/// SFTP 连接获取的显式超时（挂起兜底）：主机不可达/防火墙静默丢包时
+/// 底层连接可能长期无响应，30s 内拿不到 SFTP 通道直接报 connect-failed，
+/// 让工具卡片尽快显示失败原因，而不是永远「执行中」。
+async fn acquire_sftp_deadline(ctx: &ToolCtx<'_>, host_id: &str) -> Result<crate::pool::SftpLease, ToolError> {
+    match tokio::time::timeout(Duration::from_secs(30), ctx.registry.acquire_sftp(host_id, ctx.client)).await {
+        Ok(r) => r,
+        Err(_) => Err(ToolError::new(
+            ERR_CONNECT_FAILED,
+            "连接主机超时（30s）：主机不可达或网络被防火墙拦截；可先在工作台手动连接一次该主机确认",
+        )),
+    }
+}
+
+/// 网络类 SFTP 错误（含 15s 操作超时）：池中连接已坏（半开死连接），
+/// 驱逐后下次操作自动重建，避免死连接被反复复用、每个操作都白等超时。
+/// 权限被拒（permission_denied）不在此列——服务器即时返回，无需重建。
+fn evict_on_network(ctx: &ToolCtx<'_>, host_id: &str, msg: &str) {
+    if crate::sftp::classify_sftp_error(msg).as_deref() == Some("network") {
+        ctx.registry.evict(host_id, "connection-error");
     }
 }
 
@@ -246,12 +287,15 @@ async fn run_get_metrics(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> Result<
 async fn run_list_dir(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> Result<serde_json::Value, ToolError> {
     let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default();
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    let lease = ctx.registry.acquire_sftp(host_id, ctx.client).await?;
+    let lease = acquire_sftp_deadline(ctx, host_id).await?;
     let ctrl = SftpController::from_shared(lease.sftp.clone());
     let (resolved, entries) = ctrl
         .ls(path)
         .await
-        .map_err(|e| ToolError::new(ERR_SFTP_FAILED, format!("路径 {path}: {e}")))?;
+        .map_err(|e| {
+            evict_on_network(ctx, host_id, &e);
+            ToolError::new(ERR_SFTP_FAILED, format!("路径 {path}: {e}"))
+        })?;
     Ok(serde_json::json!({
         "resolvedPath": resolved,
         "entries": serde_json::to_value(entries).unwrap_or_default()
@@ -265,20 +309,25 @@ async fn run_read_file(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> Result<se
     let max_bytes = requested.clamp(1, ctx.policy.limits.max_read_file_bytes as u64) as usize;
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
 
-    let lease = ctx.registry.acquire_sftp(host_id, ctx.client).await?;
+    let lease = acquire_sftp_deadline(ctx, host_id).await?;
     let sftp = &lease.sftp;
-    let meta = sftp
-        .metadata(path)
+    // stat/open 带 15s 超时：无读权限即时返回，半开死连接快速失败并驱逐
+    let meta = crate::sftp::stat_deadline(sftp, path)
         .await
-        .map_err(|e| ToolError::new(ERR_SFTP_FAILED, format!("路径 {path}: {e}")))?;
+        .map_err(|e| {
+            evict_on_network(ctx, host_id, &e);
+            ToolError::new(ERR_SFTP_FAILED, format!("路径 {path}: {e}"))
+        })?;
     let size = meta.size.unwrap_or(0);
     if size == 0 {
         return Ok(serde_json::json!({ "path": path, "offset": offset, "content": "", "sizeB": 0, "truncated": false }));
     }
-    let mut file = sftp
-        .open(path)
+    let mut file = crate::sftp::open_read_deadline(sftp, path)
         .await
-        .map_err(|e| ToolError::new(ERR_SFTP_FAILED, format!("路径 {path}: {e}")))?;
+        .map_err(|e| {
+            evict_on_network(ctx, host_id, &e);
+            ToolError::new(ERR_SFTP_FAILED, format!("路径 {path}: {e}"))
+        })?;
     use tokio::io::AsyncSeekExt;
     file.seek(std::io::SeekFrom::Start(offset))
         .await
@@ -317,6 +366,127 @@ async fn run_exec_command(
 ) -> Result<serde_json::Value, ToolError> {
     let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default();
     let command = args.get("command").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let sudo = args.get("sudo").and_then(|v| v.as_bool()).unwrap_or(false);
+    detail.insert("command".into(), serde_json::json!(command));
+    if sudo {
+        detail.insert("sudo".into(), serde_json::json!(true));
+    }
+
+    if !ctx.policy.exec.enabled {
+        return Err(ToolError::new(ERR_DISABLED, "命令执行已被策略禁用（ai-policy.json exec.enabled=false）"));
+    }
+    let cls = classify_command(&command, ctx.policy);
+    match cls.action {
+        PolicyAction::Deny => {
+            let pattern = cls.pattern.unwrap_or_default();
+            let which = if cls.reason == "deny-pattern" { "黑名单" } else { "默认拒绝" };
+            return Err(ToolError::new(
+                ERR_POLICY_DENIED,
+                format!("命令被安全策略拒绝（命中{which}规则: {pattern}）"),
+            ));
+        }
+        PolicyAction::Ask => {
+            let elevation = if sudo { "（sudo 提权，以 root 执行）" } else { "" };
+            let approved = approver
+                .approve(&format!(
+                    "允许 AI 在主机 {} 上执行命令？{}\n\n{}",
+                    host_label_of(ctx.stores, host_id),
+                    elevation,
+                    command
+                ))
+                .await?;
+            if !approved {
+                return Err(ToolError::new(ERR_ELICIT_DECLINED, "用户拒绝了该命令执行"));
+            }
+        }
+        PolicyAction::Allow => {}
+    }
+    let requested = args.get("timeoutMs").and_then(|v| v.as_u64()).unwrap_or(0);
+    let timeout = if requested == 0 {
+        ctx.policy.limits.exec_timeout_ms.min(30_000)
+    } else {
+        requested.clamp(1000, ctx.policy.limits.exec_timeout_ms)
+    };
+    let lease = ctx.registry.acquire_transient(host_id, ctx.client).await?;
+
+    // sudo 提权执行：NOPASSWD 直接跑；需要密码时向用户索取（缓存于进程内存，不落盘）
+    if sudo {
+        let cache_key = format!("sudo-pw:{host_id}");
+        // 缓存命中直接用；未命中先探测 NOPASSWD，仍需密码则向用户索取
+        let password = match ctx.stores.secrets.get(&cache_key) {
+            Some(pw) => Some(pw),
+            None => {
+                // 先探测非交互 sudo（sudoers NOPASSWD / 免密规则可直接执行）
+                let probe = lease
+                    .conn
+                    .exec(&format!("sudo -n -p '' {command}"), timeout, ctx.policy.limits.max_exec_output_bytes)
+                    .await
+                    .map_err(|e| ToolError::new(ERR_EXEC_FAILED, e))?;
+                if !needs_password(&probe) {
+                    detail.insert("exitCode".into(), serde_json::json!(probe.code));
+                    return Ok(exec_output_json(&probe));
+                }
+                // 需要密码：弹卡片向用户索取 sudo 密码（通道不支持输入时只能作罢）
+                match approver
+                    .request_secret(
+                        "sudo 提权",
+                        &format!("命令需要 root 权限，请输入主机 {} 上 {} 的 sudo 密码：",
+                            host_label_of(ctx.stores, host_id),
+                            host_user_of(ctx.stores, host_id)),
+                    )
+                    .await
+                {
+                    Ok(Some(pw)) => {
+                        ctx.stores.secrets.set(&cache_key, &pw);
+                        Some(pw)
+                    }
+                    _ => None,
+                }
+            }
+        };
+        let Some(pw) = password else {
+            return Err(ToolError::new(ERR_ELICIT_DECLINED, "用户取消了 sudo 提权（未输入密码）"));
+        };
+        let stdin = format!("{pw}\n");
+        let r = lease
+            .conn
+            .exec_with_stdin(
+                &format!("sudo -S -p '' {command}"),
+                stdin.as_bytes(),
+                timeout,
+                ctx.policy.limits.max_exec_output_bytes,
+            )
+            .await
+            .map_err(|e| ToolError::new(ERR_EXEC_FAILED, e))?;
+        // 密码错误：清缓存，下次重新索取（避免坏密码一直复用）
+        if auth_failed(&r) {
+            ctx.stores.secrets.remove(&cache_key);
+        }
+        detail.insert("exitCode".into(), serde_json::json!(r.code));
+        return Ok(exec_output_json(&r));
+    }
+
+    let r = lease
+        .conn
+        .exec(&command, timeout, ctx.policy.limits.max_exec_output_bytes)
+        .await
+        .map_err(|e| ToolError::new(ERR_EXEC_FAILED, e))?;
+    detail.insert("exitCode".into(), serde_json::json!(r.code));
+    Ok(exec_output_json(&r))
+}
+
+/// 交互式 SSH 控制台命令（仅桌宠通道）：在主机 PTY shell 中执行命令，
+/// 输出流式回传前端实时显示，用户可在运行中介入输入（输入框 / Ctrl+C）。
+/// PTY 无退出码通知：命令末尾追加 echo 完成标记，正则抓退出码
+/// （终端回显里是未展开的 "$?"，不会误匹配数字）。
+async fn run_console_command(
+    ctx: &mut ToolCtx<'_>,
+    approver: &dyn Approver,
+    args: &serde_json::Value,
+    detail: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, ToolError> {
+    let host_id = args.get("hostId").and_then(|v| v.as_str()).unwrap_or_default();
+    let command = args.get("command").and_then(|v| v.as_str()).unwrap_or_default().to_string();
     detail.insert("command".into(), serde_json::json!(command));
 
     if !ctx.policy.exec.enabled {
@@ -335,7 +505,7 @@ async fn run_exec_command(
         PolicyAction::Ask => {
             let approved = approver
                 .approve(&format!(
-                    "允许 AI 在主机 {} 上执行命令？\n\n{}",
+                    "允许 AI 在主机 {} 的 SSH 控制台中执行命令？\n\n{}",
                     host_label_of(ctx.stores, host_id),
                     command
                 ))
@@ -346,26 +516,109 @@ async fn run_exec_command(
         }
         PolicyAction::Allow => {}
     }
-    let requested = args.get("timeoutMs").and_then(|v| v.as_u64()).unwrap_or(0);
-    let timeout = if requested == 0 {
-        ctx.policy.limits.exec_timeout_ms.min(30_000)
-    } else {
-        requested.clamp(1000, ctx.policy.limits.exec_timeout_ms)
+    let Some(console) = ctx.console.as_mut() else {
+        return Err(ToolError::new(ERR_ELICIT_UNSUPPORTED, "该通道不支持交互式控制台"));
     };
     let lease = ctx.registry.acquire_transient(host_id, ctx.client).await?;
-    let r = lease
+    let pty = lease
         .conn
-        .exec(&command, timeout, ctx.policy.limits.max_exec_output_bytes)
+        .open_pty_shell()
         .await
-        .map_err(|e| ToolError::new(ERR_EXEC_FAILED, e))?;
-    detail.insert("exitCode".into(), serde_json::json!(r.code));
+        .map_err(|e| ToolError::new(ERR_EXEC_FAILED, e.message()))?;
+    let Some(mut reader) = pty.reader.lock().unwrap().take() else {
+        return Err(ToolError::new(ERR_EXEC_FAILED, "PTY 读通道不可用"));
+    };
+
+    let wrapped = if command.contains('\n') {
+        format!("{command}\necho \"__BG_DONE_$?__\"\n")
+    } else {
+        format!("{command}; echo \"__BG_DONE_$?__\"\n")
+    };
+    pty.write_input(wrapped.as_bytes())
+        .await
+        .map_err(|e| ToolError::new(ERR_EXEC_FAILED, format!("写入控制台失败：{e}")))?;
+
+    let max_bytes = ctx.policy.limits.max_exec_output_bytes;
+    let marker = Regex::new(r"__BG_DONE_(\d+)__").expect("内置正则");
+    let mut out: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    // 跨块扫描窗口：保留最近 64 字符，防完成标记被 PTY 分块截断漏检
+    let mut tail = String::new();
+    let mut exit_code: Option<i32> = None;
+    loop {
+        let msg = tokio::select! {
+            m = reader.wait() => m,
+            // 用户介入：输入框文本（已含换行）或 "\x03"（Ctrl+C）直接写入 PTY stdin
+            Some(text) = console.input.recv() => {
+                if pty.write_input(text.as_bytes()).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
+        let Some(msg) = msg else { break };
+        let chunk = match msg {
+            russh::ChannelMsg::Data { ref data } => data,
+            russh::ChannelMsg::ExtendedData { ref data, .. } => data,
+            _ => continue,
+        };
+        let text = String::from_utf8_lossy(chunk).into_owned();
+        if !text.is_empty() {
+            (console.emit)(text.clone());
+        }
+        crate::ssh::collect_text(&mut out, chunk, max_bytes, &mut truncated);
+        tail.push_str(&text);
+        if let Some(caps) = marker.captures(&tail) {
+            exit_code = caps.get(1).and_then(|m| m.as_str().parse().ok());
+            break;
+        }
+        let cnt = tail.chars().count();
+        if cnt > 64 {
+            tail = tail.chars().skip(cnt - 64).collect();
+        }
+    }
+
+    // 去掉完成标记（终端回显的未展开 "$?" 版本不匹配数字，无需处理）
+    let stdout = marker.replace(&String::from_utf8_lossy(&out), "").into_owned();
+    detail.insert("exitCode".into(), serde_json::json!(exit_code));
     Ok(serde_json::json!({
+        "exitCode": exit_code,
+        "stdout": stdout,
+        "stderr": "",
+        "truncated": truncated,
+        "timedOut": false,
+    }))
+}
+
+/// sudo -n 探测结果是否表明「需要密码」（而非命令本身失败/无 sudo 权限）
+fn needs_password(r: &crate::ssh::ExecOutput) -> bool {
+    if r.code == Some(0) {
+        return false;
+    }
+    let stderr = r.stderr.to_lowercase();
+    stderr.contains("password") || stderr.contains("密码")
+}
+
+/// sudo -S 结果是否为认证失败（密码错误），需作废缓存的密码
+fn auth_failed(r: &crate::ssh::ExecOutput) -> bool {
+    let stderr = r.stderr.to_lowercase();
+    (stderr.contains("incorrect password") || stderr.contains("try again") || stderr.contains("密码错误") || stderr.contains("认证失败"))
+        && r.code != Some(0)
+}
+
+fn exec_output_json(r: &crate::ssh::ExecOutput) -> serde_json::Value {
+    serde_json::json!({
         "exitCode": r.code,
         "stdout": r.stdout,
         "stderr": r.stderr,
         "truncated": r.truncated,
         "timedOut": r.timed_out,
-    }))
+    })
+}
+
+/// 主机登录用户名（sudo 密码提示用）
+fn host_user_of(stores: &Stores, host_id: &str) -> String {
+    stores.hosts.get(host_id).map(|h| h.input.username.clone()).unwrap_or_else(|| "登录用户".into())
 }
 
 async fn run_write_file(
@@ -392,16 +645,11 @@ async fn run_write_file(
     );
     guard_write(ctx, approver, &describe).await?;
 
-    let lease = ctx.registry.acquire_sftp(host_id, ctx.client).await?;
+    let lease = acquire_sftp_deadline(ctx, host_id).await?;
     let sftp = &lease.sftp;
-    let flags_append = russh_sftp::protocol::OpenFlags::WRITE
-        | russh_sftp::protocol::OpenFlags::CREATE
-        | russh_sftp::protocol::OpenFlags::APPEND;
-    let opened = if mode == "append" {
-        sftp.open_with_flags(path, flags_append).await
-    } else {
-        sftp.create(path).await
-    };
+    // 打开带 15s 超时：无写权限服务器即时拒绝（毫秒级），半开死连接快速
+    // 失败（原先会一直挂到 600s 工具总预算）
+    let opened = crate::sftp::open_remote_write(sftp, path, mode == "append").await;
     let write_result: Result<(), String> = match opened {
         Ok(mut file) => async move {
             file.write_all(bytes).await.map_err(|e| e.to_string())?;
@@ -412,8 +660,11 @@ async fn run_write_file(
         }
         .await
         .map_err(|e| e),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(e),
     };
+    if let Err(e) = &write_result {
+        evict_on_network(ctx, host_id, e);
+    }
     write_result.map_err(|e| ToolError::new(ERR_SFTP_FAILED, format!("路径 {path}: {e}")))?;
     Ok(serde_json::json!({ "path": path, "mode": mode, "bytes": bytes.len() }))
 }
@@ -429,11 +680,12 @@ async fn run_make_dir(
     detail.insert("path".into(), serde_json::json!(path));
     let describe = format!("主机 {}\n新建目录: {path}", host_label_of(ctx.stores, host_id));
     guard_write(ctx, approver, &describe).await?;
-    let lease = ctx.registry.acquire_sftp(host_id, ctx.client).await?;
+    let lease = acquire_sftp_deadline(ctx, host_id).await?;
     let ctrl = SftpController::from_shared(lease.sftp.clone());
-    ctrl.mkdir(path)
-        .await
-        .map_err(|e| ToolError::new(ERR_SFTP_FAILED, format!("路径 {path}: {e}")))?;
+    if let Err(e) = ctrl.mkdir(path).await {
+        evict_on_network(ctx, host_id, &e);
+        return Err(ToolError::new(ERR_SFTP_FAILED, format!("路径 {path}: {e}")));
+    }
     Ok(serde_json::json!({ "path": path }))
 }
 
@@ -450,11 +702,12 @@ async fn run_rename_path(
     detail.insert("to".into(), serde_json::json!(to));
     let describe = format!("主机 {}\n{from} → {to}", host_label_of(ctx.stores, host_id));
     guard_write(ctx, approver, &describe).await?;
-    let lease = ctx.registry.acquire_sftp(host_id, ctx.client).await?;
+    let lease = acquire_sftp_deadline(ctx, host_id).await?;
     let ctrl = SftpController::from_shared(lease.sftp.clone());
-    ctrl.rename(from, to)
-        .await
-        .map_err(|e| ToolError::new(ERR_SFTP_FAILED, format!("{from}: {e}")))?;
+    if let Err(e) = ctrl.rename(from, to).await {
+        evict_on_network(ctx, host_id, &e);
+        return Err(ToolError::new(ERR_SFTP_FAILED, format!("重命名 {from} → {to}: {e}")));
+    }
     Ok(serde_json::json!({ "from": from, "to": to }))
 }
 
@@ -480,11 +733,12 @@ async fn run_delete_path(
         if recursive { "（递归删除整个目录树）" } else { "" }
     );
     guard_write(ctx, approver, &describe).await?;
-    let lease = ctx.registry.acquire_sftp(host_id, ctx.client).await?;
+    let lease = acquire_sftp_deadline(ctx, host_id).await?;
     let ctrl = SftpController::from_shared(lease.sftp.clone());
-    ctrl.rm(path, recursive)
-        .await
-        .map_err(|e| ToolError::new(ERR_SFTP_FAILED, format!("路径 {path}: {e}")))?;
+    if let Err(e) = ctrl.rm(path, recursive).await {
+        evict_on_network(ctx, host_id, &e);
+        return Err(ToolError::new(ERR_SFTP_FAILED, format!("路径 {path}: {e}")));
+    }
     Ok(serde_json::json!({ "path": path, "recursive": recursive }))
 }
 
@@ -659,7 +913,7 @@ async fn run_sftp_transfer(
 
     // 1) 预检（与前端 preflight op 同一实现：重名/权限/剩余空间/目标盘格式）
     //    lease 守卫保证长传输期间连接不被空闲回收
-    let lease = ctx.registry.acquire_sftp(&host_id, ctx.client).await?;
+    let lease = acquire_sftp_deadline(ctx, &host_id).await?;
     let sftp = lease.sftp.clone();
     let ctrl = SftpController::from_shared(sftp.clone());
     let (src, dst) = if upload {
@@ -667,15 +921,30 @@ async fn run_sftp_transfer(
     } else {
         (remote_path.as_str(), local_path.as_str())
     };
-    let report = crate::session::build_preflight_report(
-        &ctrl,
-        if upload { "upload" } else { "download" },
-        src,
-        dst,
-        None,
+    // 预检整体 15s 兜底：内部多为远端元数据操作，半开死连接快速失败并驱逐
+    // （原先会挂到 600s 工具总预算）；权限探针本身毫秒级完成
+    let report = match tokio::time::timeout(
+        crate::sftp::SFTP_META_DEADLINE,
+        crate::session::build_preflight_report(
+            &ctrl,
+            if upload { "upload" } else { "download" },
+            src,
+            dst,
+            None,
+        ),
     )
     .await
-    .map_err(|e| ToolError::new(ERR_SFTP_FAILED, format!("传输预检失败：{e}")))?;
+    {
+        Ok(r) => r.map_err(|e| {
+            evict_on_network(ctx, &host_id, &e);
+            ToolError::new(ERR_SFTP_FAILED, format!("传输预检失败：{e}"))
+        })?,
+        Err(_) => {
+            let msg = "传输预检失败：preflight timeout (15s)".to_string();
+            evict_on_network(ctx, &host_id, &msg);
+            return Err(ToolError::new(ERR_SFTP_FAILED, msg));
+        }
+    };
     if let Ok(v) = serde_json::to_value(&report) {
         detail.insert("preflight".into(), v);
     }
@@ -769,9 +1038,7 @@ async fn run_sftp_transfer(
         }
         Err(e) => {
             // 网络类错误：连接大概率已坏，驱逐注册表条目（下次操作自动重建）
-            if crate::sftp::classify_sftp_error(&e).as_deref() == Some("network") {
-                ctx.registry.evict(&host_id, "connection-error");
-            }
+            evict_on_network(ctx, &host_id, &e);
             Err(ToolError::new(ERR_SFTP_FAILED, format!("传输中断：{e}")))
         }
     }
@@ -973,11 +1240,20 @@ fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "exec_command", title: "执行远程命令", read_only: false, destructive: false,
-            desc: "在目标主机上执行一次性非交互命令（ssh exec 通道），返回 stdout/stderr/退出码。命令经安全策略分级：内置黑名单直接拒绝；只读/白名单直接放行；其余需用户审批。超时默认 30s（可传 timeoutMs，受策略上限钳制），输出超 64KB 截断。",
+            desc: "在目标主机上执行一次性非交互命令（ssh exec 通道），返回 stdout/stderr/退出码。命令经安全策略分级：内置黑名单直接拒绝；只读/白名单直接放行；其余需用户审批。超时默认 30s（可传 timeoutMs，受策略上限钳制），输出超 64KB 截断。需要 root 权限的操作（如系统目录建删、systemctl、写 /etc）传 sudo=true：已配置 NOPASSWD 时直接执行，否则弹卡片请用户输入 sudo 密码。",
             params: serde_json::json!({
                 "hostId": { "type": "string", "description": "主机 id（先用 list_hosts 查询）" },
                 "command": { "type": "string", "description": "要执行的命令（非交互；交互式命令会因 stdin 关闭而失败）" },
+                "sudo": { "type": "boolean", "description": "以 sudo 提权执行（默认 false）。SFTP 类工具（make_dir/write_file/delete_path 等）无法提权，遇到 Permission denied 时改用本工具 + sudo" },
                 "timeoutMs": { "type": "integer", "minimum": 1000, "description": "超时毫秒数（受策略上限钳制）" } }),
+            required: &["hostId", "command"],
+        },
+        ToolSpec {
+            name: "console_command", title: "SSH 控制台执行命令", read_only: false, destructive: false,
+            desc: "在主机的交互式 SSH 控制台（PTY）中执行命令：输出实时显示给用户，用户可以在控制台里直接介入输入（也能按 Ctrl+C），结束后你拿到完整输出与退出码。适合交互式/长驻命令（top、tail -f、向导式安装、需要用户现场输入的场景），也适合需要用户在控制台里亲手输 sudo 密码的提权操作。命令与 exec_command 走同一套安全策略；结束方式：命令自然结束（打印退出码），或用户终止。",
+            params: serde_json::json!({
+                "hostId": { "type": "string", "description": "主机 id（先用 list_hosts 查询）" },
+                "command": { "type": "string", "description": "要执行的命令（可以是交互式命令；需要提权时让用户在控制台里输密码）" } }),
             required: &["hostId", "command"],
         },
         ToolSpec {
@@ -1071,6 +1347,8 @@ fn tool_specs() -> Vec<ToolSpec> {
 pub fn mcp_tool_defs() -> serde_json::Value {
     serde_json::json!(tool_specs()
         .into_iter()
+        // 控制台工具依赖桌宠 UI 的实时介入，MCP 通道不暴露
+        .filter(|t| t.name != "console_command")
         .map(|t| {
             let mut annotations = serde_json::Map::new();
             if t.read_only {

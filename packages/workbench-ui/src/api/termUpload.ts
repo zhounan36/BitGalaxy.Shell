@@ -326,6 +326,40 @@ export function cancelTermDownload(sid: string, opId: string): void {
   void sftpRequest(sid, { op: 'transfer-cancel', opId })
 }
 
+// ── 终端选区删除（右键菜单「删除所选」）──────────────────────────────────
+
+/** 选区解析出的远端删除目标（isDir 由父目录 ls 自动识别） */
+export interface TermDeleteTarget {
+  name: string
+  isDir: boolean
+  remotePath: string
+}
+
+/** 终端选区 → 远端删除目标：cwd/父目录 ls 确认存在并自动识别文件/文件夹 */
+export async function resolveSelectionTarget(
+  sid: string,
+  rawName: string,
+): Promise<TermDeleteTarget | { error: string }> {
+  const picked = rawName.replace(/\/+$/, '')
+  const abs = picked.startsWith('/')
+  const cwd = await resolveRemoteCwd(sid)
+  if ('error' in cwd) return { error: cwd.error }
+  const parentDir = abs ? picked.slice(0, picked.lastIndexOf('/')) || '/' : cwd.dir
+  const leaf = picked.slice(picked.lastIndexOf('/') + 1)
+  const hit = await statByName(sid, parentDir, leaf)
+  if (!hit) return { error: `在 ${parentDir} 中未找到「${leaf}」（选区需为完整文件/文件夹名）` }
+  return { name: hit.entry.name, isDir: hit.entry.type === 'dir', remotePath: join(hit.parent, hit.entry.name) }
+}
+
+/** 删除远端文件/文件夹（目录递归）；递归删除大目录合法耗时长，超时放宽到 10 分钟 */
+export async function deleteRemoteTarget(
+  sid: string,
+  target: TermDeleteTarget,
+): Promise<{ ok: boolean; message?: string }> {
+  const r = await sftpRequest(sid, { op: 'rm', path: target.remotePath, recursive: target.isDir }, 10 * 60 * 1000)
+  return r.ok ? { ok: true } : { ok: false, message: r.message ?? '删除失败' }
+}
+
 /**
  * 下载终端选区指定的远端文件/文件夹：
  *  解析选区（相对当前目录 / 绝对路径）→ 父目录 ls 确认类型 →
@@ -449,9 +483,13 @@ export async function downloadSelectionFromSession(
     st = { ...st, transferred: received }
     onState(st)
   })
+  // 打开/读取失败（无读权限、连接断开）由 download-done(ok=false) 即刻回报，
+  // 不再静默等满 20 分钟兜底超时
+  let done: { ok: boolean; message?: string; errorKind?: string } = { ok: false, message: '下载超时（20 分钟无进展）' }
   await new Promise<void>((resolve) => {
     const offCtl = agentSocket.onControl((frame) => {
       if (frame.t === 'sftp-result' && frame.s === sid && frame.m.op === 'download-done' && frame.m.opId === key) {
+        done = { ok: frame.m.ok, message: frame.m.message, errorKind: frame.m.errorKind }
         clearTimeout(timer)
         offCtl()
         resolve()
@@ -465,6 +503,12 @@ export async function downloadSelectionFromSession(
   })
   offChunk()
   agentSocket.sendControl({ t: 'sftp', s: sid, m: { op: 'download-close', opId: key, rid: crypto.randomUUID() } })
+  if (!done.ok) {
+    showTransferError(`下载 ${entry.name} 失败`, done.errorKind, done.message)
+    st = { ...st, status: 'error', message: done.message ?? '下载失败' }
+    onState(st)
+    return st
+  }
   const blob = new Blob(chunks as unknown as BlobPart[])
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)

@@ -9,7 +9,11 @@
   "app": {
     "windows": [],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/bitgalaxy-shell/pet-packs/**"]
+      }
     }
   },
   "bundle": {

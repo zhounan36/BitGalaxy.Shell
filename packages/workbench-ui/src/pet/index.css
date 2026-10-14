@@ -464,6 +464,302 @@ html.in-tauri body {
   color: #ffd7d7;
 }
 
+/* 助手消息 Markdown 排版（.chat-msg 的 pre-wrap/break-all 会破坏 Md 排版，此处重置） */
+.chat-md {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.chat-md > :first-child {
+  margin-top: 0;
+}
+
+.chat-md > :last-child {
+  margin-bottom: 0;
+}
+
+.chat-md p {
+  margin: 6px 0;
+}
+
+.chat-md h1,
+.chat-md h2,
+.chat-md h3,
+.chat-md h4 {
+  margin: 10px 0 6px;
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+
+.chat-md h1 {
+  font-size: 15px;
+}
+
+.chat-md h2 {
+  font-size: 14px;
+}
+
+.chat-md h3,
+.chat-md h4 {
+  font-size: 13px;
+}
+
+.chat-md ul,
+.chat-md ol {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+
+.chat-md li {
+  margin: 2px 0;
+}
+
+.chat-md code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: rgba(127, 165, 255, 0.12);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.chat-md pre {
+  margin: 8px 0;
+  padding: 8px 10px;
+  background: rgba(8, 16, 24, 0.75);
+  border: 1px solid rgba(127, 165, 255, 0.14);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+
+.chat-md pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.chat-md blockquote {
+  margin: 6px 0;
+  padding: 2px 10px;
+  border-left: 3px solid var(--accent);
+  color: var(--text-secondary);
+}
+
+.chat-md a {
+  color: var(--accent-bright);
+}
+
+.chat-md table {
+  margin: 8px 0;
+  border-collapse: collapse;
+  font-size: 12px;
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+}
+
+.chat-md th,
+.chat-md td {
+  border: 1px solid rgba(127, 165, 255, 0.2);
+  padding: 4px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.chat-md th {
+  background: rgba(127, 165, 255, 0.1);
+}
+
+.chat-md hr {
+  border: none;
+  border-top: 1px solid rgba(127, 165, 255, 0.2);
+  margin: 10px 0;
+}
+
+/* 历史会话管理抽屉：覆盖整个对话面板 */
+.chat-hist {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: var(--float-chat);
+  animation: bubble-in 140ms ease;
+}
+
+.chat-hist-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-hist-item {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  overflow: hidden;
+  transition: border-color 120ms ease;
+}
+
+.chat-hist-item:hover {
+  border-color: rgba(127, 165, 255, 0.35);
+}
+
+/* 待确认删除：红色描边提醒 */
+.chat-hist-item-danger {
+  border-color: rgba(240, 140, 140, 0.55);
+}
+
+.chat-hist-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 10px;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-size: 12.5px;
+}
+
+.chat-hist-preview {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-hist-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.chat-hist-del {
+  border: none;
+  border-left: 1px solid var(--border-subtle);
+  background: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 0 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chat-hist-del:hover {
+  color: #f0a0a0;
+}
+
+.chat-hist-del-confirm {
+  color: #ff8f8f;
+  background: rgba(224, 87, 105, 0.18);
+}
+
+/* 头部按钮禁用态（历史按钮在执行中禁用） */
+.chat-close:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── SSH 控制台卡片（console_command）：终端风格，与 MCP 工具卡片区分 ── */
+.chat-tool-console {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 6px;
+  padding: 6px;
+  border-radius: var(--radius-md);
+  /* 终端底色：深黑绿，压过普通工具卡片的浅色边框风格 */
+  background: rgba(6, 14, 10, 0.92);
+  border: 1px solid rgba(111, 207, 151, 0.28);
+}
+
+.chat-tool-console .chat-tool-name {
+  color: #6fcf97;
+}
+
+.chat-tool-console .chat-tool-detail {
+  color: #9adbb4;
+  background: rgba(111, 207, 151, 0.1);
+}
+
+/* 终端输出区：实时滚动、等宽、保留 ANSI 排版 */
+.chat-console-out {
+  flex: 1 1 100%;
+  order: 5;
+  margin: 2px 0 0;
+  padding: 7px 9px;
+  min-height: 34px;
+  max-height: 240px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  color: #c9e8d3;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 6px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 介入输入行：运行中显示（用户与 AI 共用同一 PTY 会话） */
+.chat-console-input {
+  flex: 1 1 100%;
+  order: 6;
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.chat-console-field {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid rgba(111, 207, 151, 0.22);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #d7f2e1;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  padding: 5px 8px;
+  outline: none;
+}
+
+.chat-console-field:focus {
+  border-color: rgba(111, 207, 151, 0.55);
+}
+
+.chat-console-field::placeholder {
+  color: rgba(154, 219, 180, 0.45);
+}
+
+.chat-console-ctrl {
+  border: 1px solid rgba(240, 160, 160, 0.35);
+  border-radius: 6px;
+  background: rgba(224, 87, 105, 0.12);
+  color: #f0a0a0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.chat-console-ctrl:hover {
+  background: rgba(224, 87, 105, 0.22);
+}
+
 .chat-busy {
   align-self: flex-start;
   font-size: 12px;
@@ -847,4 +1143,171 @@ html.in-tauri body {
 .chat-send:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* ── 动作包管理面板（复用 chat-panel 外壳）────────────────────────────── */
+.pack-panel {
+  height: 380px;
+}
+
+.pack-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.pack-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+
+.pack-error {
+  font-size: 12px;
+  color: #f08a8a;
+  background: rgba(240, 138, 138, 0.12);
+  border: 1px solid rgba(240, 138, 138, 0.4);
+  border-radius: 7px;
+  padding: 7px 9px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.pack-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pack-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.pack-row-active {
+  border-color: var(--accent-border);
+  background: rgba(59, 166, 216, 0.12);
+}
+
+.pack-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.pack-name {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pack-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.pack-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.pack-btn {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+.pack-btn:hover:enabled {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.pack-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.pack-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.pack-btn-danger {
+  color: #f08a8a;
+  border-color: rgba(240, 138, 138, 0.4);
+}
+
+/* 二次确认态：强调为危险色，2.5s 未确认自动还原 */
+.pack-btn-armed {
+  background: rgba(240, 138, 138, 0.3);
+  border-color: #f08a8a;
+  color: #ffd7d7;
+}
+
+.pack-import {
+  padding: 8px 12px;
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+}
+
+.pack-import:hover:enabled {
+  background: var(--accent-hover);
+}
+
+.pack-spec-toggle {
+  border: none;
+  background: none;
+  color: var(--accent-bright);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 0;
+  text-align: left;
+}
+
+.pack-spec {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.7;
+  border-left: 2px solid var(--accent);
+  padding: 4px 8px;
+  animation: bubble-in 140ms ease;
+}
+
+.pack-spec p {
+  margin: 4px 0;
+}
+
+.pack-spec pre {
+  margin: 4px 0;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-x: auto;
+}
+
+.pack-link {
+  color: var(--accent-bright);
+  font-size: 12px;
 }

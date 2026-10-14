@@ -65,6 +65,8 @@ export type SftpRequest =
   | { op: 'upload-close'; opId: string }
   | { op: 'download-open'; path: string }
   | { op: 'download-close'; opId: string }
+  /** 签发拖出下载能力基址（dlBase，会话级缓存；dragstart 内不能 await，故提前取） */
+  | { op: 'dl-open' }
   /** 传输预检：重名/权限/剩余空间/目标盘格式（上传下载共用，报告随 sftp-result 返回） */
   | { op: 'preflight'; path: string; to: string; direction: 'upload' | 'download'; sizeB?: number }
   /** 原生传输（Agent 直传本地磁盘，断点续传）：下载远端文件到本地路径 */
@@ -155,6 +157,8 @@ export interface SftpResult {
   errorKind?: SftpErrorKind | string
   /** preflight op 的预检报告 */
   preflight?: PreflightReport
+  /** dl-open op 附带：拖出下载能力基址（http://127.0.0.1:port/dl/{token}） */
+  dlBase?: string
 }
 
 /** 原生传输进度（get/put 系列任务；旧字段 opId/transferred/total 与流式下载共用） */
@@ -234,6 +238,16 @@ export interface AiApprovalRequest {
   command: string
 }
 
+/** AI 请求用户输入敏感信息（sudo 密码等）；回包 AiOp op:"input-reply" */
+export interface AiInputRequest {
+  chatId: string
+  reqId: string
+  title: string
+  prompt: string
+  /** true = 密码框（不回显） */
+  secret: boolean
+}
+
 /** AI 工具调用事件：running 先推（卡片 spinner + 单条终止），终态同 toolCallId 更新 */
 export interface AiToolEvent {
   chatId: string
@@ -252,6 +266,43 @@ export type AiOp =
   | { op: 'cancel'; chatId: string }
   /** 只终止 toolCallId 对应的单条命令，对话继续 */
   | { op: 'cancel-tool'; chatId: string; toolCallId: string }
+  /** 查询对话历史（chatId 缺省 = 最近一次对话；记录持久化在 Agent SQLite） */
+  | { op: 'history'; chatId?: string }
+  /** 历史会话列表（管理面板：复原 / 删除） */
+  | { op: 'history-list' }
+  /** 删除一个会话的全部记录；Agent 回最新 ai-chats 列表 */
+  | { op: 'history-delete'; chatId: string }
+  /** 用户介入 SSH 控制台（console_command 运行中）：text 直接写入 PTY stdin（'\x03' = Ctrl+C） */
+  | { op: 'console-input'; chatId: string; toolCallId: string; text: string }
+  /** 敏感输入回包（sudo 密码等）：value 缺省/空 = 取消 */
+  | { op: 'input-reply'; chatId: string; reqId: string; value?: string }
+
+/** 一条持久化的对话记录（Agent SQLite chat_messages 行，字段与前端 ChatMsg 对应） */
+export interface AiHistoryMessage {
+  id: number
+  chatId: string
+  role: 'user' | 'assistant' | 'tool'
+  content?: string
+  thinking?: string
+  error?: boolean
+  tool?: {
+    id: string
+    name: string
+    detail?: string
+    stage: 'running' | 'done' | 'failed' | 'cancelled'
+    summary?: string
+    output?: string
+  }
+  createdAt: string
+}
+
+/** 历史会话列表条目（ai-chats 帧）：preview = 会话第一条用户消息 */
+export interface AiChatSummary {
+  chatId: string
+  preview?: string
+  msgCount: number
+  lastAt: string
+}
 
 // ── 设置（SQLite 键值存储，统一配置读写）──────────────────────────────────
 
@@ -334,7 +385,12 @@ export type ServerFrame =
   | { t: 'ai-delta'; m: { chatId: string; delta: string } }
   | { t: 'ai-result'; m: { chatId: string; ok: boolean; text: string; message?: string } }
   | { t: 'ai-approval'; m: AiApprovalRequest }
+  | { t: 'ai-input'; m: AiInputRequest }
   | { t: 'ai-tool'; m: AiToolEvent }
+  | { t: 'ai-history'; m: { chatId: string; messages: AiHistoryMessage[] } }
+  | { t: 'ai-chats'; m: { chats: AiChatSummary[] } }
+  /** SSH 控制台输出增量（console_command 运行中流式回传） */
+  | { t: 'ai-console'; m: { chatId: string; toolCallId: string; delta: string } }
   | { t: 'settings-result'; m: SettingsResult }
   | { t: 'error'; s?: string; m: { code: string; message: string } }
 

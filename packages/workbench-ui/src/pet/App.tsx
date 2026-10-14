@@ -3,6 +3,7 @@ import { Bubble } from './components/Bubble'
 import { ChatPanel } from './components/ChatPanel'
 import { DebugPanel } from './components/DebugPanel'
 import { PetMenu } from './components/PetMenu'
+import { PetPackPanel } from './components/PetPackPanel'
 import { PetSprite } from './components/PetSprite'
 import {
   applyPetWindowSize,
@@ -17,9 +18,12 @@ import {
   startWindowDrag,
 } from './api/tauri'
 import { usePet } from './pet/usePet'
+import { usePetPack } from './pack/usePetPack'
 
 export function App() {
   const { view, dispatch } = usePet()
+  // 动作包：动画与动作解绑——runtime 决定「哪个动作播哪段动画」（用户包覆盖，缺省回落内置）
+  const { runtime, activePack, packs, refresh: refreshPacks } = usePetPack()
   // 浏览器宿主：拖拽在窗口内移动精灵；Tauri 宿主：拖拽交给原生窗口移动
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
   const anchorRef = useRef<HTMLDivElement>(null)
@@ -29,6 +33,8 @@ export function App() {
   // 右键菜单内的主机数量：PetMenu 上报，用于扩宠物窗高度（多主机时菜单不被窗口顶部裁剪）
   const [menuHosts, setMenuHosts] = useState(0)
   const [chatOpen, setChatOpen] = useState(false)
+  // 动作包管理面板开合（与 chat 面板互斥，同时只开一个）
+  const [packOpen, setPackOpen] = useState(false)
   const [dropHover, setDropHover] = useState(false)
   // 精灵尺寸（滚轮缩放，localStorage 持久化；Tauri 宿主联动窗口尺寸，浏览器宿主仅缩 DOM）
   const [petSize, setPetSize] = useState(loadPetSize)
@@ -38,9 +44,9 @@ export function App() {
   const applyChainRef = useRef(Promise.resolve())
   useEffect(() => {
     applyChainRef.current = applyChainRef.current
-      .then(() => applyPetWindowSize(petSize, chatOpen, menuOpen ? menuHosts : 0))
+      .then(() => applyPetWindowSize(petSize, chatOpen, menuOpen ? menuHosts : 0, packOpen))
       .catch((err) => console.error('applyPetWindowSize failed', err))
-  }, [petSize, chatOpen, menuOpen, menuHosts])
+  }, [petSize, chatOpen, menuOpen, menuHosts, packOpen])
 
   // OS 级文件拖放（仅 Tauri 宿主）：悬停亮提示，落下转发工作台开上传面板
   useEffect(() => {
@@ -131,11 +137,26 @@ export function App() {
       {menuOpen && (
         <PetMenu
           onClose={() => setMenuOpen(false)}
-          onOpenChat={() => setChatOpen(true)}
+          onOpenChat={() => {
+            setPackOpen(false)
+            setChatOpen(true)
+          }}
+          onOpenPacks={() => {
+            setChatOpen(false)
+            setPackOpen(true)
+          }}
           onHostsChange={setMenuHosts}
         />
       )}
       <ChatPanel open={chatOpen} onClose={() => setChatOpen(false)} />
+      {packOpen && (
+        <PetPackPanel
+          packs={packs}
+          activePackId={activePack?.id ?? null}
+          onChanged={() => void refreshPacks()}
+          onClose={() => setPackOpen(false)}
+        />
+      )}
       <div
         ref={anchorRef}
         className="pet-anchor"
@@ -150,6 +171,7 @@ export function App() {
         {!menuOpen && <Bubble view={view} />}
         <PetSprite
           state={view.state}
+          runtime={runtime}
           size={petSize}
           onPointerEnter={() => dispatch({ type: 'pointer-enter' })}
           onPoke={() => {

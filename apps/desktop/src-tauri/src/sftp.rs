@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use russh_sftp::client::fs::File;
+use russh_sftp::client::fs::{File, Metadata};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -200,6 +200,50 @@ fn scan_remote_inner<'a>(
 }
 
 
+/// 快路径远端操作统一超时：池中连接可能已半开（远端已断、本地未感知），
+/// 请求发出后永远等不到回应。15s 无响应报错（消息含 "timeout" 会被
+/// classify_sftp_error 归为 network，上层驱逐池条目后下次自动重建）。
+/// 权限被拒由服务器即时返回（毫秒级），不受该超时影响——两类失败可快速区分。
+pub(crate) const SFTP_META_DEADLINE: Duration = Duration::from_secs(15);
+
+/// stat 元数据（15s 超时）：死连接快速失败，权限/不存在即时返回
+pub(crate) async fn stat_deadline(sftp: &SftpSession, path: &str) -> Result<Metadata, String> {
+    match tokio::time::timeout(SFTP_META_DEADLINE, sftp.metadata(path)).await {
+        Ok(r) => r.map_err(sftp_err),
+        Err(_) => Err(format!("sftp stat timeout (15s): {path}")),
+    }
+}
+
+/// 打开远端文件用于读取（15s 超时）
+pub(crate) async fn open_read_deadline(sftp: &SftpSession, path: &str) -> Result<File, String> {
+    match tokio::time::timeout(SFTP_META_DEADLINE, sftp.open(path)).await {
+        Ok(r) => r.map_err(sftp_err),
+        Err(_) => Err(format!("sftp open timeout (15s): {path}")),
+    }
+}
+
+/// 打开远端文件用于写入（15s 超时）：append=true 走 APPEND 续写，否则
+/// create 截断新建。无写权限时服务器即时拒绝（permission_denied）
+pub(crate) async fn open_remote_write(
+    sftp: &SftpSession,
+    path: &str,
+    append: bool,
+) -> Result<File, String> {
+    let open = async {
+        if append {
+            sftp.open_with_flags(path, OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::APPEND)
+                .await
+        } else {
+            sftp.create(path).await
+        }
+    };
+    match tokio::time::timeout(SFTP_META_DEADLINE, open).await {
+        Ok(r) => r.map_err(sftp_err),
+        Err(_) => Err(format!("sftp open timeout (15s): {path}")),
+    }
+}
+
+
 pub struct SftpController {
     sftp: Arc<SftpSession>,
     uploads: std::sync::Mutex<HashMap<String, UploadHandle>>,
@@ -243,7 +287,11 @@ impl SftpController {
     }
 
     pub async fn realpath(&self, path: &str) -> Result<String, String> {
-        self.sftp.canonicalize(path).await.map_err(sftp_err)
+        // ls 的首请求：半开死连接在源头快速失败（read_dir 大目录合法慢，不设限）
+        match tokio::time::timeout(SFTP_META_DEADLINE, self.sftp.canonicalize(path)).await {
+            Ok(r) => r.map_err(sftp_err),
+            Err(_) => Err(format!("sftp realpath timeout (15s): {path}")),
+        }
     }
 
     // ── 传输预检（preflight）────────────────────────────────────────────
@@ -397,11 +445,17 @@ impl SftpController {
     }
 
     pub async fn mkdir(&self, path: &str) -> Result<(), String> {
-        self.sftp.create_dir(path).await.map_err(sftp_err)
+        match tokio::time::timeout(SFTP_META_DEADLINE, self.sftp.create_dir(path)).await {
+            Ok(r) => r.map_err(sftp_err),
+            Err(_) => Err(format!("sftp mkdir timeout (15s): {path}")),
+        }
     }
 
     pub async fn rename(&self, from: &str, to: &str) -> Result<(), String> {
-        self.sftp.rename(from, to).await.map_err(sftp_err)
+        match tokio::time::timeout(SFTP_META_DEADLINE, self.sftp.rename(from, to)).await {
+            Ok(r) => r.map_err(sftp_err),
+            Err(_) => Err(format!("sftp rename timeout (15s): {from} → {to}")),
+        }
     }
 
     pub async fn rm(&self, path: &str, recursive: bool) -> Result<(), String> {
@@ -430,17 +484,15 @@ impl SftpController {
 
     // ── 上传 ──────────────────────────────────────────────────────────────
 
-    /// 打开上传流，返回 opId；块经 upload_chunk 入队，upload_close 收尾
-    pub fn upload_open(&self, path: &str) -> String {
+    /// 打开上传流，返回 opId；create 在此等待完成（15s 超时）——无写权限/
+    /// 死连接在 upload-open 即刻返回错误，前端无需推完全部块才在
+    /// upload-close 发现失败。块经 upload_chunk 入队，upload_close 收尾。
+    pub async fn upload_open(&self, path: &str) -> Result<String, String> {
+        let file = open_remote_write(&self.sftp, path, false).await?;
         let op_id = uuid::Uuid::new_v4().to_string();
-        let sftp = self.sftp.clone();
-        let path = path.to_string();
         let (tx, mut rx) = mpsc::unbounded_channel::<UploadCmd>();
         let done = tokio::spawn(async move {
-            let mut file: File = match sftp.create(&path).await {
-                Ok(f) => f,
-                Err(e) => return Err(sftp_err(e)),
-            };
+            let mut file = file;
             let mut first_err: Option<String> = None;
             while let Some(cmd) = rx.recv().await {
                 match cmd {
@@ -468,7 +520,7 @@ impl SftpController {
             .lock()
             .unwrap()
             .insert(op_id.clone(), UploadHandle { tx, done });
-        op_id
+        Ok(op_id)
     }
 
     pub fn upload_chunk(&self, op_id: &str, chunk: Vec<u8>) {
@@ -490,14 +542,16 @@ impl SftpController {
 
     // ── 下载 ──────────────────────────────────────────────────────────────
 
-    /// 打开下载流：stat 拿大小，后台任务按 64KB 块回送（0x11 数据帧 + 进度）
+    /// 打开下载流：stat 拿大小（15s 超时），后台任务按 64KB 块回送
+    /// （0x11 数据帧 + 进度）。打开/读取失败立即回报 download-done(ok=false)，
+    /// 不能静默结束——否则前端要等满超时才知道失败（无读权限曾表现为 20s 超时）
     pub async fn download_open(
         &self,
         session_id: &str,
         path: &str,
         out: &Outbound,
     ) -> Result<(String, u64), String> {
-        let meta = self.sftp.metadata(path).await.map_err(sftp_err)?;
+        let meta = stat_deadline(&self.sftp, path).await?;
         let size = meta.size.unwrap_or(0);
         let op_id = uuid::Uuid::new_v4().to_string();
         let sftp = self.sftp.clone();
@@ -506,14 +560,24 @@ impl SftpController {
         let out = out.clone();
         let op_id_task = op_id.clone();
         let task = tokio::spawn(async move {
-            let Ok(mut file) = sftp.open(&path).await else {
-                return;
+            let mut file = match open_read_deadline(&sftp, &path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    send_download_done(&out, &session_id, &op_id_task, Some(e));
+                    return;
+                }
             };
             let mut buf = vec![0u8; CHUNK];
             let mut transferred: u64 = 0;
+            let mut read_err: Option<String> = None;
             loop {
                 match file.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
+                    // 读失败（连接断开等）如实回报，不能静默装成功让前端拿残缺数据
+                    Err(e) => {
+                        read_err = Some(sftp_err(e));
+                        break;
+                    }
                     Ok(n) => {
                         transferred += n as u64;
                         let payload = crate::protocol::encode_op_payload(&op_id_task, &buf[..n]);
@@ -539,23 +603,7 @@ impl SftpController {
                     }
                 }
             }
-            use crate::protocol::{ServerFrame, SftpResultM};
-            out.send_frame(&ServerFrame::SftpResult {
-                s: session_id,
-                m: SftpResultM {
-                    op: "download-done".into(),
-                    ok: true,
-                    rid: None,
-                    op_id: Some(op_id_task),
-                    resolved_path: None,
-                    entries: None,
-                    size_b: None,
-                    host: None,
-                    message: None,
-                    error_kind: None,
-                    preflight: None,
-                },
-            });
+            send_download_done(&out, &session_id, &op_id_task, read_err);
         });
         self.downloads.lock().unwrap().insert(op_id.clone(), task);
         Ok((op_id, size))
@@ -942,6 +990,29 @@ impl XferState {
     }
 }
 
+/// WS 流式下载结束帧（message = Some 时 ok=false 并附错误分类）
+fn send_download_done(out: &Outbound, session_id: &str, op_id: &str, message: Option<String>) {
+    let ok = message.is_none();
+    let error_kind = message.as_deref().and_then(classify_sftp_error);
+    out.send_frame(&ServerFrame::SftpResult {
+        s: session_id.to_string(),
+        m: SftpResultM {
+            op: "download-done".into(),
+            ok,
+            rid: None,
+            op_id: Some(op_id.to_string()),
+            resolved_path: None,
+            entries: None,
+            size_b: None,
+            host: None,
+            message,
+            error_kind,
+            preflight: None,
+            dl_base: None,
+        },
+    });
+}
+
 /// 传输结束帧（ok 时 sizeB = 传输字节数；失败时附带错误分类）
 fn send_transfer_done(state: &XferState, sid: &str, ok: bool, bytes: u64, message: Option<String>) {
     let error_kind = message.as_deref().and_then(classify_sftp_error);
@@ -959,6 +1030,7 @@ fn send_transfer_done(state: &XferState, sid: &str, ok: bool, bytes: u64, messag
             message,
             error_kind,
             preflight: None,
+            dl_base: None,
         },
     });
 }

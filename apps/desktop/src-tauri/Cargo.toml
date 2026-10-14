@@ -14,7 +14,7 @@ crate-type = ["rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 # 终端复制/粘贴：WebView2 下 navigator.clipboard.readText 不可靠，走原生剪贴板
@@ -41,6 +41,8 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 # 传输预检：本地磁盘剩余空间（跨平台）
 fs2 = "0.4"
+# 桌宠动作包：用户 DIY 动画 zip 导入（解压 + 校验落盘 pet-packs/）
+zip = "2"
 
 [target.'cfg(windows)'.dependencies]
 # 传输预检：GetVolumeInformationW 查卷格式（FAT32 单文件 4GB 上限）
