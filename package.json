@@ -19,7 +19,8 @@
     "desktop:exe": "npm run desktop:assets && npm run build:exe-only -w @bgshell/desktop",
     "desktop:build": "npm run desktop:assets && npm run build -w @bgshell/desktop",
     "desktop:exe:ssh": "npm run desktop:assets:ssh && npm run build:ssh-exe-only -w @bgshell/desktop",
-    "desktop:build:ssh": "npm run desktop:assets:ssh && npm run build:ssh -w @bgshell/desktop"
+    "desktop:build:ssh": "npm run desktop:assets:ssh && npm run build:ssh -w @bgshell/desktop",
+    "desktop:build-all": "npm run desktop:build && npm run desktop:build:ssh"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",
