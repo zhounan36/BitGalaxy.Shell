@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -27,6 +28,10 @@ struct SessionEntry {
     conn: Option<Arc<SshConnection>>,
     /// shell 会话的 PTY 通道（stdin/resize；与连接分离，同主机多 shell 各自独立）
     pty: Option<Arc<PtyShell>>,
+    /// 串口会话的写通道（kind="serial"；stdin 与 shell 同构走 stdin_tx）
+    serial: Option<Arc<crate::serial::SerialChannel>>,
+    /// 串口读循环任务（关闭时 abort，避免读半部阻塞导致端口句柄不释放）
+    serial_reader: Option<JoinHandle<()>>,
     sftp: Option<Arc<SftpController>>,
     metrics_task: Option<JoinHandle<()>>,
     /// 建连期间到达的 metrics 订阅，就绪后自动启动
@@ -50,6 +55,8 @@ impl SessionEntry {
             host_id: None,
             conn: None,
             pty: None,
+            serial: None,
+            serial_reader: None,
             sftp: None,
             metrics_task: None,
             metrics_pending: None,
@@ -107,7 +114,15 @@ impl SessionManager {
         let kind = opts.kind.clone().unwrap_or_else(|| "shell".into());
         let cols = opts.cols.unwrap_or(80);
         let rows = opts.rows.unwrap_or(24);
+        let serial_opts = opts.serial.clone();
         tokio::spawn(async move {
+            // 串口会话：不走 SSH 主机档案与连接注册表（本机 COM 口无共享复用需求），
+            // 在查主机档案之前分流，直接打开端口做透传
+            if kind == "serial" {
+                this.open_serial(&session_id, serial_opts).await;
+                return;
+            }
+
             let Some(host) = this.stores.hosts.get(&host_id) else {
                 this.fail_open(&session_id, "主机档案不存在");
                 return;
@@ -301,6 +316,99 @@ impl SessionManager {
         self.handle_closed(session_id, &format!("open-failed: {reason}"));
     }
 
+    // ── serial（串口会话）────────────────────────────────────────────────────
+
+    /// 打开串口会话（kind="serial"）：本机 COM 口透传到终端面板。
+    /// 读循环 → DF_STDOUT；stdin 队列 → 专职写任务（与 shell 会话同构）；
+    /// 不进连接注册表，resize 无意义（会话层忽略）。
+    async fn open_serial(&self, session_id: &str, serial_opts: Option<protocol::SerialOptions>) {
+        let Some(serial_opts) = serial_opts else {
+            self.fail_open(session_id, "缺少串口参数（serial.port）");
+            return;
+        };
+        let (channel, mut read) = match crate::serial::SerialChannel::open(&serial_opts) {
+            Ok(x) => x,
+            Err(e) => {
+                self.fail_open(session_id, &e);
+                return;
+            }
+        };
+
+        // 读循环：字节 → DF_STDOUT（按 sessionId 推回，与 shell reader 同路径）。
+        // 读 Err = 拔线/端口消失（热插拔）→ serial-lost 关闭会话
+        let reader = {
+            let this = self.clone();
+            let sid = session_id.to_string();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                loop {
+                    match read.read(&mut buf).await {
+                        Ok(n) if n > 0 => {
+                            this.out.send_binary(protocol::encode_data_frame(
+                                DF_STDOUT,
+                                &sid,
+                                &buf[..n],
+                            ));
+                        }
+                        Ok(_) => {
+                            // 串口读到 0 字节（端口被关闭）视同结束
+                            this.handle_closed(&sid, "serial-closed");
+                            return;
+                        }
+                        Err(_) => {
+                            this.handle_closed(&sid, "serial-lost");
+                            return;
+                        }
+                    }
+                }
+            })
+        };
+
+        // stdin 专用写入任务：按序消费队列写串口（写失败即退出，sender drop 自然结束）
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        {
+            let ch = channel.clone();
+            tokio::spawn(async move {
+                while let Some(data) = stdin_rx.recv().await {
+                    if ch.write_input(&data).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+
+        let port = serial_opts.port.clone();
+        let baud = serial_opts.baud_rate;
+        {
+            let mut sessions = self.sessions.lock().unwrap();
+            let Some(entry) = sessions.get_mut(session_id) else {
+                // 建连期间被用户关闭（或 reader 已抢先触发 serial-lost）：
+                // 读半部随任务 abort/drop 释放端口，不再发送 SessionOpened
+                reader.abort();
+                return;
+            };
+            entry.serial = Some(channel);
+            entry.stdin_tx = Some(stdin_tx);
+            entry.serial_reader = Some(reader);
+        }
+
+        self.send_control(ServerFrame::SessionOpened {
+            s: session_id.to_string(),
+            m: SessionOpenedM {
+                host_id: "serial".into(),
+                kind: "serial".into(),
+            },
+        });
+        self.stores.audit.append(
+            "session.opened",
+            serde_json::json!({
+                "sessionId": session_id,
+                "kind": "serial",
+                "target": format!("{port} @ {baud}"),
+            }),
+        );
+    }
+
     // ── terminal ───────────────────────────────────────────────────────────
 
     pub fn input(&self, session_id: &str, data: &[u8]) {
@@ -319,6 +427,8 @@ impl SessionManager {
             let mut sessions = self.sessions.lock().unwrap();
             match sessions.get_mut(session_id) {
                 Some(e) if e.pty.is_some() => e.pty.clone(),
+                // 串口无 PTY 尺寸概念：直接忽略（不缓存 pending_size）
+                Some(e) if e.kind == "serial" => None,
                 // PTY 未就绪（open 建连中）：缓存尺寸，open 完成后补发。
                 // 此前直接丢弃会让远端永远停留在占位 80x24，与前端实际
                 // 尺寸不一致 → 方向键调历史时 readline 折行/光标错位，
@@ -791,6 +901,11 @@ impl SessionManager {
         if let Some(task) = entry.metrics_task.take() {
             task.abort();
         }
+        // 串口读循环：abort 释放读半部；写通道与 stdin 队列随 drop 释放，
+        // 两半都 drop 后 OS 关闭端口句柄
+        if let Some(task) = entry.serial_reader.take() {
+            task.abort();
+        }
         // 传输/上传任务收尾；底层 SFTP 通道由注册表统一管理（多会话共享，不在此关闭）
         if let Some(sftp) = entry.sftp.take() {
             tokio::spawn(async move {
@@ -804,6 +919,7 @@ impl SessionManager {
         // stdin 写入任务随 sender drop 结束；PTY 通道随 Arc drop 关闭（远端 shell 收 EOF）
         entry.stdin_tx.take();
         entry.pty.take();
+        entry.serial.take();
         self.send_control(ServerFrame::SessionClosed {
             s: session_id.to_string(),
             m: protocol::SessionClosedM {

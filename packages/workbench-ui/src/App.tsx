@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react'
-import { Input, Layout, Modal, Tabs, message } from 'antd'
-import { CodeOutlined, DashboardOutlined, FolderOutlined } from '@ant-design/icons'
-import type { AiCommand, HostRecord, SessionKind } from '@bgshell/protocol'
+import { Button, Input, Layout, Modal, Tabs, message } from 'antd'
+import { CodeOutlined, DashboardOutlined, FolderOutlined, UsbOutlined } from '@ant-design/icons'
+import type { AiCommand, HostRecord, SerialOptions, SerialPortInfo, SessionKind } from '@bgshell/protocol'
 import { agentSocket } from './api/ws'
 import { onAiAsk, type AiAskPayload } from './api/aiBridge'
 import {
@@ -17,6 +17,7 @@ import { DropUploadModal } from './components/DropUploadModal'
 import { HostEditDrawer } from './components/HostEditDrawer'
 import { HostList, type HostStatus } from './components/HostList'
 import { MetricsPane } from './components/MetricsPane'
+import { SerialConnectModal } from './components/SerialConnectModal'
 import { SettingsModal } from './components/SettingsModal'
 import { SftpPane } from './components/SftpPane'
 import { TermDropUploadCard, type TermDropUploadView } from './components/TermDropUploadCard'
@@ -30,11 +31,12 @@ interface SessionTab {
   hostName: string
 }
 
-const KIND_LABEL: Record<SessionKind, string> = { shell: '', sftp: ' · 文件', metrics: ' · 状态' }
+const KIND_LABEL: Record<SessionKind, string> = { shell: '', sftp: ' · 文件', metrics: ' · 状态', serial: ' · 串口' }
 const KIND_ICON: Record<SessionKind, React.ReactNode> = {
   shell: <CodeOutlined />,
   sftp: <FolderOutlined />,
   metrics: <DashboardOutlined />,
+  serial: <UsbOutlined />,
 }
 
 // AI 对话面板（仅 SSH 精简版加载）：lazy + 构建常量折叠——完整版的动态 import
@@ -51,6 +53,10 @@ export function App() {
   const [activeKey, setActiveKey] = useState<string>()
   const [editing, setEditing] = useState<{ open: boolean; host?: HostRecord }>({ open: false })
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // ── 串口连接（kind='serial'：本机 COM 口透传到终端）──────────────────────
+  const [serialOpen, setSerialOpen] = useState(false)
+  const [serialPorts, setSerialPorts] = useState<SerialPortInfo[]>([])
+  const [serialError, setSerialError] = useState<string>()
   // ── 终端专注模式：隐藏侧栏/标签栏，把宽度让给终端增加列数（docker ps 等宽表不折行）──
   const [termFocus, setTermFocus] = useState(false)
   // ── 密码认证失败重试弹窗（auth-retry 帧 → retry-auth 回包）─────────────
@@ -91,10 +97,12 @@ export function App() {
 
   const refreshHosts = useCallback(() => agentSocket.sendControl({ t: 'hosts', m: { op: 'list' } }), [])
 
+  const refreshSerialPorts = useCallback(() => agentSocket.sendControl({ t: 'serial-list' }), [])
+
   // 专注模式只属于终端页签：切到文件/状态页签、关闭全部页签时自动退出，避免无处退出的死角
   useEffect(() => {
     const active = tabs.find((t) => t.key === activeKey)
-    if (termFocus && active?.kind !== 'shell') setTermFocus(false)
+    if (termFocus && active?.kind !== 'shell' && active?.kind !== 'serial') setTermFocus(false)
   }, [termFocus, tabs, activeKey])
 
   useEffect(() => {
@@ -123,6 +131,10 @@ export function App() {
             ...prev,
             [frame.m.hostId]: { ok: frame.m.ok, ms: frame.m.ms, message: frame.m.message },
           }))
+          break
+        case 'serial-ports':
+          setSerialPorts(frame.m.ports ?? [])
+          setSerialError(frame.m.ok ? undefined : frame.m.message)
           break
         case 'ai-commands':
           // AI 提交的候选命令：累积进右下角面板（收起状态也重新弹出）
@@ -369,6 +381,19 @@ export function App() {
     })
   }
 
+  // 串口会话：hostId 固定占位 'serial'（后端不查主机档案），页签名显示端口名
+  const openSerialSession = (opts: SerialOptions) => {
+    const sessionId = crypto.randomUUID()
+    setTabs((prev) => [...prev, { key: sessionId, kind: 'serial', hostId: 'serial', hostName: opts.port }])
+    setActiveKey(sessionId)
+    setSerialOpen(false)
+    agentSocket.sendControl({
+      t: 'open',
+      s: sessionId,
+      m: { hostId: 'serial', kind: 'serial', serial: opts },
+    })
+  }
+
   // 密码重试弹窗：提交新密码（等待后端结果），或取消（password 缺省 = 关闭会话）
   const submitAuthRetry = (password?: string) => {
     if (!authRetry) return
@@ -408,6 +433,18 @@ export function App() {
                   onAdd={() => setEditing({ open: true })}
                   onRefresh={refreshHosts}
                 />
+              </div>
+              <div style={{ padding: '8px 12px' }}>
+                <Button
+                  icon={<UsbOutlined />}
+                  block
+                  onClick={() => {
+                    setSerialOpen(true)
+                    refreshSerialPorts()
+                  }}
+                >
+                  连接串口
+                </Button>
               </div>
               <AgentControls
                 onOpenSettings={() => setSettingsOpen(true)}
@@ -450,17 +487,21 @@ export function App() {
                 </span>
               ),
               children:
-                t.kind === 'shell' ? (
+                t.kind === 'shell' || t.kind === 'serial' ? (
                   <TerminalPane
                     sessionId={t.key}
                     hostName={t.hostName}
                     focusMode={termFocus}
                     onFocusToggle={() => setTermFocus((prev) => !prev)}
-                    onFilesDrop={(files) =>
-                      startTermUpload(
-                        t.key,
-                        files.map((f) => ({ name: f.name, sizeB: f.size, file: f })),
-                      )
+                    onFilesDrop={
+                      // 串口会话背后无 SFTP：不支持拖拽上传
+                      t.kind === 'shell'
+                        ? (files) =>
+                            startTermUpload(
+                              t.key,
+                              files.map((f) => ({ name: f.name, sizeB: f.size, file: f })),
+                            )
+                        : undefined
                     }
                   />
                 ) : t.kind === 'sftp' ? (
@@ -506,6 +547,14 @@ export function App() {
         />
       </Modal>
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SerialConnectModal
+        open={serialOpen}
+        ports={serialPorts}
+        error={serialError}
+        onClose={() => setSerialOpen(false)}
+        onRefresh={refreshSerialPorts}
+        onConnect={openSerialSession}
+      />
       {aiCmdOpen && aiCommands.length > 0 && (
         <AiCommandPanel
           commands={aiCommands}
