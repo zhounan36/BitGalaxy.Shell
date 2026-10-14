@@ -224,12 +224,12 @@
                },
     "ui":  {
                "fullbody":  {
-                                "file":  "fullbody/fullbody_00.png",
+                                "file":  "ui/fullbody_00.png",
                                 "ratio":  "3:4",
                                 "desc":  "成熟比例全身立绘（官方正比设定稿基准）· 关于页/UI 皮肤 · 已抠图 512×683 + @2x"
                             },
                "bubble":  {
-                              "file":  "bubble/bubble_00.png",
+                              "file":  "ui/bubble_00.png",
                               "ratio":  "4:3",
                               "desc":  "深海蓝蕾丝对话气泡底图 · 9-slice 源（第一轮产物，与角色无关故保留）"
                           }

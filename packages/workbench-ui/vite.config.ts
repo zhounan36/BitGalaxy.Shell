@@ -15,7 +15,8 @@ export default defineConfig({
     },
   },
   // MPA 双入口：`/` 工作台（index.html）+ `/pet/` 桌宠（pet/index.html，与随包
-  // 分发路径 apps/desktop/ui/pet/ 一致；素材走 public/pet，绝对路径 /pet/**）
+  // 分发路径 apps/desktop/ui/pet/ 一致；素材为标准动作包 public/pet-packs/**，
+  // 内置包 pet-packs/builtin-whale，绝对路径 /pet-packs/**）
   build: {
     rollupOptions: {
       input: {

@@ -325,18 +325,6 @@ pub fn run() {
                 }
             });
 
-            // 服务就绪后按设置决定是否展示工作台主窗
-            let app_handle = app.handle().clone();
-            let open_on_start = stores.settings.get_bool("app.openOnStart").unwrap_or(true);
-            tauri::async_runtime::spawn(async move {
-                if ready_rx.await.is_ok() && open_on_start && !silent {
-                    if let Some(win) = app_handle.get_webview_window("main") {
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                    }
-                }
-            });
-
             // ── 系统托盘 ──────────────────────────────────────────
             let show = MenuItem::with_id(app, "show", "打开工作台", true, None::<&str>)?;
             let pet_toggle = MenuItem::with_id(app, "pet", "隐藏桌宠", true, None::<&str>)?;
@@ -398,6 +386,19 @@ pub fn run() {
                     }
                 })
                 .build()?;
+
+            // 服务就绪后按设置决定是否展示工作台主窗（必须在主窗 build 之后启动：
+            // ready 信号在 start_server 绑定端口后立即发出，早于窗口创建，先 spawn 会拿到 None）
+            let app_handle = app.handle().clone();
+            let open_on_start = stores.settings.get_bool("app.openOnStart").unwrap_or(true);
+            tauri::async_runtime::spawn(async move {
+                if ready_rx.await.is_ok() && open_on_start && !silent {
+                    if let Some(win) = app_handle.get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
+                }
+            });
 
             // ── 鲸鱼娘桌宠窗：透明置顶 · 无边框 · 不进任务栏 ──────────
             // 与主窗同一 dev server（workbench-ui MPA：`/` 工作台 + `/pet/` 桌宠）
