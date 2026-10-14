@@ -21,9 +21,10 @@ import { usePet } from './pet/usePet'
 import { usePetPack } from './pack/usePetPack'
 
 export function App() {
-  const { view, dispatch } = usePet()
   // 动作包：动画与动作解绑——runtime 决定「哪个动作播哪段动画」（用户包覆盖，缺省回落内置）
   const { runtime, activePack, packs, refresh: refreshPacks } = usePetPack()
+  // behavior=用户自定义动作图（pack.json 的 behavior 节）；无则内置默认行为
+  const { view, dispatch } = usePet(activePack?.behavior ?? null)
   // 浏览器宿主：拖拽在窗口内移动精灵；Tauri 宿主：拖拽交给原生窗口移动
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
   const anchorRef = useRef<HTMLDivElement>(null)

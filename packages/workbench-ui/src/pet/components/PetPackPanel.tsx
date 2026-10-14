@@ -164,19 +164,24 @@ export function PetPackPanel({
         </button>
         {specOpen && (
           <div className="pack-spec">
-            <p>zip 根目录放 pack.json 与各动作的帧图目录：</p>
+            <p>zip 根目录放 pack.json 与各动作的素材目录（帧序列/单图/单视频）：</p>
             <pre>{`my-pack.zip
 ├── pack.json
-├── idle_breath/idle_breath_00.png …
-└── wave/wave_00.png …`}</pre>
+├── idle_breath/idle_breath_00.png …   # 帧序列
+├── wave/wave.webm                     # 透明视频
+└── hello/hello.gif                    # 动图`}</pre>
+            <p>素材放动作目录 &lt;key&gt;/ 下，src 写目录内文件名（实际路径 &lt;key&gt;/&lt;src&gt;）。</p>
             <p>
-              pack.json 需含 schema:1、id（[a-z0-9_-]{'{1,32}'}）、name、version，states
-              里每个动作给 frames / fps / loop；帧图 PNG 透明、00 起两位编号、与 frames
-              数量严格一致。可只提供部分动作，缺失动作自动回落内置动画。
+              pack.json 需含 schema（1/2）、id（[a-z0-9_-]{'{1,32}'}）、name、version；
+              states 里每个动作声明素材形态——frames（帧序列）/ image（单图·动图）/
+              video（webm/mp4，支持透明 webm）。可只提供部分动作，缺失动作自动回落内置动画。
             </p>
-            <p>帧图建议 512×512 以内、同状态帧用联合取景框，动画才不抖。</p>
+            <p>
+              v2 可用 behavior 节自定义动作图：自己的动作名、触发器映射（何时播哪个动作）、
+              定时转换规则与时间参数——不改代码即可改宠物行为。详见完整规范。
+            </p>
             <a className="pack-link" href={`${import.meta.env.BASE_URL}pet-pack-spec.md`} download>
-              下载完整动作规范（pet-pack-spec.md）
+              下载完整动作规范 v2（pet-pack-spec.md）
             </a>
             <a className="pack-link" href={`${import.meta.env.BASE_URL}pet-pack-template.zip`} download>
               下载最小模板包（pet-pack-template.zip）

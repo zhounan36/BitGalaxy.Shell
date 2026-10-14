@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { DataFrameType, type ServerFrame } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
-import { PetMachine, type PetEvent, type PetSnapshot } from './machine'
+import { PetMachine, type BehaviorSpec, type PetEvent, type PetSnapshot } from './machine'
 
 /** 去掉 ANSI 转义与控制字符，仅留可读文本 */
 function stripAnsi(text: string): string {
@@ -21,9 +21,13 @@ export interface PetView extends PetSnapshot {
  * 把 Agent 事件流/交互事件/计时器喂给 PetMachine，并按帧刷新视图。
  * 返回 { view, dispatch }：dispatch 供组件上报交互事件（hover/拖拽/戳）。
  */
-export function usePet(): { view: PetView; dispatch: (ev: PetEvent) => void } {
+export function usePet(behavior?: BehaviorSpec | null): { view: PetView; dispatch: (ev: PetEvent) => void } {
   const machineRef = useRef<PetMachine>(null as unknown as PetMachine)
-  if (!machineRef.current) machineRef.current = new PetMachine()
+  if (!machineRef.current) machineRef.current = new PetMachine(behavior ?? undefined)
+  // 换动作包时热切换行为表（自定义动作图）
+  useEffect(() => {
+    machineRef.current.applyBehavior(behavior ?? undefined)
+  }, [behavior])
   const tailRef = useRef('')
   const nextBlinkAtRef = useRef(Date.now() + 6000 + Math.random() * 6000)
   const [view, setView] = useState<PetView>(() => ({
@@ -96,11 +100,8 @@ export function usePet(): { view: PetView; dispatch: (ev: PetEvent) => void } {
 
     const tickTimer = window.setInterval(() => {
       const now = Date.now()
-      // 待机眨眼调度（状态机负责瞬态回落）
-      if (
-        m.snapshot().state === 'idle_breath' &&
-        now >= nextBlinkAtRef.current
-      ) {
+      // 待机眨眼调度（状态机按 natural.idle 门控 + 优先级丢弃，非待机态自动忽略）
+      if (now >= nextBlinkAtRef.current) {
         m.handle({ type: 'blink' })
         nextBlinkAtRef.current = now + 6000 + Math.random() * 6000
       }

@@ -104,22 +104,30 @@ html.in-tauri body {
   cursor: grabbing;
 }
 
-.pet-sprite img {
+/* 图层包装（多格式 clip 共用：frames/img/video 都装进 pet-layer） */
+.pet-sprite .pet-layer {
   position: absolute;
   inset: 0;
-  /* img 是替换元素：绝对定位 + width:auto 会取固有尺寸（512px）而不会拉伸填满，
+  z-index: 1;
+  pointer-events: none; /* 交互统一由容器处理 */
+}
+
+.pet-sprite img,
+.pet-sprite video {
+  position: absolute;
+  inset: 0;
+  /* img/video 是替换元素：绝对定位 + width:auto 会取固有尺寸（512px）而不会拉伸填满，
      必须显式撑满精灵盒，object-fit:contain 才能把整只角色缩进盒内 */
   width: 100%;
   height: 100%;
   object-fit: contain;
   filter: drop-shadow(0 6px 14px rgba(4, 16, 32, 0.45));
-  transform-origin: 50% 96%; /* 呼吸微动以脚底为轴（对应 manifest anchor） */
-  pointer-events: none; /* 交互统一由容器处理 */
-  z-index: 1;
+  transform-origin: 50% 96%; /* 呼吸微动以脚底为轴（对应 art-manifest anchor） */
+  pointer-events: none;
 }
 
 /* 状态切换交叉淡化：旧层置顶淡出，新层在下层直接起播（时长与 PetSprite 注释一致） */
-.pet-sprite img.pet-fade-out {
+.pet-sprite .pet-layer.pet-fade-out {
   z-index: 2;
   animation: pet-crossfade-out 140ms ease forwards;
 }
@@ -137,7 +145,7 @@ html.in-tauri body {
 .pet-bubble {
   max-width: 340px;
   border: 14px solid transparent;
-  border-image: url('/pet/bubble/bubble_00.png') 26% / 14px fill stretch;
+  border-image: url('/pet-packs/builtin-whale/ui/bubble_00.png') 26% / 14px fill stretch;
   padding: 10px 14px;
   margin-bottom: 6px;
   animation: bubble-in 160ms ease;
