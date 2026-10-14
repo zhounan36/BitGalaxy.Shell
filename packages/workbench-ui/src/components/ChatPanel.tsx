@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { agentSocket } from '../api/ws'
-import { writeClipboardText } from '../api/tauri'
+import { writeClipboardText } from '../api/clipboard'
+import type { AiAskPayload } from '../api/aiBridge'
 import type { AiChatSummary, AiHistoryMessage } from '@bgshell/protocol'
 
 interface ChatMsg {
@@ -91,8 +92,24 @@ function ThinkBlock({ text, streaming }: { text: string; streaming: boolean }) {
   )
 }
 
-/** 桌宠 AI 对话面板：与鲸鱼娘对话驱动 SSH 任务；危险命令弹批准卡片 */
-export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+/** 终端「问AI」组合成一条 user 消息文本（主机名 + 问题 + 选区代码块） */
+function composeAskText(p: AiAskPayload): string {
+  const head = p.hostName ? `【来自终端「${p.hostName}」的提问】` : '【来自终端的提问】'
+  if (!p.selection.trim()) return `${head}\n${p.question}`
+  return `${head}\n${p.question}\n\n终端选区内容：\n\`\`\`\n${p.selection}\n\`\`\``
+}
+
+/** AI 对话面板（双宿主）：宠物窗与工作台主窗共用（SSH 精简版的唯一 AI 入口）；与鲸鱼娘对话驱动 SSH 任务，危险命令弹批准卡片 */
+export function ChatPanel({
+  open,
+  onClose,
+  incomingAsk,
+}: {
+  open: boolean
+  onClose: () => void
+  /** 终端「问AI」投递（pet/App 经 Tauri 事件转发；按 uid 去重） */
+  incomingAsk?: AiAskPayload | null
+}) {
   const [msgs, setMsgs] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState<string>()
@@ -114,6 +131,17 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
   // SSH 控制台实时输出（toolCallId → 累积文本）与介入输入框内容
   const [consoleOut, setConsoleOut] = useState<Record<string, string>>({})
   const [consoleInput, setConsoleInput] = useState('')
+
+  // ── 终端「问AI」投递：组合消息直接发送；busy/审批中排队，ai-result 后补发 ──
+  const pendingAskRef = useRef<string | null>(null)
+  const askUidRef = useRef<string | undefined>(undefined)
+  // busy/approval 的 ref 镜像：incomingAsk effect 只依赖 payload，读 ref 避免重触发
+  const busyRef = useRef<string | undefined>(undefined)
+  const approvalRef = useRef<Approval | null>(null)
+  busyRef.current = busy
+  approvalRef.current = approval
+  // 发送函数的 ref 镜像：onControl 闭包（挂载期注册）通过它调用最新实现
+  const sendTextRef = useRef<(text: string) => void>(() => {})
 
   // 创建/复用当前流式消息，写入正文或思考内容（多轮工具循环的思考以空行分隔）
   const streamInto = (delta: string, thinking: boolean) => {
@@ -264,6 +292,12 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
           }
           return next
         })
+        // 本轮结束后补发排队的「问AI」消息（发起时对话正忙）
+        const queued = pendingAskRef.current
+        if (queued) {
+          pendingAskRef.current = null
+          window.setTimeout(() => sendTextRef.current(queued), 50)
+        }
       }
     })
     return off
@@ -283,12 +317,21 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
     if (el) el.scrollTop = el.scrollHeight
   }, [msgs, busy, approval, secretReq, consoleOut])
 
+  // 终端「问AI」：uid 去重（主窗 1.2s 补发会重复到达）；对话忙时排队，空闲直接发送。
+  // pet/App 收到事件的同时已 setChatOpen(true)，本 effect 跑在面板渲染之后，滚动手势已就绪
+  useEffect(() => {
+    if (!incomingAsk?.uid || incomingAsk.uid === askUidRef.current) return
+    askUidRef.current = incomingAsk.uid
+    const text = composeAskText(incomingAsk)
+    if (busyRef.current || approvalRef.current) pendingAskRef.current = text
+    else sendTextRef.current(text)
+  }, [incomingAsk])
+
   if (!open) return null
 
-  const send = () => {
-    const text = input.trim()
-    if (!text || busy || approval) return
-    setInput('')
+  /** 发送一段已定稿的文本（输入框 send 与终端「问AI」共用） */
+  const sendText = (text: string) => {
+    if (!text) return
     setMsgs((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', text }])
     setBusy('思考中…')
     agentSocket
@@ -298,6 +341,14 @@ export function ChatPanel({ open, onClose }: { open: boolean; onClose: () => voi
         setBusy(undefined)
         setMsgs((prev) => [...prev, { id: crypto.randomUUID(), role: 'assistant', text: `连接 Agent 失败：${err.message}`, error: true }])
       })
+  }
+  sendTextRef.current = sendText
+
+  const send = () => {
+    const text = input.trim()
+    if (!text || busy || approval) return
+    setInput('')
+    sendText(text)
   }
 
   const copyMsg = (m: ChatMsg) => {

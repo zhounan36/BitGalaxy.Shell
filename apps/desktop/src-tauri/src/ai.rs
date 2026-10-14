@@ -77,16 +77,17 @@ pub struct LlmMessage {
 fn system_prompt() -> String {
     [
         "你是 BitGalaxy Shell 的桌宠助手「鲸鱼娘」，帮用户管理 SSH 主机，也能操作用户本机（Windows）。",
-        "风格：中文、简短、活泼但专业；汇报命令结果时给出要点总结，不要大段贴原文（超 20 行只说关键部分）。",
-        "远程工具：list_hosts 查主机；probe_host 测连通；get_metrics 采指标；exec_command 在主机上执行命令；list_dir 列远程目录；read_file 读远程小文件；write_file 写远程文件；sftp_download_file 下载远程文件到本机。",
-        "控制台工具：console_command 在主机的交互式 SSH 控制台（PTY）中执行命令——输出实时显示给用户，用户可以中途介入输入或 Ctrl+C，结束后你拿到完整输出与退出码。交互式/长驻命令（top、tail -f、向导式安装）、或希望用户现场输入（如亲手输 sudo 密码）时用它；普通一次性命令仍用 exec_command。",
-        "本地工具：local_exec 在本机执行 PowerShell（打包用 Compress-Archive 或 tar）；local_read_file/local_write_file 读写本机文件；sftp_upload_file 把本机文件上传到主机。",
-        "典型流程：用户说「打包 X 上传到服务器」→ local_exec 打包 → sftp_upload_file 上传 →（可选）exec_command 解压/运行。",
-        "安全：危险命令会被黑名单直接拒绝；写文件、上传下载及未识别命令会弹卡片请求用户批准，被拒时如实告知用户。文件大小超限时建议分卷或改用压缩。",
+        "风格：中文、简短、活泼但专业；汇报结果时给出要点总结，不要大段贴原文（超 20 行只说关键部分）。",
+        "【核心权限】你没有直接执行任何命令的权限（不能远程执行，也不能在本机执行）。需要执行命令时，必须调用 propose_command 把候选命令提交给用户：命令会显示在终端窗口的候选列表里，用户点击后粘贴到对应终端、自己敲回车执行。每条命令单独调用一次 propose_command；多个步骤按顺序多次提交。需要提权就在命令里写 sudo（用户会在终端里输密码）。命令必须单行、非交互（交互式命令会卡住）；连续步骤可用 && 连接。",
+        "propose_command 之后：简要告诉用户建议执行哪条、为什么；命令尚未执行，不要假装已执行、不要编造输出。用户执行后通常会把输出贴回来，基于贴回的输出继续分析。",
+        "远程查询工具（只读，可直接调用）：list_hosts 查主机；probe_host 测连通；get_metrics 采指标；list_dir 列远程目录；read_file 读远程小文件。",
+        "文件类工具（写操作走审批）：write_file 写远程文件；local_read_file/local_write_file 读写本机文件；sftp_upload_file/sftp_download_file 上传下载。没有专用工具的操作（建目录 mkdir -p、删除 rm -rf、移动 mv、重启服务等）一律用 propose_command 提议。",
+        "propose_command 参数：target=ssh 表示在远程主机终端执行（host 填主机名，帮用户匹配终端）；target=local 表示用户本机 PowerShell（打包用 Compress-Archive 或 tar），本机命令只会复制到剪贴板。",
+        "典型流程：用户说「打包 X 上传到服务器」→ sftp_upload_file 上传（若本机还没有包，先 propose_command target=local 打包，等用户贴回结果）→ propose_command target=ssh 解压/运行。",
+        "安全：写文件、上传下载会弹卡片请求用户批准，被拒时如实告知用户。文件大小超限时建议分卷或改用压缩。",
         "主机 id 必须先用 list_hosts 查询；用户说\"web 服务器\"这类称呼时按名称/标签匹配。",
-        "路径规则：SFTP 工具（list_dir/read_file/write_file/make_dir/rename_path/delete_path）不支持 ~ 波浪号展开（会被当作字面目录名）；相对路径相对登录用户家目录。不确定实际位置时先用 list_dir 查看 resolvedPath。",
-        "权限规则：需要 root 权限的操作（系统目录建删/写 /etc / systemctl 等）在 exec_command 传 sudo=true——已配 NOPASSWD 时直接执行，否则会弹卡片请你输入 sudo 密码；被取消或密码错误时如实报告。SFTP 工具（make_dir/write_file/delete_path/rename_path 等）无法提权，遇到 Permission denied 时改用 exec_command + sudo（建目录 mkdir -p、删 rm -rf、写文件 tee、移动 mv）。",
-        "执行失败时如实说明原因（退出码 / stderr 要点）；不要编造输出，不要把失败说成被拒绝。",
+        "路径规则：SFTP 工具（list_dir/read_file/write_file 等）不支持 ~ 波浪号展开（会被当作字面目录名）；相对路径相对登录用户家目录。不确定实际位置时先用 list_dir 查看 resolvedPath。",
+        "用户贴回的命令输出就是执行结果：如实总结要点（退出码/stderr）；不要编造输出，不要把失败说成被拒绝。",
     ]
     .join("\n")
 }
@@ -553,18 +554,24 @@ impl AiHandler {
             tool_call_id.to_string(),
             RunningTool { chat_id: chat_id.to_string(), tx: cancel_tx, console: Some(console_tx) },
         );
-        let result = tokio::select! {
-            r = toolcore::execute(&mut ctx, &approver, name, args) => r,
-            // 用户点了这张卡片的「终止」：软取消，模型看到结果后继续对话
-            _ = cancel_rx => serde_json::json!({
-                "ok": false, "code": "tool-cancelled", "message": "用户终止了该命令执行"
-            }),
-            // 兜底超时：SFTP/exec 底层挂起时不能让对话永久卡死
-            // （传输类工具与 termUpload 一致给 10 分钟，其余 60s）
-            _ = tokio::time::sleep(tool_budget(name)) => serde_json::json!({
-                "ok": false, "code": "tool-timeout",
-                "message": format!("工具 {name} 执行超时（{}），已中止；请检查主机网络后重试", tool_budget(name).as_secs())
-            }),
+        let result = if name == "propose_command" {
+            // AI 无权直接执行：候选命令广播到工作台终端，用户自己粘贴执行。
+            // 不进 toolcore（没有可执行动作），但仍走 running→终态卡片与落库。
+            self.emit_proposed_command(chat_id, args)
+        } else {
+            tokio::select! {
+                r = toolcore::execute(&mut ctx, &approver, name, args) => r,
+                // 用户点了这张卡片的「终止」：软取消，模型看到结果后继续对话
+                _ = cancel_rx => serde_json::json!({
+                    "ok": false, "code": "tool-cancelled", "message": "用户终止了该命令执行"
+                }),
+                // 兜底超时：SFTP/exec 底层挂起时不能让对话永久卡死
+                // （传输类工具与 termUpload 一致给 10 分钟，其余 60s）
+                _ = tokio::time::sleep(tool_budget(name)) => serde_json::json!({
+                    "ok": false, "code": "tool-timeout",
+                    "message": format!("工具 {name} 执行超时（{}），已中止；请检查主机网络后重试", tool_budget(name).as_secs())
+                }),
+            }
         };
         self.shared.running_tools.lock().unwrap().remove(tool_call_id);
         let ok = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -595,6 +602,44 @@ impl AiHandler {
         });
         self.shared.stores.chat.append(chat_id, "tool", None, None, false, Some(&tool_json));
         result
+    }
+
+    /// propose_command 的处理：解析候选命令并发 ai-commands 帧（广播），
+    /// 返回给 LLM 的结果里明确「尚未执行」。失败也返回结构化结果，走 failed 卡片。
+    fn emit_proposed_command(&self, chat_id: &str, args: &serde_json::Value) -> serde_json::Value {
+        let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|v| v.trim().to_string());
+        let command = s("command").unwrap_or_default();
+        if command.is_empty() {
+            return serde_json::json!({
+                "ok": false, "code": "bad-args", "message": "command 不能为空；请提供单行命令文本"
+            });
+        }
+        let target = match s("target").as_deref() {
+            Some("local") => "local".to_string(),
+            // 缺省按 ssh 处理（远程是主要场景）
+            _ => "ssh".to_string(),
+        };
+        let proposed = crate::protocol::AiCommandM {
+            id: uuid::Uuid::new_v4().to_string(),
+            command: command.clone(),
+            purpose: s("purpose").filter(|v| !v.is_empty()),
+            target: target.clone(),
+            host: s("host").filter(|v| !v.is_empty()),
+        };
+        self.shared.out.send_frame(&ServerFrame::AiCommands {
+            m: crate::protocol::AiCommandsM {
+                chat_id: chat_id.to_string(),
+                commands: vec![proposed],
+            },
+        });
+        let where_at = if target == "local" { "本机（复制到剪贴板）" } else { "SSH 终端" };
+        serde_json::json!({
+            "ok": true,
+            "proposed": true,
+            "command": command,
+            "target": target,
+            "message": format!("候选命令已推送到终端窗口的候选列表（{where_at}）；命令尚未执行，等用户点击粘贴并自己敲回车。可提醒用户查看候选列表，用户执行后可能把输出贴回来。")
+        })
     }
 
     /// 控制台输出增量（console_command 运行中）：前端控制台卡片实时追加显示
@@ -898,7 +943,7 @@ fn truncate(s: &str, max: usize) -> String {
 fn tool_detail(name: &str, args: &serde_json::Value) -> Option<String> {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|v| v.to_string());
     match name {
-        "exec_command" | "local_exec" | "console_command" => s("command"),
+        "exec_command" | "local_exec" | "console_command" | "propose_command" => s("command"),
         "make_dir" | "read_file" | "write_file" | "delete_path" | "local_read_file" | "local_write_file" => {
             s("path")
         }
@@ -915,6 +960,9 @@ fn tool_detail(name: &str, args: &serde_json::Value) -> Option<String> {
 fn tool_result_summary(result: &serde_json::Value) -> String {
     if let Some(hosts) = result.get("hosts").and_then(|v| v.as_array()) {
         return format!("{} 台主机", hosts.len());
+    }
+    if result.get("proposed").and_then(|v| v.as_bool()) == Some(true) {
+        return "已推送到终端候选列表（待用户执行）".into();
     }
     if let Some(entries) = result.get("entries").and_then(|v| v.as_array()) {
         return format!("{} 项", entries.len());

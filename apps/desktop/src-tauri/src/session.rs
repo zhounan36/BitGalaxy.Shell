@@ -907,6 +907,58 @@ impl SessionManager {
         };
         self.send_control(ServerFrame::ProbeResult { m: frame });
     }
+
+    /// 测试连接（添加/编辑主机表单）：用表单凭据做一次真实 SSH 认证。
+    /// 未知主机指纹自动接受（不写 known_hosts，正式连接仍走 TOFU 确认）；
+    /// 已知指纹不匹配立即拒绝；认证只试一次，被拒即失败；不落主机档案、不入连接池。
+    pub async fn test_host(&self, input: protocol::HostInput) {
+        let host = protocol::HostRecord {
+            input,
+            id: "test".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let target = format!(
+            "{}@{}:{}",
+            host.input.username, host.input.host, host.input.port
+        );
+        let mismatch = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ctx = Arc::new(crate::ssh::HostKeyCtx {
+            known: self.stores.known.clone(),
+            host: host.input.host.clone(),
+            port: host.input.port,
+            ask: HostKeyAsk::AutoAccept,
+            mismatch: mismatch.clone(),
+            save_password: None,
+        });
+        let (ok, message) = match crate::ssh::connect(&host, ctx).await {
+            Ok(conn) => {
+                conn.close().await;
+                (true, "认证成功，凭据有效".to_string())
+            }
+            Err(e) => {
+                let msg = if mismatch.load(std::sync::atomic::Ordering::Relaxed) {
+                    format!(
+                        "主机 {}:{} 指纹不匹配（疑似中间人攻击），已拒绝连接",
+                        host.input.host, host.input.port
+                    )
+                } else {
+                    e.message()
+                };
+                (false, msg)
+            }
+        };
+        self.stores.audit.append(
+            "host.test",
+            serde_json::json!({ "target": target, "ok": ok, "message": message }),
+        );
+        self.send_control(ServerFrame::TestHostResult {
+            m: protocol::TestHostResultM {
+                ok,
+                message: Some(message),
+            },
+        });
+    }
 }
 
 fn ssh_kind_matches(kind: &str, want: &str) -> bool {

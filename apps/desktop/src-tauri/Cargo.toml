@@ -13,6 +13,12 @@ crate-type = ["rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# 桌宠（宠物窗 + 动作包管理）：默认完整版；SSH 精简版构建时 --no-default-features，
+# 不编译 pet_pack/zip、不创建宠物窗、不打包含约 89MB 的 pet-packs 素材
+default = ["pet"]
+pet = ["dep:zip"]
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-single-instance = "2"
@@ -41,8 +47,8 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 # 传输预检：本地磁盘剩余空间（跨平台）
 fs2 = "0.4"
-# 桌宠动作包：用户 DIY 动画 zip 导入（解压 + 校验落盘 pet-packs/）
-zip = "2"
+# 桌宠动作包：用户 DIY 动画 zip 导入（解压 + 校验落盘 pet-packs/）；仅完整版（feature = "pet"）
+zip = { version = "2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # 传输预检：GetVolumeInformationW 查卷格式（FAT32 单文件 4GB 上限）

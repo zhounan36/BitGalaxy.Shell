@@ -6,6 +6,7 @@ import { CloseOutlined, CompressOutlined, DownloadOutlined, ExpandOutlined } fro
 import { DataFrameType } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
 import { readClipboardText, writeClipboardText } from '../api/clipboard'
+import { requestAiAsk } from '../api/aiBridge'
 import {
   cancelTermDownload,
   cleanSelectedName,
@@ -27,10 +28,37 @@ interface TermMenuState {
   hasSelection: boolean
   /** 选区清洗出的文件/文件夹名（无有效选区为 null） */
   selName: string | null
+  /** 选区原文（截断到 8000 字符，供「问AI」附进对话；无选区为 null） */
+  selText: string | null
+}
+
+/** 候选命令粘贴注册表：sessionId → 粘贴函数（候选命令面板点击时调用）。
+ *  用 term.paste（尊重括号粘贴模式）粘贴但不自动执行，用户敲回车才执行。 */
+const pasteRegistry = new Map<string, (text: string) => void>()
+
+/** 把命令文本粘贴到指定终端；返回 false 表示该会话没有可粘贴的终端 */
+export function pasteIntoTerminal(sessionId: string, text: string): boolean {
+  const fn = pasteRegistry.get(sessionId)
+  if (!fn) return false
+  fn(text)
+  return true
+}
+
+/** 当前注册了粘贴入口的会话 id 列表 */
+export function pasteTargets(): string[] {
+  return [...pasteRegistry.keys()]
+}
+
+/** 「问AI」输入态：携带发起时的选区快照 + 用户输入的问题 */
+interface AskDraft {
+  selection: string
+  question: string
 }
 
 interface TerminalPaneProps {
   sessionId: string
+  /** 该会话对应的主机名（「问AI」时随问题带给 AI 定位上下文） */
+  hostName?: string
   /** HTML5 拖放兜底（浏览器 dev 宿主；Tauri 壳内原生拖放接管、不会触发） */
   onFilesDrop?: (files: File[]) => void
   /** 专注模式（App 层隐藏侧栏/标签栏，把宽度让给终端增加列数） */
@@ -43,13 +71,15 @@ interface TerminalPaneProps {
  *  另支持终端惯例快捷键。
  *  OSC 7（shell 集成上报当前目录）→ termUpload 目录缓存，供拖拽上传与选区下载定位远端路径。
  *  折行视觉层：被列宽折断的续行标 ↳ + 折行块左侧竖线 + 块结束分隔线（docker ps 等长输出更易读）。 */
-export function TerminalPane({ sessionId, onFilesDrop, focusMode, onFocusToggle }: TerminalPaneProps) {
+export function TerminalPane({ sessionId, hostName, onFilesDrop, focusMode, onFocusToggle }: TerminalPaneProps) {
   const holderRef = useRef<HTMLDivElement>(null)
   const hostRef = useRef<HTMLDivElement>(null)
   const layerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const [menu, setMenu] = useState<TermMenuState | null>(null)
   const [dl, setDl] = useState<TermDownloadState | null>(null)
+  /** 「问AI」输入态（非 null 时浮层显示选区 + 问题输入框） */
+  const [ask, setAsk] = useState<AskDraft | null>(null)
   // 快捷键回调存 ref：避免 effect 闭包捕获旧的 onFocusToggle
   const focusToggleRef = useRef(onFocusToggle)
   focusToggleRef.current = onFocusToggle
@@ -236,13 +266,21 @@ export function TerminalPane({ sessionId, onFilesDrop, focusMode, onFocusToggle 
         y: e.clientY,
         hasSelection: !!sel,
         selName: sel ? cleanSelectedName(sel) : null,
+        // 选区快照截断到 8000 字符（问AI 附带日志足够；太长会撑爆对话上下文）
+        selText: sel ? sel.replace(/\s+$/, '').slice(0, 8000) : null,
       })
     }
     const holder = holderRef.current!
     holder.addEventListener('contextmenu', onContextMenu)
+    // 候选命令粘贴入口：AiCommandPanel 点击列表项时按 sessionId 找到这里
+    pasteRegistry.set(sessionId, (text) => {
+      term.paste(text)
+      term.focus()
+    })
 
     return () => {
       holder.removeEventListener('contextmenu', onContextMenu)
+      pasteRegistry.delete(sessionId)
       clearSessionCwd(sessionId)
       offOpened()
       offData()
@@ -296,6 +334,14 @@ export function TerminalPane({ sessionId, onFilesDrop, focusMode, onFocusToggle 
     })()
   }
 
+  // ── 问AI（右键菜单触发）：选区快照 + 问题投递给桌宠对话面板 ─────────────
+  const submitAsk = () => {
+    if (!ask || !ask.question.trim()) return
+    void requestAiAsk({ hostName: hostName ?? '', selection: ask.selection, question: ask.question.trim() })
+    setAsk(null)
+    message.success('已发给 AI，回答在桌宠对话面板查看')
+  }
+
   // 菜单打开期间：点击菜单外 / Esc / 终端滚动 / 窗口失焦或缩放 → 关闭
   useEffect(() => {
     if (!menu) return
@@ -323,7 +369,7 @@ export function TerminalPane({ sessionId, onFilesDrop, focusMode, onFocusToggle 
   const menuStyle: React.CSSProperties | undefined = menu
     ? {
         left: Math.max(8, Math.min(menu.x, window.innerWidth - 200)),
-        top: Math.max(8, Math.min(menu.y, window.innerHeight - 312)),
+        top: Math.max(8, Math.min(menu.y, window.innerHeight - 352)),
       }
     : undefined
 
@@ -368,6 +414,20 @@ export function TerminalPane({ sessionId, onFilesDrop, focusMode, onFocusToggle 
           >
             <span>复制</span>
             <span className="term-menu-key">Ctrl+Shift+C</span>
+          </button>
+          <button
+            type="button"
+            className="term-menu-item"
+            disabled={!menu.hasSelection}
+            title={menu.hasSelection ? '把所选内容连同问题发给桌宠 AI' : '先框选一段日志/输出'}
+            onClick={() => {
+              const sel = menu.selText
+              setMenu(null)
+              if (sel) setAsk({ selection: sel, question: '' })
+            }}
+          >
+            <span>问 AI</span>
+            <span className="term-menu-key">选区</span>
           </button>
           <button
             type="button"
@@ -514,6 +574,38 @@ export function TerminalPane({ sessionId, onFilesDrop, focusMode, onFocusToggle 
               {dl.message}
             </Typography.Text>
           )}
+        </div>
+      )}
+      {ask && (
+        <div className="term-ask-card">
+          <div className="term-drop-card-head">
+            <span className="term-drop-card-title">问 AI（附上终端选区）</span>
+            <button type="button" className="term-drop-card-close" aria-label="取消" onClick={() => setAsk(null)}>
+              <CloseOutlined />
+            </button>
+          </div>
+          <div className="term-ask-sel" title={ask.selection}>
+            {ask.selection.length > 400 ? `${ask.selection.slice(0, 400)}…` : ask.selection}
+          </div>
+          <textarea
+            className="term-ask-input"
+            autoFocus
+            rows={2}
+            placeholder="输入你的问题：回车发送，Shift+回车换行，Esc 取消"
+            value={ask.question}
+            onChange={(e) => setAsk({ ...ask, question: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                submitAsk()
+              } else if (e.key === 'Escape') {
+                setAsk(null)
+              }
+            }}
+          />
+          <button type="button" className="term-ask-send" disabled={!ask.question.trim()} onClick={submitAsk}>
+            发送给 AI
+          </button>
         </div>
       )}
     </div>

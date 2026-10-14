@@ -3,6 +3,8 @@ import { ConfigProvider, theme } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import '@xterm/xterm/css/xterm.css'
 import './index.css'
+// AI 对话面板样式（共享）：SSH 精简版（无桌宠）工作台内嵌 ChatPanel 需要
+import './styles/chat.css'
 import { App } from './App'
 
 // 深海蓝暗色令牌：与 src/pet/index.css 保持一致，统一两套 UI 的设计语言

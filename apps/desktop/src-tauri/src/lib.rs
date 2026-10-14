@@ -1,9 +1,12 @@
 //! BitGalaxy Shell 桌面应用（Tauri 2，单进程架构）：
 //! - Agent 全内嵌：WS 服务（/ws）+ SSH/SFTP/审计/设置 + AI 对话 + MCP（--mcp-stdio 子模式）
-//! - 入口只有桌宠：主窗口 visible=false 后台预加载，双击宠物 / 宠物菜单 / 托盘按需唤起
+//! - 两种构建形态（Cargo feature `pet`）：
+//!   - 完整版（默认）：入口只有桌宠，主窗口 visible=false 后台预加载，双击宠物 / 宠物菜单 / 托盘按需唤起
+//!   - SSH 精简版（--no-default-features）：无桌宠（不建宠物窗、不打动作包素材），
+//!     启动直接进工作台 + 托盘，安装体积与常驻内存显著降低
 //! - 桌宠可隐藏/唤出：宠物菜单隐藏，托盘"隐藏/显示桌宠"开关或二次启动唤回
-//! - 系统托盘：打开工作台 / 桌宠开关 / 退出；主窗口关闭 = 隐藏到托盘
-//! - 开机自启（tauri-plugin-autostart）：启动桌面 exe 并带 --silent（不弹工作台，桌宠/托盘常驻）
+//! - 系统托盘：打开工作台 / 桌宠开关（仅完整版）/ 退出；主窗口关闭 = 隐藏到托盘
+//! - 开机自启（tauri-plugin-autostart）：启动桌面 exe 并带 --silent（不弹工作台，后台常驻）
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,7 +25,6 @@ pub mod disk;
 pub mod dl_http;
 pub mod mcp;
 pub mod metrics;
-pub mod pet_pack;
 pub mod policy;
 pub mod pool;
 pub mod protocol;
@@ -33,11 +35,15 @@ pub mod ssh;
 pub mod stores;
 pub mod toolcore;
 pub mod wire;
+#[cfg(feature = "pet")]
+pub mod pet_pack;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// 宠物窗尺寸（逻辑像素，桌宠精灵素材 256 + 气泡余量）
+/// 宠物窗尺寸（逻辑像素，桌宠精灵素材 256 + 气泡余量）；仅完整版存在宠物窗
+#[cfg(feature = "pet")]
 const PET_W: f64 = 340.0;
+#[cfg(feature = "pet")]
 const PET_H: f64 = 420.0;
 
 /// 数据目录：Windows %APPDATA%\bitgalaxy-shell；其余平台 ~/.local/state/bitgalaxy-shell
@@ -99,7 +105,9 @@ fn dbg_evt(msg: String) {
     append_log(&data_dir, &format!("[dbg] {msg}"));
 }
 
-/// 隐藏/唤出桌宠（宠物窗菜单隐藏后，经托盘开关或二次启动唤回）
+/// 隐藏/唤出桌宠（宠物窗菜单隐藏后，经托盘开关或二次启动唤回）；
+/// SSH 精简版无宠物窗（窗口查找返回 None → no-op），但命令保留注册以匹配
+/// build.rs 的应用 ACL 清单与 capabilities/default.json 授权
 #[tauri::command]
 fn set_pet_visible(app: tauri::AppHandle, visible: bool) {
     if let Some(win) = app.get_webview_window("pet") {
@@ -245,6 +253,35 @@ fn make_agent_ctl(app: tauri::AppHandle, stores: Stores, data_dir: PathBuf) -> s
     })
 }
 
+/// 注册 IPC 命令：动作包管理命令依赖 zip 且仅桌宠场景使用，只在完整版（feature = "pet"）编译
+#[cfg(feature = "pet")]
+fn with_ipc_commands(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    b.invoke_handler(tauri::generate_handler![
+        show_main_window,
+        dbg_evt,
+        set_pet_visible,
+        quit_app,
+        stat_file,
+        read_file_chunk,
+        pet_pack::pet_pack_import,
+        pet_pack::pet_packs_list,
+        pet_pack::pet_pack_delete,
+        pet_pack::pet_pack_set_enabled
+    ])
+}
+
+#[cfg(not(feature = "pet"))]
+fn with_ipc_commands(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    b.invoke_handler(tauri::generate_handler![
+        show_main_window,
+        dbg_evt,
+        set_pet_visible,
+        quit_app,
+        stat_file,
+        read_file_chunk
+    ])
+}
+
 /// dev server 探测：IPv4/IPv6 双栈 + HTTP 层验证（TCP 通且有 HTTP 响应才算就绪；
 /// vite 关闭或仅剩半死连接时回退随包资产，避免窗口锁定已死的 devUrl）
 fn dev_server_ready(port: u16) -> bool {
@@ -272,16 +309,26 @@ fn dev_server_ready(port: u16) -> bool {
 
 pub fn run() {
     let silent = std::env::args().any(|a| a == "--silent");
-    let app = tauri::Builder::default()
-        // 桌面单实例：入口只有桌宠，二次启动唤回宠物窗（隐藏时也能找回）后自动退出
+    let builder = tauri::Builder::default()
+        // 桌面单实例：完整版唤回宠物窗（隐藏时也能找回），SSH 精简版唤起工作台主窗
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(win) = app.get_webview_window("pet") {
-                let _ = win.show();
-                let _ = win.set_focus();
+            #[cfg(feature = "pet")]
+            {
+                if let Some(win) = app.get_webview_window("pet") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+                sync_pet_tray_text(app);
             }
-            sync_pet_tray_text(app);
+            #[cfg(not(feature = "pet"))]
+            {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
         }))
-        // 开机自启：启动桌面 exe 并带 --silent（桌宠/托盘常驻，不弹工作台）
+        // 开机自启：启动桌面 exe 并带 --silent（后台常驻，不弹工作台）
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--silent"]),
@@ -289,19 +336,8 @@ pub fn run() {
         // 终端复制/粘贴：原生剪贴板读写（经 plugin:clipboard-manager IPC）
         .plugin(tauri_plugin_clipboard_manager::init())
         // 原生文件选择器（主机编辑：私钥文件路径浏览）
-        .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![
-            show_main_window,
-            dbg_evt,
-            set_pet_visible,
-            quit_app,
-            stat_file,
-            read_file_chunk,
-            pet_pack::pet_pack_import,
-            pet_pack::pet_packs_list,
-            pet_pack::pet_pack_delete,
-            pet_pack::pet_pack_set_enabled
-        ])
+        .plugin(tauri_plugin_dialog::init());
+    let app = with_ipc_commands(builder)
         .setup(move |app| {
             let data_dir = resolve_data_dir();
             append_log(&data_dir, &format!("[bgshell] v{VERSION} 启动（单进程架构）"));
@@ -327,10 +363,16 @@ pub fn run() {
 
             // ── 系统托盘 ──────────────────────────────────────────
             let show = MenuItem::with_id(app, "show", "打开工作台", true, None::<&str>)?;
-            let pet_toggle = MenuItem::with_id(app, "pet", "隐藏桌宠", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &pet_toggle, &quit])?;
-            app.manage(PetToggle(pet_toggle));
+            // 桌宠开关菜单项仅完整版存在（SSH 精简版托盘只有 工作台/退出）
+            #[cfg(feature = "pet")]
+            let menu = {
+                let pet_toggle = MenuItem::with_id(app, "pet", "隐藏桌宠", true, None::<&str>)?;
+                app.manage(PetToggle(pet_toggle.clone()));
+                Menu::with_items(app, &[&show, &pet_toggle, &quit])?
+            };
+            #[cfg(not(feature = "pet"))]
+            let menu = Menu::with_items(app, &[&show, &quit])?;
             TrayIconBuilder::with_id("tray")
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("BitGalaxy Shell")
@@ -342,16 +384,19 @@ pub fn run() {
                             let _ = win.set_focus();
                         }
                     }
-                    // 桌宠开关：按当前可见性取反（隐藏 ⇄ 唤出）
+                    // 桌宠开关：按当前可见性取反（隐藏 ⇄ 唤出）；精简版无此菜单项
                     "pet" => {
-                        if let Some(win) = app.get_webview_window("pet") {
-                            let show = !win.is_visible().unwrap_or(true);
-                            let _ = if show { win.show() } else { win.hide() };
-                            if show {
-                                let _ = win.set_focus();
+                        #[cfg(feature = "pet")]
+                        {
+                            if let Some(win) = app.get_webview_window("pet") {
+                                let show = !win.is_visible().unwrap_or(true);
+                                let _ = if show { win.show() } else { win.hide() };
+                                if show {
+                                    let _ = win.set_focus();
+                                }
                             }
+                            sync_pet_tray_text(app);
                         }
-                        sync_pet_tray_text(app);
                     }
                     "quit" => app.exit(0),
                     _ => {}
@@ -400,36 +445,39 @@ pub fn run() {
                 }
             });
 
-            // ── 鲸鱼娘桌宠窗：透明置顶 · 无边框 · 不进任务栏 ──────────
+            // ── 鲸鱼娘桌宠窗（仅完整版）：透明置顶 · 无边框 · 不进任务栏 ─────
             // 与主窗同一 dev server（workbench-ui MPA：`/` 工作台 + `/pet/` 桌宠）
-            let pet_url = if cfg!(debug_assertions) && dev_server_ready(17177) {
-                WebviewUrl::External("http://localhost:17177/pet/".parse().unwrap())
-            } else {
-                WebviewUrl::App("pet/index.html".into())
-            };
-            let mut pet = WebviewWindowBuilder::new(app, "pet", pet_url)
-                .title("鲸鱼娘桌宠")
-                // TODO(debug): 临时开 CDP 9222 定位宠物窗 IPC——排查完删除
-                .additional_browser_args(
-                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=9222",
-                )
-                .inner_size(PET_W, PET_H)
-                .decorations(false)
-                .transparent(true)
-                .shadow(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .resizable(false)
-                .focused(false);
-            // 主显示器右下角（逻辑坐标），预留任务栏高度
-            if let Ok(Some(monitor)) = app.primary_monitor() {
-                let scale = monitor.scale_factor();
-                let mw = monitor.size().width as f64 / scale;
-                let mh = monitor.size().height as f64 / scale;
-                let taskbar = if monitor.position().y >= 0 { 48.0 } else { 0.0 };
-                pet = pet.position(mw - PET_W - 24.0, mh - PET_H - 24.0 - taskbar);
+            #[cfg(feature = "pet")]
+            {
+                let pet_url = if cfg!(debug_assertions) && dev_server_ready(17177) {
+                    WebviewUrl::External("http://localhost:17177/pet/".parse().unwrap())
+                } else {
+                    WebviewUrl::App("pet/index.html".into())
+                };
+                let mut pet = WebviewWindowBuilder::new(app, "pet", pet_url)
+                    .title("鲸鱼娘桌宠")
+                    // TODO(debug): 临时开 CDP 9222 定位宠物窗 IPC——排查完删除
+                    .additional_browser_args(
+                        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=9222",
+                    )
+                    .inner_size(PET_W, PET_H)
+                    .decorations(false)
+                    .transparent(true)
+                    .shadow(false)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    .resizable(false)
+                    .focused(false);
+                // 主显示器右下角（逻辑坐标），预留任务栏高度
+                if let Ok(Some(monitor)) = app.primary_monitor() {
+                    let scale = monitor.scale_factor();
+                    let mw = monitor.size().width as f64 / scale;
+                    let mh = monitor.size().height as f64 / scale;
+                    let taskbar = if monitor.position().y >= 0 { 48.0 } else { 0.0 };
+                    pet = pet.position(mw - PET_W - 24.0, mh - PET_H - 24.0 - taskbar);
+                }
+                pet.build()?;
             }
-            pet.build()?;
             Ok(())
         })
         .on_window_event(|window, event| {

@@ -50,6 +50,9 @@ pub enum HostKeyAsk {
     },
     /// AI/MCP 通道：fail-closed，未知指纹直接拒绝
     FailClosed,
+    /// 测试连接（表单「测试连接」按钮）：未知指纹自动接受（不写 known_hosts，
+    /// 正式连接仍走 TOFU）；已知指纹不匹配仍拒绝（check_server_key 顶部分支）
+    AutoAccept,
 }
 
 pub struct HostKeyCtx {
@@ -92,6 +95,7 @@ impl Handler for ConnHandler {
 
         match &ctx.ask {
             HostKeyAsk::FailClosed => Ok(false),
+            HostKeyAsk::AutoAccept => Ok(true),
             HostKeyAsk::Interactive { session_id, out, slot, .. } => {
                 out.send_frame(&ServerFrame::HostKeyUnknown {
                     s: session_id.clone(),
@@ -251,9 +255,15 @@ pub async fn connect(
                         match ask_auth_retry(&ctx, &user, "密码认证被服务器拒绝").await {
                             AuthRetryAnswer::Password(p) => password = p,
                             AuthRetryAnswer::Cancelled => {
+                                // 交互模式 = 用户取消重试；AI/MCP/测试连接 = 无重试通道，首拒即败
+                                let why = if matches!(ctx.ask, HostKeyAsk::Interactive { .. }) {
+                                    "已取消认证"
+                                } else {
+                                    "密码认证被服务器拒绝"
+                                };
                                 break Err(SshError::Auth(format!(
-                                    "{}@{}: 已取消认证",
-                                    host.input.username, host.input.host
+                                    "{}@{}: {}",
+                                    host.input.username, host.input.host, why
                                 )))
                             }
                         }
