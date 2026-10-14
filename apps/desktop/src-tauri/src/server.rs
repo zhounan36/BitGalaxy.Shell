@@ -219,6 +219,12 @@ async fn dispatch(
                 manager.probe(&m.host_id).await;
             });
         }
+        ClientFrame::TestHost { m } => {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager.test_host(m).await;
+            });
+        }
         ClientFrame::Agent { m } => {
             let ctl = agent_ctl.clone();
             let out = out.clone();

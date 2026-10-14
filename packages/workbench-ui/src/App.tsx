@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react'
 import { Input, Layout, Modal, Tabs, message } from 'antd'
 import { CodeOutlined, DashboardOutlined, FolderOutlined } from '@ant-design/icons'
-import type { HostRecord, SessionKind } from '@bgshell/protocol'
+import type { AiCommand, HostRecord, SessionKind } from '@bgshell/protocol'
 import { agentSocket } from './api/ws'
+import { onAiAsk, type AiAskPayload } from './api/aiBridge'
 import {
   clearSessionCwd,
   isSessionAltScreen,
@@ -11,6 +12,7 @@ import {
   type UploadSource,
 } from './api/termUpload'
 import { AgentControls } from './components/AgentControls'
+import { AiCommandPanel } from './components/AiCommandPanel'
 import { DropUploadModal } from './components/DropUploadModal'
 import { HostEditDrawer } from './components/HostEditDrawer'
 import { HostList, type HostStatus } from './components/HostList'
@@ -35,6 +37,12 @@ const KIND_ICON: Record<SessionKind, React.ReactNode> = {
   metrics: <DashboardOutlined />,
 }
 
+// AI 对话面板（仅 SSH 精简版加载）：lazy + 构建常量折叠——完整版的动态 import
+// 会被 tree-shake，ChatPanel chunk 不进入工作台页面的预加载图（AI 对话宿主是宠物窗）
+const ChatPanel = __BGSH_PET__
+  ? null
+  : lazy(() => import('./components/ChatPanel').then((m) => ({ default: m.ChatPanel })))
+
 export function App() {
   const [connected, setConnected] = useState(false)
   const [hosts, setHosts] = useState<HostRecord[]>([])
@@ -55,6 +63,31 @@ export function App() {
   } | null>(null)
   const [authPassword, setAuthPassword] = useState('')
   const [authWaiting, setAuthWaiting] = useState(false)
+  // ── AI 候选命令（propose_command 推送）：累积显示在右下角面板，用户点击粘贴执行 ──
+  const [aiCommands, setAiCommands] = useState<AiCommand[]>([])
+  const [aiCmdOpen, setAiCmdOpen] = useState(true)
+  // ── AI 对话面板（仅 SSH 精简版：完整版的 AI 对话宿主是宠物窗）─────────────
+  const [chatOpen, setChatOpen] = useState(false)
+  const [askReq, setAskReq] = useState<AiAskPayload | null>(null)
+
+  useEffect(() => {
+    if (__BGSH_PET__) return
+    let disposed = false
+    let off: (() => void) | undefined
+    // 终端「问AI」（精简版 requestAiAsk 发给本窗）：打开面板并交给 ChatPanel 组合发送
+    void onAiAsk((p) => {
+      if (disposed || !p?.uid) return
+      setChatOpen(true)
+      setAskReq(p)
+    }).then((u) => {
+      if (disposed) u()
+      else off = u
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
 
   const refreshHosts = useCallback(() => agentSocket.sendControl({ t: 'hosts', m: { op: 'list' } }), [])
 
@@ -90,6 +123,11 @@ export function App() {
             ...prev,
             [frame.m.hostId]: { ok: frame.m.ok, ms: frame.m.ms, message: frame.m.message },
           }))
+          break
+        case 'ai-commands':
+          // AI 提交的候选命令：累积进右下角面板（收起状态也重新弹出）
+          setAiCommands((prev) => [...prev, ...frame.m.commands].slice(-20))
+          setAiCmdOpen(true)
           break
         case 'session-closed':
           clearSessionCwd(frame.s)
@@ -371,7 +409,10 @@ export function App() {
                   onRefresh={refreshHosts}
                 />
               </div>
-              <AgentControls onOpenSettings={() => setSettingsOpen(true)} />
+              <AgentControls
+                onOpenSettings={() => setSettingsOpen(true)}
+                onOpenChat={__BGSH_PET__ ? undefined : () => setChatOpen(true)}
+              />
             </div>
           </Layout.Sider>
         )}
@@ -412,6 +453,7 @@ export function App() {
                 t.kind === 'shell' ? (
                   <TerminalPane
                     sessionId={t.key}
+                    hostName={t.hostName}
                     focusMode={termFocus}
                     onFocusToggle={() => setTermFocus((prev) => !prev)}
                     onFilesDrop={(files) =>
@@ -464,7 +506,24 @@ export function App() {
         />
       </Modal>
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      {aiCmdOpen && aiCommands.length > 0 && (
+        <AiCommandPanel
+          commands={aiCommands}
+          terminals={tabs.filter((t) => t.kind === 'shell').map((t) => ({ key: t.key, hostName: t.hostName }))}
+          activeKey={activeKey}
+          onClose={() => setAiCmdOpen(false)}
+          onClear={() => setAiCommands([])}
+        />
+      )}
       {termUpload && <TermDropUploadCard view={termUpload} onClose={() => setTermUpload(null)} />}
+      {/* SSH 精简版：AI 对话面板常驻挂载（关闭仅不渲染），审批卡片/敏感输入也在此处理 */}
+      {ChatPanel && (
+        <div className="wb-chat-wrap">
+          <Suspense fallback={null}>
+            <ChatPanel open={chatOpen} onClose={() => setChatOpen(false)} incomingAsk={askReq} />
+          </Suspense>
+        </div>
+      )}
       <DropUploadModal
         open={!!dropUpload}
         paths={dropUpload?.paths ?? []}

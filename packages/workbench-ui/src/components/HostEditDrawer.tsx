@@ -1,6 +1,6 @@
-import { useEffect } from 'react'
-import { Button, Drawer, Form, Input, InputNumber, Radio } from 'antd'
-import { FolderOpenOutlined } from '@ant-design/icons'
+import { useEffect, useRef, useState } from 'react'
+import { Alert, Button, Drawer, Form, Input, InputNumber, Radio } from 'antd'
+import { ApiOutlined, FolderOpenOutlined } from '@ant-design/icons'
 import type { HostInput, HostRecord } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
 
@@ -17,10 +17,15 @@ export interface HostEditDrawerProps {
 /** 主机档案新增/编辑（M1：凭据内联 hosts.json；M2 起改由密库托管凭据引用） */
 export function HostEditDrawer({ open, host, onClose, onSaved }: HostEditDrawerProps) {
   const [form] = Form.useForm()
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
+  const testTimer = useRef<number | undefined>(undefined)
 
   useEffect(() => {
     if (!open) return
     form.resetFields()
+    setTesting(false)
+    setTestResult(null)
     if (host) {
       form.setFieldsValue({
         name: host.name,
@@ -35,19 +40,40 @@ export function HostEditDrawer({ open, host, onClose, onSaved }: HostEditDrawerP
     }
   }, [open, host, form])
 
+  // 测试连接回包：展示结果并复位 loading；打开抽屉期间保持订阅，关闭时清理
+  useEffect(() => {
+    if (!open) return
+    const off = agentSocket.onControl((frame) => {
+      if (frame.t !== 'test-host-result') return
+      window.clearTimeout(testTimer.current)
+      setTesting(false)
+      setTestResult({ ok: frame.m.ok, message: frame.m.message ?? (frame.m.ok ? '认证成功' : '认证失败') })
+    })
+    return () => {
+      off()
+      window.clearTimeout(testTimer.current)
+    }
+  }, [open])
+
+  /** 表单值 → HostInput（保存与测试连接共用） */
+  const buildInput = (v: Record<string, unknown>): HostInput => {
+    const auth =
+      v.authKind === 'password'
+        ? { kind: 'password' as const, password: v.password as string }
+        : { kind: 'privateKey' as const, privateKeyPath: v.privateKeyPath as string, passphrase: v.passphrase as string }
+    return {
+      name: v.name as string,
+      host: v.host as string,
+      port: (v.port as number) ?? 22,
+      username: v.username as string,
+      auth,
+    }
+  }
+
   const save = async () => {
     try {
       const v = await form.validateFields()
-      const input: HostInput = {
-        name: v.name as string,
-        host: v.host as string,
-        port: (v.port as number) ?? 22,
-        username: v.username as string,
-        auth:
-          v.authKind === 'password'
-            ? { kind: 'password', password: v.password as string }
-            : { kind: 'privateKey', privateKeyPath: v.privateKeyPath as string, passphrase: v.passphrase as string },
-      }
+      const input = buildInput(v)
       agentSocket.sendControl(
         host
           ? { t: 'hosts', m: { op: 'update', host: { ...input, id: host.id } } }
@@ -56,6 +82,22 @@ export function HostEditDrawer({ open, host, onClose, onSaved }: HostEditDrawerP
       onSaved()
     } catch {
       // 校验未通过：antd 已内联展示错误，不提交
+    }
+  }
+
+  /** 测试连接：用表单当前凭据做一次真实 SSH 认证（不保存档案） */
+  const testConnection = async () => {
+    try {
+      const v = await form.validateFields()
+      setTesting(true)
+      setTestResult(null)
+      agentSocket.sendControl({ t: 'test-host', m: buildInput(v) })
+      testTimer.current = window.setTimeout(() => {
+        setTesting(false)
+        setTestResult({ ok: false, message: '测试超时（45 秒无响应），请检查主机地址与端口' })
+      }, 45_000)
+    } catch {
+      // 校验未通过：antd 已内联展示错误，不测试
     }
   }
 
@@ -73,11 +115,16 @@ export function HostEditDrawer({ open, host, onClose, onSaved }: HostEditDrawerP
       onClose={onClose}
       width={440}
       footer={
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-          <Button onClick={onClose}>取消</Button>
-          <Button type="primary" onClick={() => void save()}>
-            保存
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+          <Button icon={<ApiOutlined />} loading={testing} onClick={() => void testConnection()}>
+            测试连接
           </Button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button onClick={onClose}>取消</Button>
+            <Button type="primary" onClick={() => void save()}>
+              保存
+            </Button>
+          </div>
         </div>
       }
     >
@@ -169,6 +216,15 @@ export function HostEditDrawer({ open, host, onClose, onSaved }: HostEditDrawerP
           }
         </Form.Item>
       </Form>
+      {testResult && (
+        <Alert
+          style={{ marginTop: 16 }}
+          type={testResult.ok ? 'success' : 'error'}
+          showIcon
+          message={testResult.ok ? '测试连接成功' : '测试连接失败'}
+          description={testResult.message}
+        />
+      )}
     </Drawer>
   )
 }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type WheelEvent as ReactWheelEvent } from 'react'
 import { Bubble } from './components/Bubble'
-import { ChatPanel } from './components/ChatPanel'
+import { ChatPanel } from '../components/ChatPanel'
 import { DebugPanel } from './components/DebugPanel'
 import { PetMenu } from './components/PetMenu'
 import { PetPackPanel } from './components/PetPackPanel'
@@ -17,6 +17,7 @@ import {
   savePetSize,
   startWindowDrag,
 } from './api/tauri'
+import { onAiAsk, type AiAskPayload } from '../api/aiBridge'
 import { usePet } from './pet/usePet'
 import { usePetPack } from './pack/usePetPack'
 
@@ -37,6 +38,8 @@ export function App() {
   // 动作包管理面板开合（与 chat 面板互斥，同时只开一个）
   const [packOpen, setPackOpen] = useState(false)
   const [dropHover, setDropHover] = useState(false)
+  // 终端「问AI」投递（工作台主窗 → ai://ask 事件）：开聊天面板并交给 ChatPanel 组合发送
+  const [askReq, setAskReq] = useState<AiAskPayload | null>(null)
   // 精灵尺寸（滚轮缩放，localStorage 持久化；Tauri 宿主联动窗口尺寸，浏览器宿主仅缩 DOM）
   const [petSize, setPetSize] = useState(loadPetSize)
 
@@ -72,6 +75,25 @@ export function App() {
       off?.()
     }
   }, [dispatch])
+
+  // 终端「问AI」：关动作包面板、开聊天面板，payload 交给 ChatPanel（按 uid 去重后组合发送）
+  useEffect(() => {
+    let disposed = false
+    let off: (() => void) | undefined
+    void onAiAsk((p) => {
+      if (disposed || !p?.uid) return
+      setPackOpen(false)
+      setChatOpen(true)
+      setAskReq(p)
+    }).then((u) => {
+      if (disposed) u()
+      else off = u
+    })
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
 
   // ── 双击检测（手动配对，不依赖 DOM dblclick）────────────────────────────
   // 背景：Tauri 下拖窗 startDragging 是模态调用，第一次按下若抖动 ≥4px 触发拖拽，
@@ -149,7 +171,7 @@ export function App() {
           onHostsChange={setMenuHosts}
         />
       )}
-      <ChatPanel open={chatOpen} onClose={() => setChatOpen(false)} />
+      <ChatPanel open={chatOpen} onClose={() => setChatOpen(false)} incomingAsk={askReq} />
       {packOpen && (
         <PetPackPanel
           packs={packs}

@@ -236,7 +236,7 @@ impl ConnRegistry {
                     });
                 }))
             }
-            HostKeyAsk::FailClosed => None,
+            HostKeyAsk::FailClosed | HostKeyAsk::AutoAccept => None,
         };
         let ctx = Arc::new(HostKeyCtx {
             known: self.stores.known.clone(),

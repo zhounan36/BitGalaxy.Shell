@@ -226,6 +226,11 @@ pub enum ClientFrame {
     Probe {
         m: ProbeM,
     },
+    /// 测试连接（添加/编辑主机表单）：用表单凭据做一次真实 SSH 认证，不落主机档案
+    #[serde(rename = "test-host")]
+    TestHost {
+        m: HostInput,
+    },
     #[serde(rename = "agent")]
     Agent {
         m: AgentOp,
@@ -377,6 +382,11 @@ pub enum ServerFrame {
     ProbeResult {
         m: ProbeResultM,
     },
+    /// 测试连接回包（test-host 帧）
+    #[serde(rename = "test-host-result")]
+    TestHostResult {
+        m: TestHostResultM,
+    },
     #[serde(rename = "agent-result")]
     AgentResult {
         m: AgentResult,
@@ -408,6 +418,10 @@ pub enum ServerFrame {
     #[serde(rename = "ai-tool")]
     AiTool {
         m: AiToolM,
+    },
+    #[serde(rename = "ai-commands")]
+    AiCommands {
+        m: AiCommandsM,
     },
     #[serde(rename = "ai-history")]
     AiHistory {
@@ -592,6 +606,14 @@ pub struct ProbeResultM {
     pub message: Option<String>,
 }
 
+/// 测试连接回包：ok = SSH 建连 + 认证通过（密码/私钥有效）
+#[derive(Debug, Clone, Serialize)]
+pub struct TestHostResultM {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AiStatusM {
     #[serde(rename = "chatId")]
@@ -666,6 +688,32 @@ pub struct AiToolM {
     /// 可展开的完整输出（stdout+stderr 或错误详情，已截断）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+}
+
+/// AI 候选命令（propose_command 工具的产物）：不直接执行，推给工作台终端
+/// 由用户点击粘贴到终端、自己敲回车执行
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCommandM {
+    pub id: String,
+    /// 单行命令文本
+    pub command: String,
+    /// 一句话用途说明
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    /// ssh | local：粘贴到 SSH 终端，或复制到剪贴板（本机命令不自动进终端）
+    pub target: String,
+    /// 目标主机名（target=ssh 时用于与当前终端匹配）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+/// 候选命令推送帧（广播；工作台终端窗口里渲染候选列表）
+#[derive(Debug, Clone, Serialize)]
+pub struct AiCommandsM {
+    #[serde(rename = "chatId")]
+    pub chat_id: String,
+    pub commands: Vec<AiCommandM>,
 }
 
 /// 对话历史查询回包（op:"history"；chatId 缺省 = 最近一次对话）

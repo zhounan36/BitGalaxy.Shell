@@ -14,9 +14,12 @@
     "build:ui": "npm run build -w @bgshell/workbench-ui",
     "dev:ui": "npm run dev -w @bgshell/workbench-ui",
     "desktop:assets": "npm run build:protocol && npm run build:ui && node scripts/prep-assets.mjs",
+    "desktop:assets:ssh": "set \"BGSH_FLAVOR=ssh\" && npm run build:protocol && npm run build:ui && node scripts/prep-assets.mjs",
     "desktop:dev": "npm run desktop:assets && start \"bgshell-dev-ui\" /min npm run dev:ui && npm run dev -w @bgshell/desktop",
     "desktop:exe": "npm run desktop:assets && npm run build:exe-only -w @bgshell/desktop",
-    "desktop:build": "npm run desktop:assets && npm run build -w @bgshell/desktop"
+    "desktop:build": "npm run desktop:assets && npm run build -w @bgshell/desktop",
+    "desktop:exe:ssh": "npm run desktop:assets:ssh && npm run build:ssh-exe-only -w @bgshell/desktop",
+    "desktop:build:ssh": "npm run desktop:assets:ssh && npm run build:ssh -w @bgshell/desktop"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",

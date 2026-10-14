@@ -1372,10 +1372,14 @@ pub fn mcp_tool_defs() -> serde_json::Value {
         .collect::<Vec<_>>())
 }
 
-/// OpenAI 兼容 function calling 格式
+/// OpenAI 兼容 function calling 格式。
+/// 聊天助手（桌宠 AI）无权直接执行命令：exec_command / console_command /
+/// local_exec 三个执行类工具不进 LLM 工具集，取而代之的是 propose_command，
+/// 由 AI 把候选命令推给终端，用户自己粘贴执行。
 pub fn llm_tools_json() -> serde_json::Value {
-    serde_json::json!(tool_specs()
+    let mut tools: Vec<serde_json::Value> = tool_specs()
         .into_iter()
+        .filter(|t| t.name != "exec_command" && t.name != "console_command" && t.name != "local_exec")
         .map(|t| {
             serde_json::json!({ "type": "function", "function": {
                 "name": t.name,
@@ -1386,5 +1390,19 @@ pub fn llm_tools_json() -> serde_json::Value {
                     "required": t.required,
                 } } })
         })
-        .collect::<Vec<_>>())
+        .collect();
+    tools.push(serde_json::json!({ "type": "function", "function": {
+        "name": "propose_command",
+        "description": "把建议执行的命令列为候选提交给用户（你没有直接执行命令的权限）。命令会显示在终端窗口的候选列表里，用户点击后会粘贴到对应终端，由用户自己敲回车执行。可以一次提议一条或多条按顺序执行的命令。命令必须是单行、非交互式；需要提权时在命令里写 sudo（用户会在终端里输入密码）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "建议执行的命令（单行；多条命令按顺序分多次调用本工具，或用 && 连接）" },
+                "purpose": { "type": "string", "description": "一句话说明这条命令做什么、为什么要执行" },
+                "target": { "type": "string", "enum": ["ssh", "local"], "description": "ssh = 在远程主机终端执行；local = 在用户本机 PowerShell 执行（本机命令只复制到剪贴板，不自动进终端）" },
+                "host": { "type": "string", "description": "目标主机名（target=ssh 时填，帮用户匹配到正确的终端；不确定可省略）" }
+            },
+            "required": ["command", "target"],
+        } } }));
+    serde_json::json!(tools)
 }

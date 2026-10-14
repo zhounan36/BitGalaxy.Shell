@@ -260,6 +260,19 @@ export interface AiToolEvent {
   output?: string
 }
 
+/** AI 候选命令（propose_command 产物）：不直接执行，推到终端窗口由用户粘贴执行 */
+export interface AiCommand {
+  id: string
+  /** 单行命令文本 */
+  command: string
+  /** 一句话用途说明 */
+  purpose?: string
+  /** ssh = 粘贴到 SSH 终端；local = 复制到剪贴板（本机命令） */
+  target: 'ssh' | 'local'
+  /** 目标主机名（target=ssh 时用于与当前终端匹配） */
+  host?: string
+}
+
 export type AiOp =
   | { op: 'chat'; chatId: string; text: string }
   | { op: 'reset'; chatId: string }
@@ -347,6 +360,7 @@ export type ClientFrame =
   | { t: 'sftp'; s: string; m: SftpOp }
   | { t: 'metrics'; s: string; m: { intervalSec: number } } // 0 = 暂停采集
   | { t: 'probe'; m: { hostId: string } }
+  | { t: 'test-host'; m: HostInput } // 测试连接：用表单凭据做一次真实 SSH 认证，不落主机档案
   | { t: 'agent'; m: AgentOp }
   | { t: 'ai'; m: AiOp }
   | { t: 'ai-approve'; m: { chatId: string; reqId: string; approved: boolean } }
@@ -379,6 +393,7 @@ export type ServerFrame =
   | { t: 'sftp-progress'; s: string; m: SftpProgress }
   | { t: 'metrics-data'; s: string; m: MetricsSample }
   | { t: 'probe-result'; m: { hostId: string; ok: boolean; ms?: number; message?: string } }
+  | { t: 'test-host-result'; m: { ok: boolean; message?: string } } // 测试连接回包：ok = SSH 建连 + 认证通过
   | { t: 'agent-result'; m: AgentResult }
   | { t: 'ai-status'; m: { chatId: string; stage: AiStage; detail?: string } }
   | { t: 'ai-thinking'; m: { chatId: string; delta: string } }
@@ -387,6 +402,8 @@ export type ServerFrame =
   | { t: 'ai-approval'; m: AiApprovalRequest }
   | { t: 'ai-input'; m: AiInputRequest }
   | { t: 'ai-tool'; m: AiToolEvent }
+  /** 候选命令推送（propose_command）：工作台终端窗口渲染候选列表 */
+  | { t: 'ai-commands'; m: { chatId: string; commands: AiCommand[] } }
   | { t: 'ai-history'; m: { chatId: string; messages: AiHistoryMessage[] } }
   | { t: 'ai-chats'; m: { chats: AiChatSummary[] } }
   /** SSH 控制台输出增量（console_command 运行中流式回传） */

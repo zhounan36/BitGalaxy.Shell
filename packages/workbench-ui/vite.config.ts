@@ -2,8 +2,17 @@ import { resolve } from 'node:path'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// SSH 精简版（BGSH_FLAVOR=ssh）：只构建工作台单入口，跳过桌宠页 /pet/ 与
+// public 动作包素材（pet-packs/** 约 89MB + 规范文档/模板），配合 Tauri
+// --no-default-features（不含 pet feature）实现独立 SSH 客户端安装包
+const sshOnly = process.env.BGSH_FLAVOR === 'ssh'
+
 export default defineConfig({
   plugins: [react()],
+  // 精简版不打 public 目录（全部为桌宠资源）
+  publicDir: sshOnly ? false : 'public',
+  // 构建形态常量：前端按完整版/精简版分流（如终端「问AI」的目标窗口、工作台是否内嵌 ChatPanel）
+  define: { __BGSH_PET__: JSON.stringify(!sshOnly) },
   server: {
     port: 17177,
     // 固定 IPv4 回环：Tauri 壳探测 dev server（127.0.0.1），避免 Node 把 localhost 解析到 ::1
@@ -16,13 +25,15 @@ export default defineConfig({
   },
   // MPA 双入口：`/` 工作台（index.html）+ `/pet/` 桌宠（pet/index.html，与随包
   // 分发路径 apps/desktop/ui/pet/ 一致；素材为标准动作包 public/pet-packs/**，
-  // 内置包 pet-packs/builtin-whale，绝对路径 /pet-packs/**）
+  // 内置包 pet-packs/builtin-whale，绝对路径 /pet-packs/**）；精简版仅工作台入口
   build: {
     rollupOptions: {
-      input: {
-        index: resolve(__dirname, 'index.html'),
-        pet: resolve(__dirname, 'pet/index.html'),
-      },
+      input: sshOnly
+        ? { index: resolve(__dirname, 'index.html') }
+        : {
+            index: resolve(__dirname, 'index.html'),
+            pet: resolve(__dirname, 'pet/index.html'),
+          },
     },
   },
   // @bgshell/protocol 为 workspace 链接的 TS 源码包（browser 条件直指 src），不走预构建
