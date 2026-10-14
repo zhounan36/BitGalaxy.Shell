@@ -1,6 +1,6 @@
 {
   "name": "@bgshell/protocol",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "Shell Connector 帧协议与共享类型（Agent ↔ 工作台 UI，设计稿 §5.2）",
   "main": "./dist/index.js",

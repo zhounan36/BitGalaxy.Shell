@@ -1,8 +1,11 @@
 import { useEffect, useState } from 'react'
 import { Button, Input, Modal, Switch, Tabs, message } from 'antd'
-import { InfoCircleOutlined, RobotOutlined, SettingOutlined } from '@ant-design/icons'
+import { CopyOutlined, InfoCircleOutlined, MailOutlined, RobotOutlined, SettingOutlined } from '@ant-design/icons'
 import type { AgentResult } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
+import { writeClipboardText } from '../api/clipboard'
+
+const CONTACT_EMAIL = 'zhounan36@163.com'
 
 type SettingsItems = Record<string, unknown>
 
@@ -208,6 +211,36 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
                     Agent v{agentInfo?.version ?? '—'}
                   </span>
                 </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>作者 / Bug 反馈</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>{CONTACT_EMAIL}</span>
+                    <Button
+                      size="small"
+                      icon={<CopyOutlined />}
+                      onClick={() => {
+                        void writeClipboardText(CONTACT_EMAIL)
+                          .then(() => message.success('邮箱已复制'))
+                          .catch(() => message.error('复制失败，请手动复制'))
+                      }}
+                    >
+                      复制
+                    </Button>
+                  </span>
+                </div>
+                <Button
+                  block
+                  icon={<MailOutlined />}
+                  onClick={() => {
+                    window.location.href = `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(
+                      '[BitGalaxy Shell] Bug 反馈',
+                    )}&body=${encodeURIComponent(
+                      `软件版本：Agent v${agentInfo?.version ?? '—'}\n问题描述：\n复现步骤：\n预期行为：\n`,
+                    )}`
+                  }}
+                >
+                  发送 Bug 反馈邮件
+                </Button>
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span>存储</span>
                   <span style={{ color: 'var(--text-muted)' }}>SQLite（bitgalaxy.db）</span>

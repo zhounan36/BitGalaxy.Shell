@@ -1,6 +1,6 @@
 {
   "name": "@bgshell/workbench-ui",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "共享工作台 UI（设计稿 §7）：xterm 终端多标签 + 主机管理；双宿主（Agent 内嵌 / 云端 @pm/shell）",

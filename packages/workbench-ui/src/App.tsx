@@ -43,6 +43,8 @@ export function App() {
   const [activeKey, setActiveKey] = useState<string>()
   const [editing, setEditing] = useState<{ open: boolean; host?: HostRecord }>({ open: false })
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // ── 终端专注模式：隐藏侧栏/标签栏，把宽度让给终端增加列数（docker ps 等宽表不折行）──
+  const [termFocus, setTermFocus] = useState(false)
   // ── 密码认证失败重试弹窗（auth-retry 帧 → retry-auth 回包）─────────────
   const [authRetry, setAuthRetry] = useState<{
     sessionId: string
@@ -55,6 +57,12 @@ export function App() {
   const [authWaiting, setAuthWaiting] = useState(false)
 
   const refreshHosts = useCallback(() => agentSocket.sendControl({ t: 'hosts', m: { op: 'list' } }), [])
+
+  // 专注模式只属于终端页签：切到文件/状态页签、关闭全部页签时自动退出，避免无处退出的死角
+  useEffect(() => {
+    const active = tabs.find((t) => t.key === activeKey)
+    if (termFocus && active?.kind !== 'shell') setTermFocus(false)
+  }, [termFocus, tabs, activeKey])
 
   useEffect(() => {
     let disposed = false
@@ -351,20 +359,22 @@ export function App() {
     <div className="app-shell">
       <TitleBar />
       <Layout style={{ flex: 1, minHeight: 0 }}>
-        <Layout.Sider width={280} className="bgshell-sider">
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <HostList
-              hosts={hosts}
-              hostStatus={hostStatus}
-              onAction={onHostAction}
-              onAdd={() => setEditing({ open: true })}
-              onRefresh={refreshHosts}
-            />
-          </div>
-          <AgentControls onOpenSettings={() => setSettingsOpen(true)} />
-        </div>
-      </Layout.Sider>
+        {!termFocus && (
+          <Layout.Sider width={280} className="bgshell-sider">
+            <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+              <div style={{ flex: 1, minHeight: 0 }}>
+                <HostList
+                  hosts={hosts}
+                  hostStatus={hostStatus}
+                  onAction={onHostAction}
+                  onAdd={() => setEditing({ open: true })}
+                  onRefresh={refreshHosts}
+                />
+              </div>
+              <AgentControls onOpenSettings={() => setSettingsOpen(true)} />
+            </div>
+          </Layout.Sider>
+        )}
       <Layout.Content className="bgshell-content">
         {tabs.length === 0 ? (
           <div className="bgshell-empty">
@@ -378,7 +388,7 @@ export function App() {
           </div>
         ) : (
           <Tabs
-            className="bgshell-tabs"
+            className={termFocus ? 'bgshell-tabs bgshell-tabs-focus' : 'bgshell-tabs'}
             type="editable-card"
             hideAdd
             activeKey={activeKey}
@@ -402,6 +412,8 @@ export function App() {
                 t.kind === 'shell' ? (
                   <TerminalPane
                     sessionId={t.key}
+                    focusMode={termFocus}
+                    onFocusToggle={() => setTermFocus((prev) => !prev)}
                     onFilesDrop={(files) =>
                       startTermUpload(
                         t.key,

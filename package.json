@@ -1,7 +1,7 @@
 {
   "name": "bitgalaxy-shell",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "BitGalaxy Shell：单进程桌面应用（Tauri 2）：内嵌 Agent（SSH 数据面 + WS 工作台 + 桌宠 + MCP stdio）",
   "workspaces": [

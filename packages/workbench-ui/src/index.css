@@ -194,6 +194,90 @@ body {
   padding: 8px;
 }
 
+/* xterm 承载层：左侧留出折行标记槽位（.term-wrap-layer 的 ↳ 画在这里）
+   必须 content-box：FitAddon 按父元素 content 宽度算列数，border-box 会多算 26px */
+.term-host {
+  box-sizing: content-box;
+  height: 100%;
+  padding-left: 26px;
+}
+
+/* ============================================================
+   折行视觉层：↳ 续行标记 + 折行块竖线 + 块结束分隔线
+   （纯覆盖层、pointer-events:none，不进 xterm buffer，复制不受影响）
+   ============================================================ */
+.term-wrap-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.term-wrap-layer .wrap-arrow {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  color: var(--accent);
+  opacity: 0.55;
+  font: 11px/1 var(--font-mono);
+}
+
+.term-wrap-layer .wrap-bar {
+  position: absolute;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  opacity: 0.35;
+}
+
+.term-wrap-layer .wrap-sep {
+  position: absolute;
+  height: 1px;
+  background: linear-gradient(90deg, var(--accent-border), transparent 85%);
+  opacity: 0.6;
+}
+
+/* 专注模式切换按钮（悬停时出现，常驻右上角） */
+.term-focus-btn {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  z-index: 20;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.terminal-holder:hover .term-focus-btn,
+.term-focus-btn:focus-visible {
+  opacity: 1;
+}
+
+.term-focus-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+/* 专注模式：隐藏标签栏，最大化终端可视行数/列数 */
+.bgshell-tabs-focus .ant-tabs-nav {
+  display: none;
+}
+
+.bgshell-tabs-focus .ant-tabs-content-holder {
+  height: 100%;
+}
+
 /* 文件拖入终端面板（拖拽上传到当前目录）高亮 */
 .terminal-holder.drag-over {
   outline: 2px dashed var(--accent);
