@@ -7,9 +7,7 @@
     "tauri": "tauri",
     "dev": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && tauri dev",
     "build": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && tauri build",
-    "build:exe-only": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && tauri build --no-bundle",
-    "build:ssh": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && tauri build --config src-tauri/tauri.ssh.conf.json -- --no-default-features",
-    "build:ssh-exe-only": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && tauri build --no-bundle --config src-tauri/tauri.ssh.conf.json -- --no-default-features"
+    "build:exe-only": "set \"PATH=%USERPROFILE%\\.cargo\\bin;%PATH%\" && tauri build --no-bundle"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

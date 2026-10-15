@@ -39,6 +39,12 @@ async fn spawn_ai_base() -> Result<(), String> {
         .map(|_| ())
 }
 
+/// 写文本文件（串口调试记录落盘：前端收集帧日志，保存对话框定路径后经此写入）
+#[tauri::command]
+fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
 pub fn append_log(data_dir: &PathBuf, msg: &str) {
     let line = format!("{} {msg}\n", chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
     let _ = std::fs::create_dir_all(data_dir);
@@ -141,7 +147,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .invoke_handler(tauri::generate_handler![spawn_ai_base])
+        .invoke_handler(tauri::generate_handler![spawn_ai_base, write_text_file])
         .setup(|_app| {
             let data_dir = resolve_data_dir();
             let _ = std::fs::create_dir_all(&data_dir);

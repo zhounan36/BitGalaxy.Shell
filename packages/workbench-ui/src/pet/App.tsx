@@ -5,19 +5,16 @@ import { DebugPanel } from './components/DebugPanel'
 import { PetMenu } from './components/PetMenu'
 import { PetPackPanel } from './components/PetPackPanel'
 import { PetSprite } from './components/PetSprite'
+import { SettingsModal } from '../components/SettingsModal'
 import {
   applyPetWindowSize,
   clampPetSize,
-  forwardDropUpload,
   isTauri,
   loadPetSize,
-  onFileDrop,
-  openWorkbench,
   PET_SIZE_STEP,
   savePetSize,
   startWindowDrag,
 } from './api/tauri'
-import { onAiAsk, type AiAskPayload } from '../api/aiBridge'
 import { usePet } from './pet/usePet'
 import { usePetPack } from './pack/usePetPack'
 
@@ -38,16 +35,15 @@ export function App() {
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
   const anchorRef = useRef<HTMLDivElement>(null)
   const anchorStartRef = useRef<{ left: number; top: number } | null>(null)
-  // 右键菜单（呼出工作台/主机会话）、AI 对话面板与文件拖放提示
+  // 右键菜单（呼出工具/主机列表）、AI 对话面板与设置弹窗
   const [menuOpen, setMenuOpen] = useState(false)
   // 右键菜单内的主机数量：PetMenu 上报，用于扩宠物窗高度（多主机时菜单不被窗口顶部裁剪）
   const [menuHosts, setMenuHosts] = useState(0)
   const [chatOpen, setChatOpen] = useState(false)
   // 动作包管理面板开合（与 chat 面板互斥，同时只开一个）
   const [packOpen, setPackOpen] = useState(false)
-  const [dropHover, setDropHover] = useState(false)
-  // 终端「问AI」投递（工作台主窗 → ai://ask 事件）：开聊天面板并交给 ChatPanel 组合发送
-  const [askReq, setAskReq] = useState<AiAskPayload | null>(null)
+  // 设置弹窗（AI 配置等，经 7777 settings 帧直达基座）
+  const [settingsOpen, setSettingsOpen] = useState(false)
   // 精灵尺寸（滚轮缩放，localStorage 持久化；Tauri 宿主联动窗口尺寸，浏览器宿主仅缩 DOM）
   const [petSize, setPetSize] = useState(loadPetSize)
   // 对话面板尺寸（ChatPanel 拖拽调整后上报；窗口尺寸随之联动，宠物本体位置不动）。
@@ -70,54 +66,11 @@ export function App() {
       .catch((err) => console.error('applyPetWindowSize failed', err))
   }, [petSize, chatOpen, menuOpen, menuHosts, packOpen, chatSize])
 
-  // OS 级文件拖放（仅 Tauri 宿主）：悬停亮提示，落下转发工作台开上传面板
-  useEffect(() => {
-    if (!isTauri) return
-    let disposed = false
-    let off: (() => void) | undefined
-    void onFileDrop((s) => {
-      if (disposed) return
-      if (s.type === 'hover') setDropHover(true)
-      else if (s.type === 'leave') setDropHover(false)
-      else {
-        setDropHover(false)
-        dispatch({ type: 'poke' })
-        void forwardDropUpload(s.paths)
-      }
-    }).then((u) => {
-      if (disposed) u()
-      else off = u
-    })
-    return () => {
-      disposed = true
-      off?.()
-    }
-  }, [dispatch])
-
-  // 终端「问AI」：关动作包面板、开聊天面板，payload 交给 ChatPanel（按 uid 去重后组合发送）
-  useEffect(() => {
-    let disposed = false
-    let off: (() => void) | undefined
-    void onAiAsk((p) => {
-      if (disposed || !p?.uid) return
-      setPackOpen(false)
-      setChatOpen(true)
-      setAskReq(p)
-    }).then((u) => {
-      if (disposed) u()
-      else off = u
-    })
-    return () => {
-      disposed = true
-      off?.()
-    }
-  }, [])
-
   // ── 双击检测（手动配对，不依赖 DOM dblclick）────────────────────────────
   // 背景：Tauri 下拖窗 startDragging 是模态调用，第一次按下若抖动 ≥4px 触发拖拽，
   // pointerup 会被原生吞掉 → 第一次点击永远无法完成 → DOM dblclick 凑不齐两次 click。
   // 因此改为：原地点按（poke）与「短促微拖」（<250ms 即松手的拖拽）都记一次 tap，
-  // 450ms 内出现两次 tap 即判定为双击 → 打开工作台。
+  // 450ms 内出现两次 tap 即判定为双击 → 打开 AI 对话面板（基座 P6：桌宠即 AI 入口）。
   const DOUBLE_TAP_MS = 450
   const QUICK_DRAG_MS = 250
   const lastTapAtRef = useRef(0)
@@ -129,8 +82,8 @@ export function App() {
     lastTapAtRef.current = now
     if (last && now - last < DOUBLE_TAP_MS) {
       lastTapAtRef.current = 0
-      if (isTauri) void import('@tauri-apps/api/core').then(({ invoke }) => invoke('dbg_evt', { msg: '双击判定成立 → openWorkbench' }))
-      void openWorkbench()
+      setPackOpen(false)
+      setChatOpen(true)
     }
   }
 
@@ -174,7 +127,6 @@ export function App() {
   return (
     <div className="pet-stage" style={{ '--pet-size': `${petSize}px` } as CSSProperties}>
       {debug && <DebugPanel view={view} />}
-      {dropHover && <div className="drop-hint">松手，交给工作台上传</div>}
       {menuOpen && (
         <PetMenu
           onClose={() => setMenuOpen(false)}
@@ -186,13 +138,16 @@ export function App() {
             setChatOpen(false)
             setPackOpen(true)
           }}
+          onOpenSettings={() => {
+            setMenuOpen(false)
+            setSettingsOpen(true)
+          }}
           onHostsChange={setMenuHosts}
         />
       )}
       <ChatPanel
         open={chatOpen}
         onClose={() => setChatOpen(false)}
-        incomingAsk={askReq}
         onPanelResize={setChatSize}
         sizeMax={chatSizeMax(petSize)}
       />
@@ -204,6 +159,7 @@ export function App() {
           onClose={() => setPackOpen(false)}
         />
       )}
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} variant="pet" />
       <div
         ref={anchorRef}
         className="pet-anchor"

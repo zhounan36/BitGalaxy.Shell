@@ -19,7 +19,6 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "resources": ["drivers/*/host.exe"],
     "icon": ["icons/icon.ico", "icons/icon.png"],
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper" },

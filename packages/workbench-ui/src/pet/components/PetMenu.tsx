@@ -1,22 +1,25 @@
 import { useEffect, useState } from 'react'
 import type { HostRecord } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
-import { openHostSession, openWorkbench, hidePet, quitApp } from '../api/tauri'
+import { hidePet, launchTool, quitApp } from '../api/tauri'
 
-/** 菜单内主机最多显示的行数：再多会把窗口/屏幕撑爆，其余收进「更多主机」去工作台看 */
+/** 菜单内主机最多显示的行数：再多会把窗口/屏幕撑爆，其余收进「更多主机」去 SSH 应用看 */
 const MAX_MENU_HOSTS = 6
 
-/** 宠物右键菜单：呼出 AI 对话 / 工作台 / 已存主机（点击开 SSH 终端，"文件"开文件管理） */
+/** 宠物右键菜单（P6 基座）：AI 对话 / 三工具拉起 / 已存主机（点击拉起 SSH 应用）/ 设置 / 动作包 */
 export function PetMenu({
   onClose,
   onOpenChat,
   onOpenPacks,
+  onOpenSettings,
   onHostsChange,
 }: {
   onClose: () => void
   onOpenChat: () => void
   /** 打开动作包管理面板（DIY 宠物动画） */
   onOpenPacks: () => void
+  /** 打开设置弹窗（AI 配置等，经 7777 直达基座） */
+  onOpenSettings: () => void
   /** 主机行数上报：App 据此扩宠物窗高度，菜单才不会被窗口顶部裁剪（已封顶，不会无限增长） */
   onHostsChange: (n: number) => void
 }) {
@@ -64,16 +67,6 @@ export function PetMenu({
         <button
           type="button"
           className="pet-menu-btn pet-menu-strong"
-          onClick={() => {
-            void openWorkbench()
-            onClose()
-          }}
-        >
-          打开工作台
-        </button>
-        <button
-          type="button"
-          className="pet-menu-btn"
           title="与鲸鱼娘对话，让她帮你操作主机"
           onClick={() => {
             onOpenChat()
@@ -81,6 +74,48 @@ export function PetMenu({
           }}
         >
           对话 · AI 助手
+        </button>
+        <div className="pet-menu-row">
+          <button
+            type="button"
+            className="pet-menu-btn"
+            onClick={() => {
+              void launchTool('ssh')
+              onClose()
+            }}
+          >
+            SSH 终端
+          </button>
+          <button
+            type="button"
+            className="pet-menu-btn"
+            onClick={() => {
+              void launchTool('sql')
+              onClose()
+            }}
+          >
+            SQL
+          </button>
+          <button
+            type="button"
+            className="pet-menu-btn"
+            onClick={() => {
+              void launchTool('serial')
+              onClose()
+            }}
+          >
+            串口
+          </button>
+        </div>
+        <button
+          type="button"
+          className="pet-menu-btn"
+          title="AI 配置（API Key / Base URL / 模型）等"
+          onClick={() => {
+            onOpenSettings()
+          }}
+        >
+          设置
         </button>
         <button
           type="button"
@@ -97,7 +132,7 @@ export function PetMenu({
         {hosts === undefined ? (
           <div className="pet-menu-empty">读取主机中…</div>
         ) : hosts.length === 0 ? (
-          <div className="pet-menu-empty">暂无主机，请在工作台添加</div>
+          <div className="pet-menu-empty">暂无主机，请在 SSH 应用中添加</div>
         ) : (
           /* 最多渲染 MAX_MENU_HOSTS 行 + 「更多主机」；屏幕极矮时仍由 pet-menu-hosts 内部滚动兜底 */
           <div className="pet-menu-hosts">
@@ -106,24 +141,13 @@ export function PetMenu({
                 <button
                   type="button"
                   className="pet-menu-btn"
-                  title={`${h.username}@${h.host}:${h.port}`}
+                  title={`${h.username}@${h.host}:${h.port}（在 SSH 应用中打开）`}
                   onClick={() => {
-                    void openHostSession(h.id, 'shell')
+                    void launchTool('ssh')
                     onClose()
                   }}
                 >
                   {h.name}
-                </button>
-                <button
-                  type="button"
-                  className="pet-menu-btn pet-menu-files"
-                  title="打开文件管理"
-                  onClick={() => {
-                    void openHostSession(h.id, 'sftp')
-                    onClose()
-                  }}
-                >
-                  文件
                 </button>
               </div>
             ))}
@@ -131,9 +155,9 @@ export function PetMenu({
               <button
                 type="button"
                 className="pet-menu-btn pet-menu-more"
-                title="打开工作台查看全部主机"
+                title="打开 SSH 应用查看全部主机"
                 onClick={() => {
-                  void openWorkbench()
+                  void launchTool('ssh')
                   onClose()
                 }}
               >

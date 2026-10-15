@@ -1,8 +1,7 @@
 /**
  * SQL 驱动宿主预备：在根 Cargo workspace 构建三个驱动宿主（release）并把 exe 拷到
- * 两个壳的 drivers/{name}/host(.exe)：
- *   - apps/sql/src-tauri/drivers/（SQL 独立应用，随包内置）
- *   - apps/desktop/src-tauri/drivers/（主程序过渡期仍保留 SQL 能力，P6 瘦身后移除）
+ * apps/sql/src-tauri/drivers/{name}/host(.exe)（SQL 独立应用随包内置；P6 起主程序
+ * 基座不再携带 SQL 能力，不再拷 desktop）。
  * tauri.conf.json 的 bundle.resources 驱动 glob 会把它们内置进安装包（安装后位于
  * 安装目录 drivers/{name}/host.exe），运行期 DriverManager::bundled 按
  * 「exe 同级 drivers/{name}/host(.exe)」解析；开发期 tauri-build 同样会
@@ -15,10 +14,7 @@ import { join, resolve } from 'node:path'
 const root = resolve(import.meta.dirname, '..')
 const outDir = join(root, 'target', 'release')
 // 注意：mjs 块注释内不得出现 glob 星号加斜杠序列（会提前终止注释）
-const destRoots = [
-  join(root, 'apps', 'sql', 'src-tauri', 'drivers'),
-  join(root, 'apps', 'desktop', 'src-tauri', 'drivers'),
-]
+const destRoots = [join(root, 'apps', 'sql', 'src-tauri', 'drivers')]
 const ext = process.platform === 'win32' ? '.exe' : ''
 
 const DRIVERS = [

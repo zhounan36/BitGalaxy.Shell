@@ -127,7 +127,8 @@ drivers/host-common, host-mysql, host-postgres, host-sqlite   # 目录不动，�
 | P5 ✅ 2026-10-15 | aiSocket 打通（ChatPanel socket 注入化）、AiSidebar 共享组件（FAB + 基座闸门 + 拉起）、spawn_ai_base（bg-core::ai_base + 三壳 IPC）、ai-commands 面板随 SSH 壳、askAi 失败自动拉起、基座 single-instance --silent 抑制弹窗 | 双客户端（Pet+侧栏）同收流式、任一处审批、未运行可拉起 |
 
 > P5 实施说明：原计划的 `ask-context` 新帧**取消**——终端「问AI」改为投递到本窗 AI 侧栏（emitTo 目标按 `__BGSH_WS__` 入口分流：工具壳发本窗 main、工作台发 pet），上下文仍由 ChatPanel `composeAskText` 拼装后走既有 `op:"chat"` 帧，基座零改动；跨端同步由 OutHub 广播天然覆盖（桌宠与侧栏同收流式）。
-| P6 | 基座后台服务化：删主工作台窗（桌宠窗承载设置/主机档案/对话面板）、删 dispatch 分支与 serial/sftp/sql 链接、托盘三项、去开机自启、数据迁移 | 基座无主窗仍全功能、AI 远程工具可用、三工具可拉起、旧库迁移正确 |
+| P6 ✅ 2026-10-16 | 基座后台服务化：删主工作台窗、dispatch 删数据面分支（保留 Ai/审批/设置/Agent/Hosts-直连 HostStore）、托盘三项拉起三工具、去自启、删 BGSH_FLAVOR 精简版机制、桌宠菜单改工具拉起+设置入口（SettingsModal variant=pet）、串口壳补 write_text_file | 基座无主窗仍全功能、hosts/settings/agent 帧冒烟通过、三工具可拉起 |
+| P6.5（下轮） | 按域拆库：hosts.db / settings.db / chat.db + 旧 bitgalaxy.db 迁移（**勿漏 bg-ai/mcp.rs**）；桌宠资产外置（builtin-whale → bundle.resources，运行时缺包则纯托盘+聊天窗）——即「Pet 可选安装」的技术前提 | 拆库后四壳并发读写无锁冲突；无 pet 资源时 AI 能力不消失 |
 | P7 | 单 NSIS 合包、prep-apps.mjs、快捷方式 hook、卸载清理 | 全新安装后四 EXE 互拉、升级覆盖 |
 
 ## 风险与回退

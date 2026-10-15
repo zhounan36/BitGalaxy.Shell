@@ -17,6 +17,7 @@
     "clipboard-manager:allow-write-text",
     "dialog:allow-open",
     "dialog:allow-save",
-    "allow-spawn-ai-base"
+    "allow-spawn-ai-base",
+    "allow-write-text-file"
   ]
 }
