@@ -124,7 +124,9 @@ drivers/host-common, host-mysql, host-postgres, host-sqlite   # 目录不动，�
 | P2 | SQL 直连改造 + sql_connections 表/帧 + apps/sql 壳 + sql/App 入口 | 直连 MySQL/PG、本地 SQLite、连接保存/恢复 |
 | P3 | SerialSessionManager 抽取 + apps/serial 壳 | 串口开合/DTR/RTS/热插拔/预设 |
 | P4 | apps/ssh 壳 + ssh/App 拆分，dl_http 随迁 | SSH/SFTP/上传/拖出下载/metrics 回归 |
-| P5 | 端口表落地、ask-context 帧、aiSocket、三应用 AI 侧栏、spawn_ai_base | 双客户端（Pet+侧栏）同收流式、任一处审批、未运行可拉起 |
+| P5 ✅ 2026-10-15 | aiSocket 打通（ChatPanel socket 注入化）、AiSidebar 共享组件（FAB + 基座闸门 + 拉起）、spawn_ai_base（bg-core::ai_base + 三壳 IPC）、ai-commands 面板随 SSH 壳、askAi 失败自动拉起、基座 single-instance --silent 抑制弹窗 | 双客户端（Pet+侧栏）同收流式、任一处审批、未运行可拉起 |
+
+> P5 实施说明：原计划的 `ask-context` 新帧**取消**——终端「问AI」改为投递到本窗 AI 侧栏（emitTo 目标按 `__BGSH_WS__` 入口分流：工具壳发本窗 main、工作台发 pet），上下文仍由 ChatPanel `composeAskText` 拼装后走既有 `op:"chat"` 帧，基座零改动；跨端同步由 OutHub 广播天然覆盖（桌宠与侧栏同收流式）。
 | P6 | 基座后台服务化：删主工作台窗（桌宠窗承载设置/主机档案/对话面板）、删 dispatch 分支与 serial/sftp/sql 链接、托盘三项、去开机自启、数据迁移 | 基座无主窗仍全功能、AI 远程工具可用、三工具可拉起、旧库迁移正确 |
 | P7 | 单 NSIS 合包、prep-apps.mjs、快捷方式 hook、卸载清理 | 全新安装后四 EXE 互拉、升级覆盖 |
 

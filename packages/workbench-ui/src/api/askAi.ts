@@ -12,13 +12,21 @@ export interface AskAiOutcome {
  *  可读错误。用于 SQL 终端右键「解释/优化/注释」等轻量场景。 */
 export async function askAi(text: string, system?: string, timeoutMs = 150000): Promise<AskAiOutcome> {
   try {
-    // 3 次重试（约 1.5s）：主程序未运行时快速失败，不长时间等待
+    // 3 次重试（约 1.5s）：主程序未运行时快速失败，转入下方自动拉起
     await aiSocket.connect(3)
   } catch {
-    return {
-      ok: false,
-      text: '',
-      message: '无法连接 AI 服务：请先启动主程序 BitGalaxy Shell（AI 由主程序提供）',
+    // 基座未运行：工具壳内自动静默拉起（spawn_ai_base，命令内部等端口就绪）后重连；
+    // 浏览器 dev / 主程序进程内（本就连得上）不会走到这里
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('spawn_ai_base')
+      await aiSocket.connect(6)
+    } catch {
+      return {
+        ok: false,
+        text: '',
+        message: '无法连接 AI 服务：请先启动主程序 BitGalaxy Shell（AI 由主程序提供）',
+      }
     }
   }
   const reqId = crypto.randomUUID()
