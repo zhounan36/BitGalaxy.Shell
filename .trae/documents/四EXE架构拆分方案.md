@@ -128,7 +128,7 @@ drivers/host-common, host-mysql, host-postgres, host-sqlite   # 目录不动，�
 
 > P5 实施说明：原计划的 `ask-context` 新帧**取消**——终端「问AI」改为投递到本窗 AI 侧栏（emitTo 目标按 `__BGSH_WS__` 入口分流：工具壳发本窗 main、工作台发 pet），上下文仍由 ChatPanel `composeAskText` 拼装后走既有 `op:"chat"` 帧，基座零改动；跨端同步由 OutHub 广播天然覆盖（桌宠与侧栏同收流式）。
 | P6 ✅ 2026-10-16 | 基座后台服务化：删主工作台窗、dispatch 删数据面分支（保留 Ai/审批/设置/Agent/Hosts-直连 HostStore）、托盘三项拉起三工具、去自启、删 BGSH_FLAVOR 精简版机制、桌宠菜单改工具拉起+设置入口（SettingsModal variant=pet）、串口壳补 write_text_file | 基座无主窗仍全功能、hosts/settings/agent 帧冒烟通过、三工具可拉起 |
-| P6.5（下轮） | 按域拆库：hosts.db / settings.db / chat.db + 旧 bitgalaxy.db 迁移（**勿漏 bg-ai/mcp.rs**）；桌宠资产外置（builtin-whale → bundle.resources，运行时缺包则纯托盘+聊天窗）——即「Pet 可选安装」的技术前提 | 拆库后四壳并发读写无锁冲突；无 pet 资源时 AI 能力不消失 |
+| P6.5 ✅ 2026-10-16 | 按域拆库：hosts.db / settings.db / chat.db（`Stores::open_domains`，四壳与 mcp.rs 统一）+ 旧 bitgalaxy.db 幂等迁移（ATTACH 逐表 INSERT OR REPLACE → 改名 .migrated.bak）；桌宠资产外置：builtin-whale 89MB 移出 exe（vite public → src-tauri/resources → bundle.resources `resources/pet-packs/**/*`），`builtin_pack_root` IPC + asset protocol 加载，缺包降级占位形态（🐳 浮标，聊天/菜单不受影响）。**坑**：glob 0.3 末尾 `**` 只匹配目录，资源 glob 必须写 `**/*` | desktop 109→23.8MB；真机迁移验证（演示主机从 hosts.db 返回）；chat/hosts/settings 三库并发面隔离 |
 | P7 | 单 NSIS 合包、prep-apps.mjs、快捷方式 hook、卸载清理 | 全新安装后四 EXE 互拉、升级覆盖 |
 
 ## 风险与回退

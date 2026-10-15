@@ -8,7 +8,7 @@
  * 浏览器宿主无磁盘动作包能力，恒为内置。
  */
 import type { BehaviorSpec, PetStateKey, PetStateKeyV1 } from '../pet/machine'
-import { BUILTIN_CLIPS, builtinFrameUrl, type ClipSpec } from './builtinClips'
+import { BUILTIN_CLIPS, builtinAvailable, builtinFrameUrl, type ClipSpec } from './builtinClips'
 
 /** 统一 clip：多格式动画（frames=帧序列 / image=单图·动图 / video=单视频） */
 export type ResolvedClip =
@@ -90,7 +90,8 @@ export interface PackRuntime {
 
 const builtinClip = (key: PetStateKey): ResolvedClip | null => {
   const spec = (BUILTIN_CLIPS as Partial<Record<string, ClipSpec>>)[key]
-  if (!spec) return null // 自定义 key 无内置动画 → 渲染层跳过该图层
+  // 内置包未安装（P6.5 桌宠可选）或自定义 key 无内置动画 → 渲染层跳过该图层
+  if (!spec || !builtinAvailable()) return null
   return {
     kind: 'frames',
     frames: spec.frames,

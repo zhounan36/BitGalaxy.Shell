@@ -420,6 +420,36 @@ impl Stores {
             secrets: Secrets::default(),
         }
     }
+
+    /// P6.5 按域拆库打开：hosts.db / settings.db / chat.db（+ 旧单库与 JSON 迁移）。
+    /// 四壳与 MCP 子进程统一走这里：chat.db 仅基座写入，其余壳只建库不写，
+    /// 多进程写冲突面从「共享单库」缩小到「各自域库」。
+    pub fn open_domains(data_dir: &std::path::Path) -> Stores {
+        use crate::db;
+        let hosts_db = Db::open_domain(&data_dir.join("hosts.db"), db::HOSTS_SCHEMA);
+        let settings_db = Db::open_domain(&data_dir.join("settings.db"), db::SETTINGS_SCHEMA);
+        let chat_db = Db::open_domain(&data_dir.join("chat.db"), db::CHAT_SCHEMA);
+
+        // 迁移链（均幂等）：旧单库 bitgalaxy.db → 域库；更早 JSON → 对应域库。
+        // 失败只记日志不阻断启动：域库仍可用，下次启动自动重试
+        if let Err(e) = db::migrate_from_legacy_db(data_dir, &hosts_db, &settings_db, &chat_db) {
+            eprintln!("[bg-core] 旧单库迁移失败（下次启动重试）：{e}");
+        }
+        hosts_db.migrate_hosts(data_dir);
+        hosts_db.migrate_known_hosts(data_dir);
+        settings_db.migrate_settings(data_dir);
+        settings_db.migrate_audit(data_dir);
+        settings_db.migrate_ai(data_dir);
+
+        Stores {
+            hosts: HostStore { db: hosts_db.clone() },
+            known: KnownHosts { db: hosts_db },
+            settings: SettingsStore { db: settings_db.clone() },
+            audit: AuditQueue { db: settings_db },
+            chat: ChatStore { db: chat_db },
+            secrets: Secrets::default(),
+        }
+    }
 }
 
 // ── AI 对话记录（持久化，供重开应用后查阅/续聊）────────────────────────────

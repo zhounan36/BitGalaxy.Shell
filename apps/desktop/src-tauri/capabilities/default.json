@@ -15,6 +15,7 @@
     "clipboard-manager:allow-write-text",
     "dialog:allow-open",
     "allow-launch-tool",
+    "allow-builtin-pack-root",
     "allow-set-pet-visible",
     "allow-quit-app"
   ]

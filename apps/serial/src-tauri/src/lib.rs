@@ -158,8 +158,7 @@ pub fn run() {
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(DEFAULT_PORT);
 
-            let db = bg_core::db::Db::open(&data_dir.join("bitgalaxy.db"));
-            let stores = Stores::open(db);
+            let stores = Stores::open_domains(&data_dir);
             let dispatcher = Arc::new(SerialDispatcher { stores });
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = WsServer::start(port, dispatcher, None).await {

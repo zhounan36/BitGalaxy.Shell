@@ -222,6 +222,10 @@ export function PetSprite({
     else onPoke?.()
   }
 
+  // P6.5 桌宠资产可选：没有任何可渲染 clip（内置包未安装且无用户包）时
+  // 渲染占位形态——宠物区域保持可见可交互（拖动/右键/双击照常）
+  const hasAnyClip = layers.some((l) => runtimeRef.current.clip(l.state) !== null)
+
   return (
     <div
       className="pet-sprite"
@@ -231,6 +235,7 @@ export function PetSprite({
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
     >
+      {!hasAnyClip && <div className="pet-sprite-fallback" title="桌宠资源未安装（可在动作包管理中导入）">🐳</div>}
       {layers.map((l, i) => {
         const isTop = i === layers.length - 1
         const clip = runtimeRef.current.clip(l.state)

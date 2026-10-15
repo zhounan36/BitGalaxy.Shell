@@ -79,6 +79,36 @@ fn launch_tool(tool: String) -> Result<(), String> {
     bg_core::ai_base::spawn_sibling_exe(exe)
 }
 
+/// 内置动作包（鲸鱼娘）落盘根目录（P6.5 桌宠资产外置：bundle.resources/pet-packs）。
+/// 前端经 asset protocol 加载帧素材；目录不存在（未随包安装，桌宠可选安装）
+/// 返回 Err → 前端降级为无精灵形态（聊天/菜单不受影响）。
+/// 布局：资源按 slice glob 原样映射 → <资源根>/resources/pet-packs/builtin-whale
+/// （tauri-build 开发期拷到 target/{profile}/resources/…，NSIS 安装到安装目录 resources/…）
+#[tauri::command]
+fn builtin_pack_root(app: tauri::AppHandle) -> Result<String, String> {
+    let join_rel = |mut p: std::path::PathBuf| {
+        for c in ["resources", "pet-packs", "builtin-whale"] {
+            p = p.join(c);
+        }
+        p
+    };
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(rd) = app.path().resource_dir() {
+        candidates.push(join_rel(rd));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(join_rel(dir.to_path_buf()));
+        }
+    }
+    for dir in &candidates {
+        if dir.is_dir() {
+            return Ok(dir.to_string_lossy().into_owned());
+        }
+    }
+    Err("内置动作包未安装（resources/pet-packs/builtin-whale 缺失）".into())
+}
+
 /// 隐藏/唤出桌宠（宠物窗菜单隐藏后，经托盘开关或二次启动唤回）；
 /// 无宠物窗构建（窗口查找返回 None → no-op），但命令保留注册以匹配
 /// build.rs 的应用 ACL 清单与 capabilities/default.json 授权
@@ -148,6 +178,7 @@ fn make_agent_ctl(app: tauri::AppHandle, data_dir: PathBuf) -> server::AgentCtl 
 fn with_ipc_commands(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     b.invoke_handler(tauri::generate_handler![
         launch_tool,
+        builtin_pack_root,
         set_pet_visible,
         quit_app,
         pet_pack::pet_pack_import,
@@ -159,7 +190,7 @@ fn with_ipc_commands(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry
 
 #[cfg(not(feature = "pet"))]
 fn with_ipc_commands(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
-    b.invoke_handler(tauri::generate_handler![launch_tool, set_pet_visible, quit_app])
+    b.invoke_handler(tauri::generate_handler![launch_tool, builtin_pack_root, set_pet_visible, quit_app])
 }
 
 /// dev server 探测：IPv4/IPv6 双栈 + HTTP 层验证（TCP 通且有 HTTP 响应才算就绪；
@@ -213,10 +244,8 @@ pub fn run() {
             let data_dir = resolve_data_dir();
             append_log(&data_dir, &format!("[bgshell] v{VERSION} 启动（AI 基座·后台服务）"));
 
-            // ── 持久层 + WS 服务 ──────────────────────────────────────
-            let db = bg_core::db::Db::open(&data_dir.join("bitgalaxy.db"));
-            db.migrate_from_json(&data_dir);
-            let stores = Stores::open(db);
+            // ── 持久层（P6.5 按域拆库：hosts/settings/chat + 旧库迁移）+ WS 服务 ──
+            let stores = Stores::open_domains(&data_dir);
 
             let agent_ctl = make_agent_ctl(app.handle().clone(), data_dir.clone());
             let policy = bg_core::policy::load_ai_policy(&data_dir, &stores);

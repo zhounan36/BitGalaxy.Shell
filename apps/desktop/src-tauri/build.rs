@@ -6,6 +6,7 @@ fn main() {
     tauri_build::try_build(
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
             "launch_tool",
+            "builtin_pack_root",
             "set_pet_visible",
             "quit_app",
         ])),
