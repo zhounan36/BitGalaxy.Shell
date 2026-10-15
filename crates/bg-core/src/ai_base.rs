@@ -1,6 +1,7 @@
-//! AI 基座拉起助手（四 EXE 架构）：三个工具壳（ssh/sql/serial）共用。
-//! AI 基座 = bgshell-desktop.exe（WS 7777，BGSH_PORT 覆盖），由工具壳按需
-//! 静默拉起（--silent 后台常驻，不弹工作台/桌宠窗口）。
+//! AI 基座与兄弟进程助手（四 EXE 架构）：
+//! - 三工具壳（ssh/sql/serial）经 ensure_ai_base 按需静默拉起 AI 基座
+//!   （bgshell-desktop.exe，WS 7777，BGSH_PORT 覆盖，--silent 后台常驻不弹窗）
+//! - AI 基座经 spawn_sibling_exe 拉起三工具 EXE（托盘菜单 / 桌宠菜单入口）
 //! 拉起前先探测端口：基座已在线时不再 spawn，避免二次实例触发
 //! single-instance 回调唤起窗口（基座侧对 --silent 也做了抑制兜底）。
 
@@ -63,4 +64,27 @@ pub fn ensure_ai_base() -> Result<bool, String> {
         std::thread::sleep(Duration::from_millis(300));
     }
     Err("AI 基座已启动但端口 15s 内未就绪".into())
+}
+
+/// 拉起同目录的兄弟 EXE（基座托盘/桌宠菜单 → 三工具应用）。
+/// exe_name 如 "bgshell-ssh.exe"；不存在/启动失败返回可读错误（弹托盘日志用）。
+/// 工具壳自带 single-instance：已运行时二次 spawn 由其自行唤起主窗。
+pub fn spawn_sibling_exe(exe_name: &str) -> Result<(), String> {
+    let dir = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .parent()
+        .ok_or("无法定位当前 exe 所在目录")?
+        .to_path_buf();
+    let exe = dir.join(exe_name);
+    if !exe.is_file() {
+        return Err(format!("未找到 {exe_name}（{}）", exe.display()));
+    }
+    let mut cmd = std::process::Command::new(&exe);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    cmd.spawn().map_err(|e| format!("拉起 {exe_name} 失败：{e}"))?;
+    Ok(())
 }

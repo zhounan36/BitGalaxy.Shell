@@ -118,14 +118,14 @@ export async function applyPetWindowSize(
   await win.setSize(new LogicalSize(w, h))
 }
 
-/** 双击宠物：Tauri 唤起工作台主窗；浏览器开 Agent 内嵌工作台 */
-export async function openWorkbench(): Promise<void> {
-  if (isTauri) {
-    const { invoke } = await import('@tauri-apps/api/core')
-    await invoke('show_main_window')
-  } else {
-    window.open('http://127.0.0.1:7777', '_blank')
-  }
+/** 拉起三工具应用（P6 基座后台服务化：桌宠菜单/兜底页 → 工具 EXE）。
+ * 工具壳自带 single-instance：已运行则唤起其主窗。浏览器宿主 no-op */
+export type ToolName = 'ssh' | 'sql' | 'serial'
+
+export async function launchTool(tool: ToolName): Promise<void> {
+  if (!isTauri) return
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('launch_tool', { tool })
 }
 
 /** 隐藏桌宠（托盘"显示桌宠"或再次启动应用唤回；浏览器宿主 no-op） */
@@ -140,36 +140,6 @@ export async function quitApp(): Promise<void> {
   if (!isTauri) return
   const { invoke } = await import('@tauri-apps/api/core')
   await invoke('quit_app')
-}
-
-type SessionKindName = 'shell' | 'sftp' | 'metrics'
-
-/** 向主窗（工作台）发事件。主窗可能还停在启动 loading 壳页（监听未挂载），1.2s 后补发一次 */
-async function emitToMainWithRetry(event: string, payload: Record<string, unknown>): Promise<void> {
-  const { emitTo } = await import('@tauri-apps/api/event')
-  await emitTo('main', event, payload)
-  window.setTimeout(() => {
-    void emitTo('main', event, payload)
-  }, 1200)
-}
-
-/** 右键菜单呼出会话：唤起主窗并转发主机/会话类型（浏览器宿主退化为打开工作台） */
-export async function openHostSession(hostId: string, kind: SessionKindName): Promise<void> {
-  if (!isTauri) {
-    await openWorkbench()
-    return
-  }
-  const { invoke } = await import('@tauri-apps/api/core')
-  await invoke('show_main_window')
-  await emitToMainWithRetry('pet://open-session', { hostId, kind, uid: crypto.randomUUID() })
-}
-
-/** 把拖入宠物的文件路径转发给工作台，打开上传面板 */
-export async function forwardDropUpload(paths: string[]): Promise<void> {
-  if (!isTauri || paths.length === 0) return
-  const { invoke } = await import('@tauri-apps/api/core')
-  await invoke('show_main_window')
-  await emitToMainWithRetry('pet://drop-upload', { paths, uid: crypto.randomUUID() })
 }
 
 /** 宠物窗文件拖放信号：悬停（展示提示）/ 离开 / 落下（带本地路径） */

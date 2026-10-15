@@ -1,7 +1,7 @@
 [package]
 name = "bgshell-desktop"
 version = "0.3.1"
-description = "BitGalaxy Shell 桌面应用（Tauri 2 单进程）：内嵌 Agent（SSH/WS/MCP）+ 工作台 + 桌宠 + 托盘"
+description = "BitGalaxy Shell AI 基座（Tauri 2 后台服务）：WS 7777 承载 AI/设置/主机帧 + 桌宠 + 托盘 + MCP"
 edition = "2021"
 
 [lib]
@@ -14,53 +14,29 @@ crate-type = ["rlib"]
 tauri-build = { version = "2", features = [] }
 
 [features]
-# 桌宠（宠物窗 + 动作包管理）：默认完整版；SSH 精简版构建时 --no-default-features，
-# 不编译 pet_pack/zip、不创建宠物窗、不打包含约 89MB 的 pet-packs 素材
+# 桌宠（宠物窗 + 动作包管理）：基座的 AI 形象；无 pet 构建为纯托盘后台服务
 default = ["pet"]
-pet = ["dep:zip"]
+pet = ["dep:zip", "dep:uuid"]
 
 [dependencies]
 bg-core = { path = "../../../crates/bg-core" }
-bg-serial = { path = "../../../crates/bg-serial" }
+# bg-ssh：ConnRegistry（SSH 连接池）——AI 远程工具（exec_command/SFTP）与 MCP 的硬依赖
 bg-ssh = { path = "../../../crates/bg-ssh" }
-bg-sql = { path = "../../../crates/bg-sql" }
 bg-ai = { path = "../../../crates/bg-ai" }
 bg-server = { path = "../../../crates/bg-server" }
 tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-single-instance = "2"
-tauri-plugin-autostart = "2"
-# 终端复制/粘贴：WebView2 下 navigator.clipboard.readText 不可靠，走原生剪贴板
+# 桌宠对话复制：WebView2 下 navigator.clipboard 不可靠，走原生剪贴板
 tauri-plugin-clipboard-manager = "2"
-# 工作台原生文件选择器（主机编辑：私钥文件路径浏览）
+# 桌宠动作包 zip 导入的原生文件选择器
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "io-std", "sync", "fs", "process"] }
-tokio-tungstenite = "0.26"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync"] }
 futures-util = "0.3"
-# 默认后端 aws-lc-rs 需要 NASM；改用 ring（纯 cc 编译，无额外系统依赖）
-russh = { version = "0.59", default-features = false, features = ["ring", "flate2", "rsa"] }
-# rsa 0.10.0-rc.12 与当前解析的 pkcs8 不兼容（russh 按 rc.10 开发），钉住
-rsa = "=0.10.0-rc.10"
-russh-sftp = "2"
-# 串口会话（kind="serial"）：serialport 枚举/参数 + tokio-serial 异步读写（SerialStream）
-serialport = "4"
-tokio-serial = "5"
-rusqlite = { version = "0.32", features = ["bundled"] }
-uuid = { version = "1", features = ["v4"] }
-base64 = "0.22"
-sha2 = "0.10"
-regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 chrono = { version = "0.4", features = ["serde"] }
-thiserror = "2"
-# 传输预检：本地磁盘剩余空间（跨平台）
-fs2 = "0.4"
 # 桌宠动作包：用户 DIY 动画 zip 导入（解压 + 校验落盘 pet-packs/）；仅完整版（feature = "pet"）
 zip = { version = "2", optional = true }
-
-[target.'cfg(windows)'.dependencies]
-# 传输预检：GetVolumeInformationW 查卷格式（FAT32 单文件 4GB 上限）
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+uuid = { version = "1", features = ["v4"], optional = true }
 
 # profile（dev 行号表 / release 关 LTO+strip）已上移到根 workspace Cargo.toml

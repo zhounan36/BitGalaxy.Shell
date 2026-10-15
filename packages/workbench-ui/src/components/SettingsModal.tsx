@@ -9,8 +9,18 @@ const CONTACT_EMAIL = 'zhounan36@163.com'
 
 type SettingsItems = Record<string, unknown>
 
-/** 配置弹窗：通用设置 / AI 助手 / 关于 */
-export function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+/** 配置弹窗：通用设置 / AI 助手 / 关于。
+ *  variant="pet"（基座桌宠宿主）：隐藏「通用」页——基座无窗口偏好与自启（P6 后台服务化），
+ *  仅保留 AI 配置与关于（settings/agent 帧经 7777 直达基座）。 */
+export function SettingsModal({
+  open,
+  onClose,
+  variant = 'default',
+}: {
+  open: boolean
+  onClose: () => void
+  variant?: 'default' | 'pet'
+}) {
   const [items, setItems] = useState<SettingsItems>({})
   const [agentInfo, setAgentInfo] = useState<AgentResult>()
   // AI 配置本地草稿（保存时才提交）
@@ -95,49 +105,53 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
     >
       <Tabs
         items={[
-          {
-            key: 'general',
-            label: (
-              <span>
-                <SettingOutlined /> 通用
-              </span>
-            ),
-            children: (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 20, padding: '8px 0' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span>开机自启</span>
-                  <Switch
-                    checked={!!agentInfo?.autostart}
-                    onChange={(enabled) =>
-                      agentSocket.sendControl({ t: 'agent', m: { op: 'set-autostart', enabled } })
-                    }
-                  />
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span>启动时打开工作台</span>
-                  <Switch
-                    checked={items['app.openOnStart'] !== false}
-                    onChange={setOpenOnStart}
-                  />
-                </div>
-                <Button
-                  danger
-                  block
-                  onClick={() => {
-                    Modal.confirm({
-                      title: '退出本机 Agent？',
-                      content: '已打开的终端 / 文件 / 状态会话将全部断开。',
-                      okText: '退出',
-                      cancelText: '取消',
-                      onOk: () => agentSocket.sendControl({ t: 'agent', m: { op: 'shutdown' } }),
-                    })
-                  }}
-                >
-                  退出 Agent
-                </Button>
-              </div>
-            ),
-          },
+          ...(variant === 'pet'
+            ? []
+            : [
+                {
+                  key: 'general',
+                  label: (
+                    <span>
+                      <SettingOutlined /> 通用
+                    </span>
+                  ),
+                  children: (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 20, padding: '8px 0' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span>开机自启</span>
+                        <Switch
+                          checked={!!agentInfo?.autostart}
+                          onChange={(enabled) =>
+                            agentSocket.sendControl({ t: 'agent', m: { op: 'set-autostart', enabled } })
+                          }
+                        />
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span>启动时打开工作台</span>
+                        <Switch
+                          checked={items['app.openOnStart'] !== false}
+                          onChange={setOpenOnStart}
+                        />
+                      </div>
+                      <Button
+                        danger
+                        block
+                        onClick={() => {
+                          Modal.confirm({
+                            title: '退出本机 Agent？',
+                            content: '已打开的终端 / 文件 / 状态会话将全部断开。',
+                            okText: '退出',
+                            cancelText: '取消',
+                            onOk: () => agentSocket.sendControl({ t: 'agent', m: { op: 'shutdown' } }),
+                          })
+                        }}
+                      >
+                        退出 Agent
+                      </Button>
+                    </div>
+                  ),
+                },
+              ]),
           {
             key: 'ai',
             label: (

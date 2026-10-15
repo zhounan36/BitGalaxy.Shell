@@ -1,20 +1,17 @@
-//! BitGalaxy Shell 桌面应用（Tauri 2，单进程架构）：
-//! - Agent 全内嵌：WS 服务（/ws）+ SSH/SFTP/审计/设置 + AI 对话 + MCP（--mcp-stdio 子模式）
-//! - 两种构建形态（Cargo feature `pet`）：
-//!   - 完整版（默认）：入口只有桌宠，主窗口 visible=false 后台预加载，双击宠物 / 宠物菜单 / 托盘按需唤起
-//!   - SSH 精简版（--no-default-features）：无桌宠（不建宠物窗、不打动作包素材），
-//!     启动直接进工作台 + 托盘，安装体积与常驻内存显著降低
-//! - 桌宠可隐藏/唤出：宠物菜单隐藏，托盘"隐藏/显示桌宠"开关或二次启动唤回
-//! - 系统托盘：打开工作台 / 桌宠开关（仅完整版）/ 退出；主窗口关闭 = 隐藏到托盘
-//! - 开机自启（tauri-plugin-autostart）：启动桌面 exe 并带 --silent（不弹工作台，后台常驻）
+//! BitGalaxy Shell AI 基座（Tauri 2，P6 后台服务化）：
+//! - 后台服务进程：WS 服务（/ws :7777）只承载 AI / 审批 / 设置 / 主机档案 / Agent 帧；
+//!   SSH/SFTP/串口/SQL 数据面归三工具壳（bgshell-ssh/sql/serial，7771/7772/7773）
+//! - 无主工作台窗口：可见形态仅系统托盘 + 桌宠窗（Cargo feature `pet`，桌宠即 AI 形象）
+//! - 托盘：拉起三工具 EXE / 桌宠开关（完整版）/ 退出；不注册开机自启——
+//!   基座由任一工具的 AI 侧栏按需静默拉起（spawn_ai_base，见 bg-core::ai_base）
+//! - MCP 子模式（--mcp-stdio）保持不变
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 use bg_core::protocol::{AgentOp, AgentResult};
 use bg_core::stores::Stores;
@@ -53,7 +50,7 @@ pub fn append_log(data_dir: &PathBuf, msg: &str) {
         .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
-// ── Tauri IPC 命令（工作台/桌宠使用）─────────────────────────────────────
+// ── Tauri IPC 命令（桌宠窗使用）──────────────────────────────────────────
 
 /// 托盘"桌宠开关"菜单项句柄：隐藏/唤出后同步文案（隐藏桌宠 ⇄ 显示桌宠）
 struct PetToggle(MenuItem<tauri::Wry>);
@@ -69,29 +66,21 @@ fn sync_pet_tray_text(app: &tauri::AppHandle) {
     }
 }
 
-/// 双击宠物/托盘外的回工作台入口：唤起主窗口
+/// 拉起三工具应用（桌宠菜单 / 前端兜底页入口）：同目录 spawn 兄弟 EXE。
+/// tool ∈ ssh|sql|serial；工具壳自带 single-instance（已运行则唤起其主窗）
 #[tauri::command]
-fn show_main_window(app: tauri::AppHandle) {
-    let data_dir = resolve_data_dir();
-    append_log(&data_dir, "[dbg] show_main_window 被调用");
-    match app.get_webview_window("main") {
-        Some(win) => {
-            append_log(&data_dir, &format!("[dbg] show 结果: {:?}", win.show()));
-            let _ = win.set_focus();
-        }
-        None => append_log(&data_dir, "[dbg] main 窗口不存在"),
-    }
-}
-
-/// 临时诊断：桌宠事件探针（修完双击问题后删除）
-#[tauri::command]
-fn dbg_evt(msg: String) {
-    let data_dir = resolve_data_dir();
-    append_log(&data_dir, &format!("[dbg] {msg}"));
+fn launch_tool(tool: String) -> Result<(), String> {
+    let exe = match tool.as_str() {
+        "ssh" => "bgshell-ssh.exe",
+        "sql" => "bgshell-sql.exe",
+        "serial" => "bgshell-serial.exe",
+        other => return Err(format!("未知工具：{other}")),
+    };
+    bg_core::ai_base::spawn_sibling_exe(exe)
 }
 
 /// 隐藏/唤出桌宠（宠物窗菜单隐藏后，经托盘开关或二次启动唤回）；
-/// SSH 精简版无宠物窗（窗口查找返回 None → no-op），但命令保留注册以匹配
+/// 无宠物窗构建（窗口查找返回 None → no-op），但命令保留注册以匹配
 /// build.rs 的应用 ACL 清单与 capabilities/default.json 授权
 #[tauri::command]
 fn set_pet_visible(app: tauri::AppHandle, visible: bool) {
@@ -110,113 +99,23 @@ fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
-/// 文件元信息（拖拽上传面板：展示大小 / 跳过目录）
-#[derive(serde::Serialize)]
-struct FileStat {
-    name: String,
-    size: u64,
-    is_dir: bool,
-}
-
-#[tauri::command]
-fn stat_file(path: String) -> Result<FileStat, String> {
-    let md = std::fs::metadata(&path).map_err(|e| e.to_string())?;
-    let name = std::path::Path::new(&path)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.clone());
-    Ok(FileStat {
-        name,
-        size: md.len(),
-        is_dir: md.is_dir(),
-    })
-}
-
-/// 分块读取本地文件（拖拽上传：工作台按 256KB 拉取，经 IPC 二进制响应返回）
-#[tauri::command]
-fn read_file_chunk(path: String, offset: u64, len: u32) -> Result<tauri::ipc::Response, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-    f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
-    let mut buf = vec![0u8; len as usize];
-    let mut total = 0;
-    while total < buf.len() {
-        match f.read(&mut buf[total..]) {
-            Ok(0) => break,
-            Ok(n) => total += n,
-            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e.to_string()),
-        }
-    }
-    buf.truncate(total);
-    Ok(tauri::ipc::Response::new(buf))
-}
-
-/// 写文本文件（串口调试记录落盘：前端收集帧日志，保存对话框定路径后经此写入）
-#[tauri::command]
-fn write_text_file(path: String, contents: String) -> Result<(), String> {
-    std::fs::write(&path, contents).map_err(|e| e.to_string())
-}
-
-/// Agent 自身控制（工作台设置页）：自启 / 启动时打开工作台 / 退出
-fn make_agent_ctl(app: tauri::AppHandle, stores: Stores, data_dir: PathBuf) -> server::AgentCtl {
+/// Agent 自身控制（基座：版本信息 / 退出；P6 已去自启与 openOnStart）
+fn make_agent_ctl(app: tauri::AppHandle, data_dir: PathBuf) -> server::AgentCtl {
     Arc::new(move |op: AgentOp| {
         let app = app.clone();
-        let stores = stores.clone();
         let data_dir = data_dir.clone();
         Box::pin(async move {
             match op.op.as_str() {
                 "get-info" => AgentResult {
                     op: "get-info".into(),
                     ok: true,
-                    autostart: Some(app.autolaunch().is_enabled().unwrap_or(false)),
-                    open_on_start: Some(stores.settings.get_bool("app.openOnStart").unwrap_or(true)),
+                    autostart: None,
+                    open_on_start: None,
                     version: Some(VERSION.into()),
                     message: None,
                 },
-                "set-autostart" => {
-                    let enabled = op.enabled.unwrap_or(false);
-                    let manager = app.autolaunch();
-                    let r = if enabled {
-                        manager.enable()
-                    } else {
-                        manager.disable()
-                    };
-                    match r {
-                        Ok(()) => AgentResult {
-                            op: "set-autostart".into(),
-                            ok: true,
-                            autostart: Some(manager.is_enabled().unwrap_or(false)),
-                            open_on_start: None,
-                            version: None,
-                            message: None,
-                        },
-                        Err(e) => AgentResult {
-                            op: "set-autostart".into(),
-                            ok: false,
-                            autostart: Some(manager.is_enabled().unwrap_or(false)),
-                            open_on_start: None,
-                            version: None,
-                            message: Some(e.to_string()),
-                        },
-                    }
-                }
-                "set-open-on-start" => {
-                    let enabled = op.enabled.unwrap_or(true);
-                    stores
-                        .settings
-                        .set("app.openOnStart", &serde_json::json!(enabled));
-                    AgentResult {
-                        op: "set-open-on-start".into(),
-                        ok: true,
-                        autostart: None,
-                        open_on_start: Some(enabled),
-                        version: None,
-                        message: None,
-                    }
-                }
                 "shutdown" => {
-                    append_log(&data_dir, "[bgshell] 收到工作台退出指令，进程退出");
+                    append_log(&data_dir, "[bgshell] 收到退出指令，基座进程退出");
                     let app = app.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -248,13 +147,9 @@ fn make_agent_ctl(app: tauri::AppHandle, stores: Stores, data_dir: PathBuf) -> s
 #[cfg(feature = "pet")]
 fn with_ipc_commands(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     b.invoke_handler(tauri::generate_handler![
-        show_main_window,
-        dbg_evt,
+        launch_tool,
         set_pet_visible,
         quit_app,
-        stat_file,
-        read_file_chunk,
-        write_text_file,
         pet_pack::pet_pack_import,
         pet_pack::pet_packs_list,
         pet_pack::pet_pack_delete,
@@ -264,15 +159,7 @@ fn with_ipc_commands(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry
 
 #[cfg(not(feature = "pet"))]
 fn with_ipc_commands(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
-    b.invoke_handler(tauri::generate_handler![
-        show_main_window,
-        dbg_evt,
-        set_pet_visible,
-        quit_app,
-        stat_file,
-        read_file_chunk,
-        write_text_file
-    ])
+    b.invoke_handler(tauri::generate_handler![launch_tool, set_pet_visible, quit_app])
 }
 
 /// dev server 探测：IPv4/IPv6 双栈 + HTTP 层验证（TCP 通且有 HTTP 响应才算就绪；
@@ -301,9 +188,8 @@ fn dev_server_ready(port: u16) -> bool {
 }
 
 pub fn run() {
-    let silent = std::env::args().any(|a| a == "--silent");
     let builder = tauri::Builder::default()
-        // 桌面单实例：完整版唤回宠物窗（隐藏时也能找回），SSH 精简版唤起工作台主窗。
+        // 桌面单实例：二次启动唤回宠物窗（隐藏时也能找回）；无宠物窗构建无窗口可唤。
         // --silent（工具壳 spawn_ai_base 在基座已在线时的竞态兜底）不唤起任何窗口
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if args.iter().any(|a| a == "--silent") {
@@ -317,78 +203,61 @@ pub fn run() {
                 }
                 sync_pet_tray_text(app);
             }
-            #[cfg(not(feature = "pet"))]
-            {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
-            }
         }))
-        // 开机自启：启动桌面 exe 并带 --silent（后台常驻，不弹工作台）
-        .plugin(tauri_plugin_autostart::init(
-            MacosLauncher::LaunchAgent,
-            Some(vec!["--silent"]),
-        ))
-        // 终端复制/粘贴：原生剪贴板读写（经 plugin:clipboard-manager IPC）
+        // 桌宠对话复制：原生剪贴板读写（经 plugin:clipboard-manager IPC）
         .plugin(tauri_plugin_clipboard_manager::init())
-        // 原生文件选择器（主机编辑：私钥文件路径浏览）
+        // 原生文件选择器（桌宠动作包 zip 导入）
         .plugin(tauri_plugin_dialog::init());
     let app = with_ipc_commands(builder)
         .setup(move |app| {
             let data_dir = resolve_data_dir();
-            append_log(&data_dir, &format!("[bgshell] v{VERSION} 启动（单进程架构）"));
+            append_log(&data_dir, &format!("[bgshell] v{VERSION} 启动（AI 基座·后台服务）"));
 
             // ── 持久层 + WS 服务 ──────────────────────────────────────
             let db = bg_core::db::Db::open(&data_dir.join("bitgalaxy.db"));
             db.migrate_from_json(&data_dir);
             let stores = Stores::open(db);
 
-            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
-            let agent_ctl = make_agent_ctl(app.handle().clone(), stores.clone(), data_dir.clone());
-            let stores_for_server = stores.clone();
+            let agent_ctl = make_agent_ctl(app.handle().clone(), data_dir.clone());
             let policy = bg_core::policy::load_ai_policy(&data_dir, &stores);
             let port: u16 = std::env::var("BGSH_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(7777);
             let dispatcher = std::sync::Arc::new(server::DesktopDispatcher::new(
-                port,
-                stores_for_server,
+                stores,
                 policy,
                 agent_ctl,
-                data_dir,
             ));
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = bg_server::WsServer::start(port, dispatcher, Some(ready_tx)).await {
+                if let Err(e) = bg_server::WsServer::start(port, dispatcher, None).await {
                     eprintln!("[bgshell] WS 服务启动失败: {e}");
                 }
             });
 
-            // ── 系统托盘 ──────────────────────────────────────────
-            let show = MenuItem::with_id(app, "show", "打开工作台", true, None::<&str>)?;
+            // ── 系统托盘：拉起三工具 / 桌宠开关（完整版）/ 退出 ──────────
+            let tool_ssh = MenuItem::with_id(app, "tool-ssh", "打开 SSH 终端", true, None::<&str>)?;
+            let tool_sql = MenuItem::with_id(app, "tool-sql", "打开 SQL 客户端", true, None::<&str>)?;
+            let tool_serial = MenuItem::with_id(app, "tool-serial", "打开串口工具", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            // 桌宠开关菜单项仅完整版存在（SSH 精简版托盘只有 工作台/退出）
             #[cfg(feature = "pet")]
             let menu = {
                 let pet_toggle = MenuItem::with_id(app, "pet", "隐藏桌宠", true, None::<&str>)?;
                 app.manage(PetToggle(pet_toggle.clone()));
-                Menu::with_items(app, &[&show, &pet_toggle, &quit])?
+                Menu::with_items(app, &[&tool_ssh, &tool_sql, &tool_serial, &pet_toggle, &quit])?
             };
             #[cfg(not(feature = "pet"))]
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(app, &[&tool_ssh, &tool_sql, &tool_serial, &quit])?;
             TrayIconBuilder::with_id("tray")
                 .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("BitGalaxy Shell")
+                .tooltip("BitGalaxy Shell · AI 基座")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(win) = app.get_webview_window("main") {
-                            let _ = win.show();
-                            let _ = win.set_focus();
-                        }
-                    }
-                    // 桌宠开关：按当前可见性取反（隐藏 ⇄ 唤出）；精简版无此菜单项
+                    // 拉起三工具 EXE（同目录 spawn；工具壳 single-instance 自行唤起主窗）
+                    "tool-ssh" => log_spawn("bgshell-ssh.exe"),
+                    "tool-sql" => log_spawn("bgshell-sql.exe"),
+                    "tool-serial" => log_spawn("bgshell-serial.exe"),
+                    // 桌宠开关：按当前可见性取反（隐藏 ⇄ 唤出）；无宠物窗构建无此菜单项
                     "pet" => {
                         #[cfg(feature = "pet")]
                         {
@@ -407,50 +276,8 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // ── 工作台主窗 ─────────────────────────────────────────────
-            // dev：vite dev server 可达（tauri dev / npm run dev:ui）→ 加载 devUrl；
-            // 直跑 exe / release：加载随包分发的构建产物（apps/desktop/ui）。
-            let main_url = if cfg!(debug_assertions) && dev_server_ready(17177) {
-                WebviewUrl::External("http://localhost:17177".parse().unwrap())
-            } else {
-                WebviewUrl::App("index.html".into())
-            };
-            WebviewWindowBuilder::new(app, "main", main_url)
-                .title("BitGalaxy Shell 工作台")
-                // TODO(debug): 临时开 CDP 9222（首个 webview 决定共享环境）——排查完删除
-                .additional_browser_args(
-                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=9222",
-                )
-                .inner_size(1360.0, 860.0)
-                .min_inner_size(1024.0, 680.0)
-                .decorations(false)
-                .visible(false)
-                .on_page_load(|_webview, payload| {
-                    if cfg!(debug_assertions) {
-                        eprintln!(
-                            "[bgshell][debug] main 页面加载 {:?}: {}",
-                            payload.event(),
-                            payload.url()
-                        );
-                    }
-                })
-                .build()?;
-
-            // 服务就绪后按设置决定是否展示工作台主窗（必须在主窗 build 之后启动：
-            // ready 信号在 start_server 绑定端口后立即发出，早于窗口创建，先 spawn 会拿到 None）
-            let app_handle = app.handle().clone();
-            let open_on_start = stores.settings.get_bool("app.openOnStart").unwrap_or(true);
-            tauri::async_runtime::spawn(async move {
-                if ready_rx.await.is_ok() && open_on_start && !silent {
-                    if let Some(win) = app_handle.get_webview_window("main") {
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                    }
-                }
-            });
-
             // ── 鲸鱼娘桌宠窗（仅完整版）：透明置顶 · 无边框 · 不进任务栏 ─────
-            // 与主窗同一 dev server（workbench-ui MPA：`/` 工作台 + `/pet/` 桌宠）
+            // 基座唯一可见窗口 = AI 的形象与对话面板（dev 加载 vite MPA /pet/ 入口）
             #[cfg(feature = "pet")]
             {
                 let pet_url = if cfg!(debug_assertions) && dev_server_ready(17177) {
@@ -484,18 +311,17 @@ pub fn run() {
             }
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // 关闭主窗口 → 隐藏到托盘；真正退出走托盘菜单
-            if window.label() == "main" {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
-            }
-        })
         .build(tauri::generate_context!())
         .expect("初始化 Tauri 失败");
 
-    // 单进程架构：无需结束子进程，事件循环直接运行
+    // 基座常驻事件循环：退出走托盘/桌宠菜单
     app.run(|_app, _event| {})
+}
+
+/// 托盘拉起工具 EXE：失败写基座日志（agent.log），不打断菜单事件循环
+fn log_spawn(exe: &str) {
+    let data_dir = resolve_data_dir();
+    if let Err(e) = bg_core::ai_base::spawn_sibling_exe(exe) {
+        append_log(&data_dir, &format!("[bgshell] 托盘拉起 {exe} 失败：{e}"));
+    }
 }
