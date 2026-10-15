@@ -468,8 +468,17 @@ async fn introspect(state: &Arc<Mutex<State>>, params: J) -> Result<J, DriverErr
 
     let out = match scope.as_str() {
         "databases" => {
+            // 树顶层容器：PG 连接绑定单库（跨库需另建连接），返回当前库的用户
+            // schema 列表——与 MySQL「顶层=SCHEMATA」语义对齐。此前误返回
+            // pg_database 集群库列表：数据库名被当 schema 传给 tables 查询，
+            // pg_namespace 里几乎恒无同名 schema，树展开恒为空。
             let rows = client
-                .query("SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname", &[])
+                .query(
+                    "SELECT nspname FROM pg_namespace \
+                     WHERE nspname <> 'information_schema' AND nspname !~ '^pg_' \
+                     ORDER BY nspname",
+                    &[],
+                )
                 .await
                 .map_err(map_pg_error)?;
             let dbs: Vec<J> = rows
@@ -496,9 +505,12 @@ async fn introspect(state: &Arc<Mutex<State>>, params: J) -> Result<J, DriverErr
                 .map(|r| {
                     let kind = if raw_str(r, 1) == "v" || raw_str(r, 1) == "m" { "view" } else { "table" };
                     let mut t = json!({ "name": raw_str(r, 0), "kind": kind });
-                    if let Ok(est) = r.try_get::<_, i64>(2) {
-                        if est > 0 {
-                            t["rowsEstimate"] = json!(est);
+                    // reltuples 是 float4（老版本曾为 int）：RawValue 通用取值，i64 直取恒失败
+                    if let Ok(v) = r.try_get::<_, RawValue>(2) {
+                        if let Some(est) = pg_value_to_json(&v).as_f64() {
+                            if est > 0.0 {
+                                t["rowsEstimate"] = json!(est.round() as i64);
+                            }
                         }
                     }
                     t

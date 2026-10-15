@@ -502,6 +502,8 @@ export type AiOp =
   | { op: 'cancel'; chatId: string }
   /** 只终止 toolCallId 对应的单条命令，对话继续 */
   | { op: 'cancel-tool'; chatId: string; toolCallId: string }
+  /** 一次性问答（无对话历史/无工具/不落库）：reqId 关联回包 ai-ask-result */
+  | { op: 'ask'; reqId: string; text: string; system?: string }
   /** 查询对话历史（chatId 缺省 = 最近一次对话；记录持久化在 Agent SQLite） */
   | { op: 'history'; chatId?: string }
   /** 历史会话列表（管理面板：复原 / 删除） */
@@ -512,6 +514,14 @@ export type AiOp =
   | { op: 'console-input'; chatId: string; toolCallId: string; text: string }
   /** 敏感输入回包（sudo 密码等）：value 缺省/空 = 取消 */
   | { op: 'input-reply'; chatId: string; reqId: string; value?: string }
+
+/** 一次性问答回包（ai op:"ask"，reqId 关联；无对话历史/无工具） */
+export interface AiAskResult {
+  reqId: string
+  ok: boolean
+  text: string
+  message?: string
+}
 
 /** 一条持久化的对话记录（Agent SQLite chat_messages 行，字段与前端 ChatMsg 对应） */
 export interface AiHistoryMessage {
@@ -632,6 +642,8 @@ export type ServerFrame =
   | { t: 'ai-thinking'; m: { chatId: string; delta: string } }
   | { t: 'ai-delta'; m: { chatId: string; delta: string } }
   | { t: 'ai-result'; m: { chatId: string; ok: boolean; text: string; message?: string } }
+  /** 一次性问答回包（ai op:"ask"，reqId 关联） */
+  | { t: 'ai-ask-result'; m: AiAskResult }
   | { t: 'ai-approval'; m: AiApprovalRequest }
   | { t: 'ai-input'; m: AiInputRequest }
   | { t: 'ai-tool'; m: AiToolEvent }

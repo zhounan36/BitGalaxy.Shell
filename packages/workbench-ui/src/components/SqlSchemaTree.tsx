@@ -7,11 +7,14 @@ import {
   CopyOutlined,
   DatabaseOutlined,
   FieldBinaryOutlined,
+  FileAddOutlined,
   SearchOutlined,
+  ShrinkOutlined,
   TableOutlined,
   ReloadOutlined,
 } from '@ant-design/icons'
 import type { SqlRequest, SqlResult } from '@bgshell/protocol'
+import { writeClipboardText } from '../api/clipboard'
 import { describeSqlError, qualifiedTable } from './sqlTypes'
 
 type NodeKind = 'root' | 'db' | 'table' | 'columns'
@@ -61,8 +64,8 @@ interface MenuState {
 }
 
 /** 结构树（懒加载）：连接 → databases → 表 → 字段。
- *  双击表节点 = 打开表数据页签（主流 SQL 工具行为）；右键菜单提供
- *  打开数据 / 查看结构 / 生成 SELECT / 复制名称 / 刷新。 */
+ *  双击表节点 = 打开表数据页签（主流 SQL 工具行为）；右键菜单按节点类型提供
+ *  打开数据 / 查看结构 / 生成 SELECT / 复制 SELECT / 新建查询 / 刷新等。 */
 export function SqlSchemaTree({
   connId,
   connLabel,
@@ -70,6 +73,7 @@ export function SqlSchemaTree({
   request,
   onRunSql,
   onOpenTable,
+  onNewQuery,
   onError,
   refreshTick,
 }: {
@@ -81,6 +85,8 @@ export function SqlSchemaTree({
   onRunSql: (sql: string) => void
   /** 双击表 / 右键「打开数据」「查看结构」：打开表页签 */
   onOpenTable: (schema: string | undefined, table: string, viewKind: string | undefined, target: 'data' | 'struct') => void
+  /** 右键库节点「新建查询」：新建查询页签 */
+  onNewQuery?: () => void
   onError: (title: string, hint?: string) => void
   /** 外部触发刷新根节点（连接栏刷新按钮） */
   refreshTick: number
@@ -288,7 +294,8 @@ export function SqlSchemaTree({
     setMenu({ x: e.clientX, y: e.clientY, key })
   }, [])
 
-  /** 右键菜单按节点类型生成（表节点提供打开数据/查看结构/生成 SELECT/复制表名） */
+  /** 右键菜单按节点类型生成（表：打开数据/查看结构/生成 SELECT/复制 SELECT/复制表名；
+   *  库：新建查询/复制库名；列：复制列名；空白：刷新/全部收起） */
   const menuItems: MenuProps['items'] = useMemo(() => {
     if (!menu) return []
     const meta = metaRef.current(menu.key)
@@ -298,8 +305,17 @@ export function SqlSchemaTree({
         { key: 'open-struct', label: '查看结构', icon: <AppstoreOutlined /> },
         { type: 'divider' },
         { key: 'gen-select', label: '生成 SELECT', icon: <SearchOutlined /> },
+        { key: 'copy-sql', label: '复制 SELECT 语句', icon: <CopyOutlined /> },
         { key: 'copy-name', label: '复制表名', icon: <CopyOutlined /> },
         { type: 'divider' },
+        { key: 'refresh', label: '刷新', icon: <ReloadOutlined /> },
+      ]
+    }
+    if (meta.kind === 'db') {
+      return [
+        { key: 'new-query', label: '新建查询', icon: <FileAddOutlined /> },
+        { type: 'divider' },
+        { key: 'copy-name', label: '复制库名', icon: <CopyOutlined /> },
         { key: 'refresh', label: '刷新', icon: <ReloadOutlined /> },
       ]
     }
@@ -310,7 +326,11 @@ export function SqlSchemaTree({
         { key: 'refresh-parent', label: '刷新', icon: <ReloadOutlined /> },
       ]
     }
-    return [{ key: 'refresh', label: '刷新', icon: <ReloadOutlined /> }]
+    // 空白区（连接层）
+    return [
+      { key: 'refresh', label: '刷新', icon: <ReloadOutlined /> },
+      { key: 'collapse-all', label: '全部收起', icon: <ShrinkOutlined /> },
+    ]
   }, [menu])
 
   const onMenuClick: MenuProps['onClick'] = ({ key, domEvent }) => {
@@ -323,9 +343,17 @@ export function SqlSchemaTree({
       void reloadNode(menuKey)
       return
     }
+    if (key === 'collapse-all') {
+      setExpandedKeys([])
+      return
+    }
     if (key === 'refresh-parent' && meta.kind === 'columns') {
       // 列节点刷新 = 重载父表（重新拉列定义）
       void reloadNode(tableKey(meta.schema ?? '', meta.table ?? meta.name))
+      return
+    }
+    if (key === 'new-query' && meta.kind === 'db') {
+      onNewQuery?.()
       return
     }
     if (meta.kind === 'table' || meta.kind === 'columns') {
@@ -342,8 +370,16 @@ export function SqlSchemaTree({
         onRunSql(`SELECT * FROM ${from} LIMIT 100`)
         return
       }
+      if (key === 'copy-sql' && meta.kind === 'table') {
+        const from = qualifiedTable(meta.schema, meta.name, dbType)
+        void writeClipboardText(`SELECT * FROM ${from} LIMIT 100`).then(
+          () => message.success('已复制 SELECT 语句'),
+          () => message.error('复制失败'),
+        )
+        return
+      }
       if (key === 'copy-name') {
-        void navigator.clipboard.writeText(meta.name).then(
+        void writeClipboardText(meta.name).then(
           () => message.success('已复制'),
           () => message.error('复制失败'),
         )
@@ -374,7 +410,16 @@ export function SqlSchemaTree({
           />
         </Tooltip>
       </div>
-      <div style={{ flex: 1, overflow: 'auto', padding: '4px 0' }}>
+      {/* 空白区右键（树节点右键由 Tree onRightClick 处理，此处只接管非节点区域） */}
+      <div
+        style={{ flex: 1, overflow: 'auto', padding: '4px 0' }}
+        onContextMenu={(e) => {
+          const target = e.target as HTMLElement
+          if (target.closest('.ant-tree-treenode')) return
+          e.preventDefault()
+          setMenu({ x: e.clientX, y: e.clientY, key: 'root' })
+        }}
+      >
         <Spin spinning={loading}>
           {!connId ? (
             <Empty

@@ -24,14 +24,16 @@ export class AgentSocket {
   private reconnectTimer: number | undefined
   private pending: Promise<void> | null = null
 
+  constructor(private readonly portOverride?: string) {}
+
   get ready(): boolean {
     return this.ws?.readyState === WebSocket.OPEN
   }
 
-  connect(): Promise<void> {
+  connect(maxRetries = 10): Promise<void> {
     if (this.ready) return Promise.resolve()
     if (this.pending) return this.pending
-    // 启动竞态兜底：服务端绑定可能略晚于窗口加载，最多重试 10 次（每次 500ms）
+    // 启动竞态兜底：服务端绑定可能略晚于窗口加载，最多重试（每次 500ms）
     const attempt = (remaining: number): Promise<void> =>
       this.connectOnce().catch((err: Error) => {
         if (remaining <= 0) throw err
@@ -39,7 +41,7 @@ export class AgentSocket {
           setTimeout(() => attempt(remaining - 1).then(resolve, reject), 500)
         })
       })
-    this.pending = attempt(10).finally(() => {
+    this.pending = attempt(maxRetries).finally(() => {
       this.pending = null
     })
     return this.pending
@@ -66,7 +68,8 @@ export class AgentSocket {
       // 每入口注入的后端端口（各入口 HTML 内嵌 window.__BGSH_WS__="777x"）：
       // 四 EXE 架构下不同前端入口连不同后端（7777 主程序 / 7771 ssh / 7772 sql / 7773 serial），
       // dev 与 prod 统一直连。未注入（主入口 index.html）保持原逻辑。
-      const injectedPort = (window as { __BGSH_WS__?: string }).__BGSH_WS__
+      // portOverride 显式指定时优先生效（如 aiSocket 固定连主程序 7777 的 AI 通道）。
+      const injectedPort = this.portOverride ?? (window as { __BGSH_WS__?: string }).__BGSH_WS__
       const wsUrl = injectedPort
         ? `ws://127.0.0.1:${injectedPort}/ws`
         : location.hostname === 'tauri.localhost' || location.protocol === 'tauri:'
@@ -143,3 +146,8 @@ export class AgentSocket {
 }
 
 export const agentSocket = new AgentSocket()
+
+/** AI 通道（四 EXE 架构）：固定连主程序 7777 的第二连接。
+ *  AiHandler（LLM 配置/审批/历史）只在主程序进程；各功能壳（SQL/SSH/串口）
+ *  的 AI 能力经此通道发送 ai op 帧并接收广播回包。懒连接：首次使用时才建立。 */
+export const aiSocket = new AgentSocket('7777')
