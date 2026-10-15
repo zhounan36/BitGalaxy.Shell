@@ -8,7 +8,7 @@
 //! （会话用户可读的文件都可取）。
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

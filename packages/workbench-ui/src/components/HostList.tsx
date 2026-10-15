@@ -1,8 +1,8 @@
 import { Button, Dropdown, Empty, List, Tag } from 'antd'
-import { CodeOutlined, DashboardOutlined, FolderOutlined, MoreOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
+import { CodeOutlined, DatabaseOutlined, DashboardOutlined, FolderOutlined, MoreOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { HostRecord } from '@bgshell/protocol'
 
-export type HostAction = 'shell' | 'sftp' | 'metrics' | 'edit' | 'delete'
+export type HostAction = 'shell' | 'sftp' | 'metrics' | 'sql' | 'edit' | 'delete'
 
 export interface HostStatus {
   ok: boolean
@@ -24,7 +24,7 @@ export function HostList({ hosts, hostStatus, onAction, onAdd, onRefresh }: Host
     <div className="host-panel">
       <div className="host-toolbar">
         <Button type="primary" icon={<PlusOutlined />} block onClick={onAdd}>
-          添加主机
+          新建连接
         </Button>
         <Button icon={<ReloadOutlined />} onClick={onRefresh} />
       </div>
@@ -47,6 +47,7 @@ export function HostList({ hosts, hostStatus, onAction, onAdd, onRefresh }: Host
                         items: [
                           { key: 'shell', label: '连接终端', icon: <CodeOutlined /> },
                           { key: 'sftp', label: '文件管理', icon: <FolderOutlined /> },
+                          { key: 'sql', label: '数据库', icon: <DatabaseOutlined /> },
                           { key: 'metrics', label: '运行状态', icon: <DashboardOutlined /> },
                           { type: 'divider' as const },
                           { key: 'edit', label: '编辑' },

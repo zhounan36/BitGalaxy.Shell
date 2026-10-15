@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type WheelEvent as ReactWheelEvent } from 'react'
 import { Bubble } from './components/Bubble'
-import { ChatPanel } from '../components/ChatPanel'
+import { ChatPanel, CHAT_PANEL_DEFAULT_SIZE, loadChatSize, type ChatPanelSize } from '../components/ChatPanel'
 import { DebugPanel } from './components/DebugPanel'
 import { PetMenu } from './components/PetMenu'
 import { PetPackPanel } from './components/PetPackPanel'
@@ -20,6 +20,14 @@ import {
 import { onAiAsk, type AiAskPayload } from '../api/aiBridge'
 import { usePet } from './pet/usePet'
 import { usePetPack } from './pack/usePetPack'
+
+/** 对话面板尺寸上限：屏幕工作区减去宠物区与边距（宠物窗随面板联动放大，故以屏幕为界而非本窗） */
+function chatSizeMax(petSize: number): ChatPanelSize {
+  const sw = window.screen?.availWidth ?? 960
+  const sh = window.screen?.availHeight ?? 840
+  // 面板 right 偏移 petSize-46、左侧至少留 26px；上下各留 20px
+  return { w: sw - petSize + 20, h: sh - 40 }
+}
 
 export function App() {
   // 动作包：动画与动作解绑——runtime 决定「哪个动作播哪段动画」（用户包覆盖，缺省回落内置）
@@ -42,15 +50,25 @@ export function App() {
   const [askReq, setAskReq] = useState<AiAskPayload | null>(null)
   // 精灵尺寸（滚轮缩放，localStorage 持久化；Tauri 宿主联动窗口尺寸，浏览器宿主仅缩 DOM）
   const [petSize, setPetSize] = useState(loadPetSize)
+  // 对话面板尺寸（ChatPanel 拖拽调整后上报；窗口尺寸随之联动，宠物本体位置不动）。
+  // 读取时按屏幕上限夹取（不能按本窗——宠物窗此刻还是 rest 尺寸，会把存好的大面板夹小）
+  const [chatSize, setChatSize] = useState<ChatPanelSize>(
+    () => loadChatSize(chatSizeMax(loadPetSize())) ?? CHAT_PANEL_DEFAULT_SIZE,
+  )
 
-  // 尺寸 / 对话面板开合 / 右键菜单变化 → 宠物窗随之扩/缩（右下角锚定，宠物本体屏幕位置不变；浏览器宿主 no-op）。
-  // 串行执行：滚轮连滚时逐次应用，避免并发 IPC 读到过期的窗口位置
+  // 尺寸 / 对话面板开合与大小 / 右键菜单变化 → 宠物窗随之扩/缩（右下角锚定，宠物本体屏幕位置不变；浏览器宿主 no-op）。
+  // 串行执行防并发 IPC 读到过期窗口位置；目标过期则跳过（拖拽面板时 40ms 一次上报只应用最新，避免松手后追赶旧尺寸）
   const applyChainRef = useRef(Promise.resolve())
+  const applySeqRef = useRef(0)
   useEffect(() => {
+    const seq = ++applySeqRef.current
     applyChainRef.current = applyChainRef.current
-      .then(() => applyPetWindowSize(petSize, chatOpen, menuOpen ? menuHosts : 0, packOpen))
+      .then(() => {
+        if (seq !== applySeqRef.current) return
+        return applyPetWindowSize(petSize, chatOpen, menuOpen ? menuHosts : 0, packOpen, chatSize)
+      })
       .catch((err) => console.error('applyPetWindowSize failed', err))
-  }, [petSize, chatOpen, menuOpen, menuHosts, packOpen])
+  }, [petSize, chatOpen, menuOpen, menuHosts, packOpen, chatSize])
 
   // OS 级文件拖放（仅 Tauri 宿主）：悬停亮提示，落下转发工作台开上传面板
   useEffect(() => {
@@ -171,7 +189,13 @@ export function App() {
           onHostsChange={setMenuHosts}
         />
       )}
-      <ChatPanel open={chatOpen} onClose={() => setChatOpen(false)} incomingAsk={askReq} />
+      <ChatPanel
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        incomingAsk={askReq}
+        onPanelResize={setChatSize}
+        sizeMax={chatSizeMax(petSize)}
+      />
       {packOpen && (
         <PetPackPanel
           packs={packs}

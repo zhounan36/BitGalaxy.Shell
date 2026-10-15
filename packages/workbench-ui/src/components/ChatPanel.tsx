@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { agentSocket } from '../api/ws'
@@ -41,6 +41,56 @@ interface SecretReq {
 function newChatId(): string {
   return `pet-${crypto.randomUUID()}`
 }
+
+/** 对话面板尺寸（逻辑像素）；双宿主共用，拖拽调整后持久化 */
+export interface ChatPanelSize {
+  w: number
+  h: number
+}
+
+/** 面板默认尺寸（未拖拽过时的 CSS 尺寸；桌宠宿主推导窗口尺寸也用它） */
+export const CHAT_PANEL_DEFAULT_SIZE: ChatPanelSize = { w: 360, h: 460 }
+
+const CHAT_SIZE_KEY = 'bgshell.chat-panel-size'
+/** 最小 300×340（保证头/列表/输入行可用）；绝对上限 960×840 */
+const CHAT_SIZE_MIN = { w: 300, h: 340 }
+const CHAT_SIZE_MAX = { w: 960, h: 840 }
+
+/** 按宿主可用范围夹取面板尺寸：max 缺省按所在窗口视口（面板是浮层，不得超出可视区） */
+function clampChatSize(w: number, h: number, max?: ChatPanelSize): ChatPanelSize {
+  const vw = typeof window === 'undefined' ? CHAT_SIZE_MAX.w : window.innerWidth
+  const vh = typeof window === 'undefined' ? CHAT_SIZE_MAX.h : window.innerHeight
+  const mw = Math.min(CHAT_SIZE_MAX.w, max?.w ?? vw - 24)
+  const mh = Math.min(CHAT_SIZE_MAX.h, max?.h ?? vh - 24)
+  return {
+    w: Math.round(Math.min(Math.max(w, CHAT_SIZE_MIN.w), Math.max(CHAT_SIZE_MIN.w, mw))),
+    h: Math.round(Math.min(Math.max(h, CHAT_SIZE_MIN.h), Math.max(CHAT_SIZE_MIN.h, mh))),
+  }
+}
+
+/** 读取持久化的面板尺寸（桌宠宿主用它推导初始窗口尺寸；max 缺省按所在窗口视口夹取） */
+export function loadChatSize(max?: ChatPanelSize): ChatPanelSize | undefined {
+  try {
+    const raw = localStorage.getItem(CHAT_SIZE_KEY)
+    if (!raw) return undefined
+    const v = JSON.parse(raw) as Partial<ChatPanelSize>
+    if (Number.isFinite(v.w) && Number.isFinite(v.h)) return clampChatSize(v.w as number, v.h as number, max)
+  } catch {
+    /* 存储损坏按未设置处理 */
+  }
+  return undefined
+}
+
+function saveChatSize(s: ChatPanelSize): void {
+  try {
+    localStorage.setItem(CHAT_SIZE_KEY, JSON.stringify(s))
+  } catch {
+    /* 存储不可用时尺寸只在本次生效 */
+  }
+}
+
+/** 拖拽调整尺寸的轴向（面板贴右下角，只能向左/上生长） */
+type ResizeAxis = 'w' | 'h' | 'wh'
 
 /** RFC3339 UTC → 本地 "MM-DD HH:mm"（历史列表展示） */
 function fmtTime(iso: string): string {
@@ -104,11 +154,17 @@ export function ChatPanel({
   open,
   onClose,
   incomingAsk,
+  onPanelResize,
+  sizeMax,
 }: {
   open: boolean
   onClose: () => void
   /** 终端「问AI」投递（pet/App 经 Tauri 事件转发；按 uid 去重） */
   incomingAsk?: AiAskPayload | null
+  /** 拖拽调整尺寸时上报（桌宠宿主据此联动 Tauri 窗口尺寸；浏览器/工作台宿主可不传） */
+  onPanelResize?: (size: ChatPanelSize) => void
+  /** 面板尺寸上限（缺省按所在窗口视口；桌宠宿主按屏幕减去宠物区） */
+  sizeMax?: ChatPanelSize
 }) {
   const [msgs, setMsgs] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
@@ -131,6 +187,55 @@ export function ChatPanel({
   // SSH 控制台实时输出（toolCallId → 累积文本）与介入输入框内容
   const [consoleOut, setConsoleOut] = useState<Record<string, string>>({})
   const [consoleInput, setConsoleInput] = useState('')
+  // ── 拖拽调整尺寸：面板锚右下角，拖左边/上边/左上角把手改尺寸（松手落盘 + 上报宿主）──
+  // 拖拽中直接改面板 DOM 样式（不走 state，避免整面板每帧重渲染）；宿主联动窗口尺寸需节流上报
+  const [size, setSize] = useState<ChatPanelSize | undefined>(() => loadChatSize(sizeMax))
+  const panelRef = useRef<HTMLDivElement>(null)
+  const resizeRef = useRef<{ axis: ResizeAxis; x: number; y: number; w: number; h: number } | null>(null)
+  const pendingSizeRef = useRef<ChatPanelSize | null>(null)
+  const lastNotifyRef = useRef(0)
+
+  /** 把手按下：记录起点尺寸并捕获指针（后续 move 都定向到该元素） */
+  const startResize = (axis: ResizeAxis) => (e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const rect = panelRef.current?.getBoundingClientRect()
+    resizeRef.current = { axis, x: e.clientX, y: e.clientY, w: rect?.width ?? 0, h: rect?.height ?? 0 }
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+
+  /** 拖拽中：dx/dy 为负 = 向左/上拖 = 变大（面板锚右下）；节流上报宿主让窗口实时跟手 */
+  const moveResize = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const s = resizeRef.current
+    if (!s) return
+    const dw = s.axis === 'h' ? 0 : s.x - e.clientX
+    const dh = s.axis === 'w' ? 0 : s.y - e.clientY
+    const next = clampChatSize(s.w + dw, s.h + dh, sizeMax)
+    pendingSizeRef.current = next
+    const el = panelRef.current
+    if (el) {
+      el.style.width = `${next.w}px`
+      el.style.height = `${next.h}px`
+    }
+    const now = Date.now()
+    if (now - lastNotifyRef.current >= 40) {
+      lastNotifyRef.current = now
+      onPanelResize?.(next)
+    }
+  }
+
+  /** 松手：提交最终尺寸（state + localStorage + 宿主），结束拖拽 */
+  const endResize = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!resizeRef.current) return
+    resizeRef.current = null
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
+    const next = pendingSizeRef.current
+    pendingSizeRef.current = null
+    if (!next) return
+    setSize(next)
+    saveChatSize(next)
+    onPanelResize?.(next)
+  }
 
   // ── 终端「问AI」投递：组合消息直接发送；busy/审批中排队，ai-result 后补发 ──
   const pendingAskRef = useRef<string | null>(null)
@@ -507,7 +612,32 @@ export function ChatPanel({
   }
 
   return (
-    <div className="chat-panel">
+    <div ref={panelRef} className="chat-panel" style={size ? { width: size.w, height: size.h } : undefined}>
+      {/* 拖拽调整尺寸把手：面板锚右下角，拖左边/上边/左上角调整大小（最小 300×340） */}
+      <div
+        className="chat-rz chat-rz-w"
+        title="拖动调整宽度"
+        onPointerDown={startResize('w')}
+        onPointerMove={moveResize}
+        onPointerUp={endResize}
+        onPointerCancel={endResize}
+      />
+      <div
+        className="chat-rz chat-rz-h"
+        title="拖动调整高度"
+        onPointerDown={startResize('h')}
+        onPointerMove={moveResize}
+        onPointerUp={endResize}
+        onPointerCancel={endResize}
+      />
+      <div
+        className="chat-rz chat-rz-wh"
+        title="拖动调整大小"
+        onPointerDown={startResize('wh')}
+        onPointerMove={moveResize}
+        onPointerUp={endResize}
+        onPointerCancel={endResize}
+      />
       <div className="chat-head">
         <span>鲸鱼娘 · AI 助手</span>
         <button type="button" className="chat-close" title="开启新对话（历史记录保留在数据库中）" onClick={() => {

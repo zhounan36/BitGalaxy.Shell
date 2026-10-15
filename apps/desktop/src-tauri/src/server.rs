@@ -17,6 +17,7 @@ use crate::protocol::{
     self, AgentResult, ClientFrame, ServerFrame, SettingsResultM, DF_SFTP_UPLOAD, DF_STDIN
 };
 use crate::session::SessionManager;
+use crate::sql::SqlHandler;
 use crate::stores::Stores;
 use crate::wire::{OutMsg, Outbound, OutHub};
 
@@ -42,6 +43,7 @@ pub async fn start_server(
     stores: Stores,
     policy: AiPolicy,
     agent_ctl: AgentCtl,
+    data_dir: std::path::PathBuf,
     ready: Option<oneshot::Sender<()>>,
 ) -> Result<(), String> {
     let listener = TcpListener::bind(("127.0.0.1", port))
@@ -61,6 +63,8 @@ pub async fn start_server(
     // 120s 审批超时被误判为「用户拒绝」。AI 帧经 OutHub 广播到所有活跃连接。
     let out_hub = OutHub::default();
     let ai = Arc::new(AiHandler::new(stores.clone(), out_hub, policy.clone(), registry.clone()));
+    // SQL 模块进程级单例（驱动宿主进程 + 隧道跨 WS 连接共享）
+    let sql = Arc::new(SqlHandler::new(registry.clone(), &data_dir));
     loop {
         let (stream, _addr) = match listener.accept().await {
             Ok(x) => x,
@@ -72,6 +76,7 @@ pub async fn start_server(
         let registry = registry.clone();
         let ai = ai.clone();
         let dl = dl.clone();
+        let sql = sql.clone();
         tokio::spawn(async move {
             if cfg!(debug_assertions) {
                 eprintln!("[bgshell][debug] WS 接入新连接");
@@ -81,7 +86,7 @@ pub async fn start_server(
             if dl_http::try_handle(&mut stream, &dl, &registry).await {
                 return;
             }
-            handle_conn(stream, stores, agent_ctl, allowed, registry, ai, dl).await;
+            handle_conn(stream, stores, agent_ctl, allowed, registry, ai, dl, sql).await;
         });
     }
 }
@@ -94,6 +99,7 @@ async fn handle_conn(
     registry: Arc<ConnRegistry>,
     ai: Arc<AiHandler>,
     dl: Arc<dl_http::DlTickets>,
+    sql: Arc<SqlHandler>,
 ) {
     // Origin 校验后完成 WS 握手
     let ws = {
@@ -145,6 +151,8 @@ async fn handle_conn(
     let manager = SessionManager::new(stores.clone(), outbound.clone(), registry.clone(), dl);
     // 本连接加入 AI 广播组（断开时由 OutHub 发送路径自动清理）
     ai.register_conn(outbound.clone());
+    // SQL 会话的连接代际：单例共享，断开只清本连接的数据库会话
+    let sql_ws = sql.new_conn();
 
     while let Some(msg) = source.next().await {
         let msg = match msg {
@@ -156,7 +164,7 @@ async fn handle_conn(
                 let Ok(frame) = serde_json::from_str::<ClientFrame>(text.as_str()) else {
                     continue;
                 };
-                dispatch(&manager, &ai, &stores, &agent_ctl, &outbound, frame).await;
+                dispatch(&manager, &ai, &sql, sql_ws, &stores, &agent_ctl, &outbound, frame).await;
             }
             Message::Binary(data) => {
                 let Some((frame_type, sid, payload)) = protocol::decode_data_frame(&data) else {
@@ -181,6 +189,7 @@ async fn handle_conn(
     }
 
     manager.close_all("socket-closed");
+    sql.close_all(sql_ws);
     // 注意：不撤 AI 审批——AiHandler 是进程级的，断线重连后的新连接
     // 依然可以回包；审批的 fail-closed 由 120s 超时兜底
 }
@@ -188,6 +197,8 @@ async fn handle_conn(
 async fn dispatch(
     manager: &SessionManager,
     ai: &AiHandler,
+    sql: &SqlHandler,
+    sql_ws: u64,
     stores: &Stores,
     agent_ctl: &AgentCtl,
     out: &Outbound,
@@ -205,11 +216,14 @@ async fn dispatch(
         ClientFrame::Close { s, m } => {
             let reason = m.reason.unwrap_or_else(|| "user".into());
             manager.close(&s, &reason);
+            // SQL tab 关闭：一并清理该会话的数据库连接/驱动进程/临时文件
+            sql.close_session(&s);
         }
         ClientFrame::ConfirmHostKey { s, m } => manager.resolve_host_key(&s, m.accepted),
         ClientFrame::RetryAuth { s, m } => manager.resolve_auth(&s, m.password),
         ClientFrame::Hosts { m } => manager.handle_hosts_op(&m),
         ClientFrame::Sftp { s, m } => manager.handle_sftp(&s, &m),
+        ClientFrame::Sql { s, m } => sql.handle_op(sql_ws, &s, &m, out),
         ClientFrame::Metrics { s, m } => {
             manager.set_metrics_interval(&s, m.interval_sec.unwrap_or(0));
         }
@@ -249,6 +263,13 @@ async fn dispatch(
                 },
             };
             out.send_frame(&ServerFrame::SerialPorts { m });
+        }
+        ClientFrame::SerialCtl { s, m } => {
+            // 控制调用走独立任务：不阻塞 WS 帧分发循环（写/信号查询可能挂起）
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager.serial_ctl(&s, m).await;
+            });
         }
         ClientFrame::Settings { m } => {
             let m = handle_settings(stores, &m);

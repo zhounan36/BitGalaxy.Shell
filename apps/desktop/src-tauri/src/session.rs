@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -30,7 +29,7 @@ struct SessionEntry {
     pty: Option<Arc<PtyShell>>,
     /// 串口会话的写通道（kind="serial"；stdin 与 shell 同构走 stdin_tx）
     serial: Option<Arc<crate::serial::SerialChannel>>,
-    /// 串口读循环任务（关闭时 abort，避免读半部阻塞导致端口句柄不释放）
+    /// 串口 IO 双工任务（独占 SerialStream；关闭时 abort → drop → 关句柄释放端口）
     serial_reader: Option<JoinHandle<()>>,
     sftp: Option<Arc<SftpController>>,
     metrics_task: Option<JoinHandle<()>>,
@@ -291,6 +290,8 @@ impl SessionManager {
                 m: SessionOpenedM {
                     host_id: host_id.clone(),
                     kind: kind.clone(),
+                    dtr: None,
+                    rts: None,
                 },
             });
             this.stores.audit.append(
@@ -319,49 +320,39 @@ impl SessionManager {
     // ── serial（串口会话）────────────────────────────────────────────────────
 
     /// 打开串口会话（kind="serial"）：本机 COM 口透传到终端面板。
-    /// 读循环 → DF_STDOUT；stdin 队列 → 专职写任务（与 shell 会话同构）；
+    /// 双工 IO 任务独占 SerialStream（读 → DF_STDOUT；stdin 队列经 Cmd 写）；
     /// 不进连接注册表，resize 无意义（会话层忽略）。
     async fn open_serial(&self, session_id: &str, serial_opts: Option<protocol::SerialOptions>) {
         let Some(serial_opts) = serial_opts else {
             self.fail_open(session_id, "缺少串口参数（serial.port）");
             return;
         };
-        let (channel, mut read) = match crate::serial::SerialChannel::open(&serial_opts) {
+        let (dtr_preset, rts_preset) = (serial_opts.dtr, serial_opts.rts);
+
+        // 双工任务：读字节 → DF_STDOUT（按 sessionId 推回，与 shell reader 同路径）；
+        // 读 Err = 拔线/端口消失（热插拔）→ serial-lost 关闭会话
+        let opened = {
+            let this = self.clone();
+            let sid = session_id.to_string();
+            let this2 = self.clone();
+            let sid2 = session_id.to_string();
+            crate::serial::SerialChannel::open(
+                &serial_opts,
+                move |data| {
+                    this.out
+                        .send_binary(protocol::encode_data_frame(DF_STDOUT, &sid, data));
+                },
+                move |reason| {
+                    this2.handle_closed(&sid2, reason);
+                },
+            )
+        };
+        let (channel, io_task) = match opened {
             Ok(x) => x,
             Err(e) => {
                 self.fail_open(session_id, &e);
                 return;
             }
-        };
-
-        // 读循环：字节 → DF_STDOUT（按 sessionId 推回，与 shell reader 同路径）。
-        // 读 Err = 拔线/端口消失（热插拔）→ serial-lost 关闭会话
-        let reader = {
-            let this = self.clone();
-            let sid = session_id.to_string();
-            tokio::spawn(async move {
-                let mut buf = [0u8; 4096];
-                loop {
-                    match read.read(&mut buf).await {
-                        Ok(n) if n > 0 => {
-                            this.out.send_binary(protocol::encode_data_frame(
-                                DF_STDOUT,
-                                &sid,
-                                &buf[..n],
-                            ));
-                        }
-                        Ok(_) => {
-                            // 串口读到 0 字节（端口被关闭）视同结束
-                            this.handle_closed(&sid, "serial-closed");
-                            return;
-                        }
-                        Err(_) => {
-                            this.handle_closed(&sid, "serial-lost");
-                            return;
-                        }
-                    }
-                }
-            })
         };
 
         // stdin 专用写入任务：按序消费队列写串口（写失败即退出，sender drop 自然结束）
@@ -383,13 +374,13 @@ impl SessionManager {
             let mut sessions = self.sessions.lock().unwrap();
             let Some(entry) = sessions.get_mut(session_id) else {
                 // 建连期间被用户关闭（或 reader 已抢先触发 serial-lost）：
-                // 读半部随任务 abort/drop 释放端口，不再发送 SessionOpened
-                reader.abort();
+                // 双工任务随 abort/drop 释放端口，不再发送 SessionOpened
+                io_task.abort();
                 return;
             };
             entry.serial = Some(channel);
             entry.stdin_tx = Some(stdin_tx);
-            entry.serial_reader = Some(reader);
+            entry.serial_reader = Some(io_task);
         }
 
         self.send_control(ServerFrame::SessionOpened {
@@ -397,6 +388,8 @@ impl SessionManager {
             m: SessionOpenedM {
                 host_id: "serial".into(),
                 kind: "serial".into(),
+                dtr: Some(dtr_preset),
+                rts: Some(rts_preset),
             },
         });
         self.stores.audit.append(
@@ -407,6 +400,66 @@ impl SessionManager {
                 "target": format!("{port} @ {baud}"),
             }),
         );
+    }
+
+    /// serial-ctl：串口控制（DTR/RTS/Break/改波特率/信号查询）。
+    /// 只作用于 kind="serial" 的会话；控制失败不杀会话（读循环的 serial-lost 兜底）。
+    pub async fn serial_ctl(&self, session_id: &str, m: protocol::SerialCtlM) {
+        let fail = |op: &str, msg: String| {
+            self.send_control(ServerFrame::SerialCtlResult {
+                s: session_id.to_string(),
+                m: protocol::SerialCtlResultM {
+                    ok: false,
+                    op: op.to_string(),
+                    message: Some(msg),
+                    signals: None,
+                },
+            });
+        };
+        let lookup = {
+            let sessions = self.sessions.lock().unwrap();
+            match sessions.get(session_id) {
+                None => Err("会话不存在或已关闭".to_string()),
+                Some(e) if e.kind != "serial" => Err("非串口会话不支持 serial-ctl".to_string()),
+                Some(e) => Ok(e.serial.clone()),
+            }
+        };
+        let chan = match lookup {
+            Ok(Some(chan)) => chan,
+            Ok(None) => {
+                fail(&m.op, "串口通道未就绪".into());
+                return;
+            }
+            Err(msg) => {
+                fail(&m.op, msg);
+                return;
+            }
+        };
+
+        let result = match m.op.as_str() {
+            "dtr" => chan.set_dtr(m.level.unwrap_or(true)).await.map(|_| None),
+            "rts" => chan.set_rts(m.level.unwrap_or(true)).await.map(|_| None),
+            "break" => chan.send_break(m.ms.unwrap_or(250)).await.map(|_| None),
+            "set-baud" => match m.baud_rate {
+                Some(b) => chan.set_baud(b).await.map(|_| None),
+                None => Err("缺少 baudRate".to_string()),
+            },
+            "signals" => chan.signals().await.map(Some),
+            other => Err(format!("未知 serial-ctl 操作: {other}")),
+        };
+        let (ok, message, signals) = match result {
+            Ok(sig) => (true, None, sig),
+            Err(e) => (false, Some(e), None),
+        };
+        self.send_control(ServerFrame::SerialCtlResult {
+            s: session_id.to_string(),
+            m: protocol::SerialCtlResultM {
+                ok,
+                op: m.op,
+                message,
+                signals,
+            },
+        });
     }
 
     // ── terminal ───────────────────────────────────────────────────────────
@@ -901,8 +954,9 @@ impl SessionManager {
         if let Some(task) = entry.metrics_task.take() {
             task.abort();
         }
-        // 串口读循环：abort 释放读半部；写通道与 stdin 队列随 drop 释放，
-        // 两半都 drop 后 OS 关闭端口句柄
+        // 串口 IO 双工任务：abort 后任务 future（内含整个 SerialStream）被 drop，
+        // SerialStream 的 NamedPipeClient 持有 COM 句柄 → drop 即 CloseHandle，
+        // 端口句柄在下一个调度 tick 释放（无需显式 close）
         if let Some(task) = entry.serial_reader.take() {
             task.abort();
         }

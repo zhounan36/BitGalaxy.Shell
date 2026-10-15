@@ -247,9 +247,18 @@ pub enum ClientFrame {
     Settings {
         m: serde_json::Value,
     },
+    /// SQL 数据库管理（sql-result/sql-progress 回包）
+    #[serde(rename = "sql")]
+    Sql {
+        s: String,
+        m: SqlOpM,
+    },
     /// 枚举本机串口（serial-ports 回包）
     #[serde(rename = "serial-list")]
     SerialList,
+    /// 串口控制（DTR/RTS/Break/改波特率/信号查询，serial-ctl-result 回包）
+    #[serde(rename = "serial-ctl")]
+    SerialCtl { s: String, m: SerialCtlM },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -288,6 +297,33 @@ pub struct SerialOptions {
     /// none / software / hardware，缺省 none
     #[serde(default)]
     pub flow_control: Option<String>,
+    /// 打开时 DTR 预设电平（缺省 true；Arduino 复位/ESP32 下载模式依赖此预设）
+    #[serde(default = "default_true")]
+    pub dtr: bool,
+    /// 打开时 RTS 预设电平（缺省 true）
+    #[serde(default = "default_true")]
+    pub rts: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// serial-ctl 帧：串口控制操作（DTR/RTS/Break/改波特率/信号查询）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialCtlM {
+    /// dtr / rts / break / set-baud / signals
+    pub op: String,
+    /// dtr/rts 的目标电平
+    #[serde(default)]
+    pub level: Option<bool>,
+    /// break 持续时间（ms，缺省 250）
+    #[serde(default)]
+    pub ms: Option<u32>,
+    /// set-baud 的新波特率
+    #[serde(default)]
+    pub baud_rate: Option<u32>,
 }
 
 fn default_serial_baud() -> u32 {
@@ -347,6 +383,77 @@ pub struct SftpOpM {
     /// preflight：调用方已知的传输总大小提示（浏览器 File 对象无本地路径时）
     #[serde(default)]
     pub size_b: Option<u64>,
+}
+
+/// SQL 操作（字段按 op 取用，与 SftpOpM 同款宽松度）。
+/// op：connect / disconnect / query / query-more / execute / cancel / introspect /
+/// fetch-sqlite / drivers-list
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlOpM {
+    pub op: String,
+    #[serde(default)]
+    pub rid: Option<String>,
+    /// connect：数据库连接规格（密码只在本帧内传输一次，后端转入内存缓存）
+    #[serde(default)]
+    pub conn: Option<SqlConnSpecM>,
+    /// query/execute/cancel/introspect/disconnect：connect 返回的连接 id
+    #[serde(default)]
+    pub conn_id: Option<String>,
+    /// query/execute：SQL 文本
+    #[serde(default)]
+    pub sql: Option<String>,
+    /// query-more / cancel：驱动侧查询句柄
+    #[serde(default)]
+    pub query_id: Option<String>,
+    /// query/query-more：结果行数上限（默认 500，硬上限 2000）
+    #[serde(default)]
+    pub max_rows: Option<u32>,
+    /// query/execute：后端超时预算 ms（默认 30s，上限 10min）
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// introspect：databases | tables | columns | indexes
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// introspect：库/模式名
+    #[serde(default)]
+    pub schema: Option<String>,
+    /// introspect：表名
+    #[serde(default)]
+    pub table: Option<String>,
+    /// fetch-sqlite：远端 .db/.sqlite 文件路径
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// 数据库连接规格（connect op）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlConnSpecM {
+    /// mysql | mariadb | postgres | sqlite
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// 所属 SSH 主机档案 id（隧道经此主机转发；sqlite 时也用于下载文件）
+    pub host_id: String,
+    /// 远端数据库地址（经隧道转发的目标；缺省 127.0.0.1）
+    #[serde(default)]
+    pub host: Option<String>,
+    /// 远端数据库端口（缺省：mysql 3306 / postgres 5432）
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub user: Option<String>,
+    /// 明文密码（仅此帧传输；后端仅存内存，不落盘不进日志）
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub database: Option<String>,
+    /// sqlite：远端 .db 文件路径（经 SFTP 下载到临时目录只读查询）
+    #[serde(default)]
+    pub sqlite_path: Option<String>,
+    /// 显示名（前端连接管理器用）
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -478,6 +585,24 @@ pub enum ServerFrame {
     SerialPorts {
         m: SerialPortsM,
     },
+    /// serial-ctl 回包
+    #[serde(rename = "serial-ctl-result")]
+    SerialCtlResult {
+        s: String,
+        m: SerialCtlResultM,
+    },
+    /// SQL 操作回包（sql 帧的 rid 关联）
+    #[serde(rename = "sql-result")]
+    SqlResult {
+        s: String,
+        m: SqlResultM,
+    },
+    /// SQL 长任务进度（驱动下载 / SQLite 文件下载）
+    #[serde(rename = "sql-progress")]
+    SqlProgress {
+        s: String,
+        m: SqlProgressM,
+    },
     #[serde(rename = "error")]
     Error {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -492,6 +617,12 @@ pub struct SessionOpenedM {
     pub host_id: String,
     #[serde(rename = "type")]
     pub kind: String,
+    /// kind=serial：打开时的 DTR 预设电平（前端状态条回显）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dtr: Option<bool>,
+    /// kind=serial：打开时的 RTS 预设电平
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rts: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -816,6 +947,176 @@ pub struct SerialPortsM {
     pub message: Option<String>,
 }
 
+/// 串口输入信号线状态（signals 查询结果）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialSignalsM {
+    pub cd: bool,
+    pub cts: bool,
+    pub dsr: bool,
+    pub ri: bool,
+}
+
+/// serial-ctl 回包
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialCtlResultM {
+    pub ok: bool,
+    pub op: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// op=signals 时的信号线状态
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signals: Option<SerialSignalsM>,
+}
+
+// ── SQL（数据库管理）────────────────────────────────────────────────────
+
+/// 结果集列描述
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlColumnM {
+    pub name: String,
+    /// 驱动报告的列类型名（mysql: VARCHAR…；postgres: int4…；sqlite: TEXT…）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nullable: Option<bool>,
+}
+
+/// introspect:columns 项（结构树节点）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct SqlColumnInfoM {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
+    pub pk: bool,
+    pub nullable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+/// introspect:indexes 项
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlIndexM {
+    pub name: String,
+    pub unique: bool,
+    pub columns: Vec<String>,
+}
+
+/// introspect:databases 项
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlDatabaseM {
+    pub name: String,
+}
+
+/// introspect:tables 项
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlTableM {
+    pub name: String,
+    /// table | view
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows_estimate: Option<i64>,
+}
+
+/// SQL 操作回包（字段按 op 取用）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlResultM {
+    pub op: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// 失败分类（classify_sql_error）：sql_error / network / permission_denied /
+    /// timeout / driver_crashed / driver_unavailable / tunnel_failed / too_large / unknown
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    /// connect：会话内连接 id（后续 query/introspect 引用）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conn_id: Option<String>,
+    /// connect：服务器版本
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
+    /// query/query-more：驱动侧查询句柄（query-more 引用）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_id: Option<String>,
+    /// query/execute：结果集列
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<SqlColumnM>>,
+    /// query/query-more：行数据（JSON 值二维数组；NULL = null）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows: Option<Vec<Vec<serde_json::Value>>>,
+    /// query/query-more：返回行数（= rows.len()）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_count: Option<u64>,
+    /// 结果集被 maxRows 截断（还有更多行）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    /// execute：受影响行数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affected: Option<u64>,
+    /// 执行耗时 ms
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// introspect:databases
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub databases: Option<Vec<SqlDatabaseM>>,
+    /// introspect:tables
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tables: Option<Vec<SqlTableM>>,
+    /// introspect:columns
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<SqlColumnInfoM>>,
+    /// introspect:indexes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexes: Option<Vec<SqlIndexM>>,
+    /// drivers-list：已知驱动（name/version/state：installed / not-installed）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drivers: Option<Vec<SqlDriverInfoM>>,
+    /// fetch-sqlite：下载+打开完成，本地临时文件句柄 id（后续 query 用）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sqlite_ref: Option<String>,
+}
+
+/// drivers-list 项
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlDriverInfoM {
+    pub name: String,
+    pub version: String,
+    /// installed | not-installed | downloading
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// SQL 长任务进度（驱动下载 / SQLite 文件下载）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlProgressM {
+    pub op: String,
+    /// 关联请求 rid（下载/安装哪个任务）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rid: Option<String>,
+    /// 阶段说明（如 "下载远端文件"）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    /// 已完成字节
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transferred: Option<u64>,
+    /// 总字节（未知缺省）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorM {
     pub code: String,
@@ -848,6 +1149,52 @@ mod tests {
         assert!(matches!(ai, ClientFrame::Ai { .. }));
         let cancel: ClientFrame = serde_json::from_str(r#"{"t":"ai","m":{"op":"cancel","chatId":"c1"}}"#).unwrap();
         assert!(matches!(cancel, ClientFrame::Ai { .. }));
+    }
+
+    #[test]
+    fn serial_ctl_frame_parses_camel_case() {
+        // dtr/rts 电平、break 时长、set-baud 波特率、signals 查询（level/ms/baudRate 全可缺省）
+        let dtr: ClientFrame =
+            serde_json::from_str(r#"{"t":"serial-ctl","s":"s1","m":{"op":"dtr","level":false}}"#).unwrap();
+        let ClientFrame::SerialCtl { s, m } = dtr else { panic!("want serial-ctl") };
+        assert_eq!(s, "s1");
+        assert_eq!(m.op, "dtr");
+        assert_eq!(m.level, Some(false));
+
+        let baud: ClientFrame =
+            serde_json::from_str(r#"{"t":"serial-ctl","s":"s1","m":{"op":"set-baud","baudRate":9600}}"#).unwrap();
+        let ClientFrame::SerialCtl { m, .. } = baud else { panic!("want serial-ctl") };
+        assert_eq!(m.baud_rate, Some(9600));
+
+        let sig: ClientFrame =
+            serde_json::from_str(r#"{"t":"serial-ctl","s":"s1","m":{"op":"signals"}}"#).unwrap();
+        let ClientFrame::SerialCtl { m, .. } = sig else { panic!("want serial-ctl") };
+        assert_eq!(m.op, "signals");
+        assert_eq!(m.level, None);
+
+        // SerialOptions.dtr/rts 缺省 true（旧协议不带这两个字段保持开高电平）
+        let opts: SerialOptions = serde_json::from_str(r#"{"port":"COM3","baudRate":115200}"#).unwrap();
+        assert!(opts.dtr && opts.rts);
+        let opts: SerialOptions =
+            serde_json::from_str(r#"{"port":"COM3","baudRate":115200,"dtr":false,"rts":true}"#).unwrap();
+        assert!(!opts.dtr && opts.rts);
+    }
+
+    #[test]
+    fn serial_ctl_result_serializes_camel_case() {
+        let frame = ServerFrame::SerialCtlResult {
+            s: "s1".into(),
+            m: SerialCtlResultM {
+                ok: true,
+                op: "signals".into(),
+                message: None,
+                signals: Some(SerialSignalsM { cd: false, cts: true, dsr: true, ri: false }),
+            },
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains(r#""t":"serial-ctl-result""#), "{json}");
+        assert!(json.contains(r#""cts":true"#), "{json}");
+        assert!(!json.contains("signals_m"), "{json}");
     }
 
     #[test]
