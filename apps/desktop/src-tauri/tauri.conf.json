@@ -12,13 +12,17 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/bitgalaxy-shell/pet-packs/**"]
+        "scope": [
+          "$APPDATA/bitgalaxy-shell/pet-packs/**",
+          "$RESOURCE/resources/pet-packs/**"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "resources": ["resources/pet-packs/**/*"],
     "icon": ["icons/icon.ico", "icons/icon.png"],
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper" },

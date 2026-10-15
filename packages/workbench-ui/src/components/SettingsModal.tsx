@@ -257,11 +257,11 @@ export function SettingsModal({
                 </Button>
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span>存储</span>
-                  <span style={{ color: 'var(--text-muted)' }}>SQLite（bitgalaxy.db）</span>
+                  <span style={{ color: 'var(--text-muted)' }}>SQLite（按域拆库）</span>
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
-                  全部配置（主机档案 / 已知指纹 / 应用设置 / 审计日志）统一保存在 SQLite 数据库中。
-                  首次启动时自动从旧 JSON 文件迁移数据。
+                  主机档案 / 应用设置与审计 / AI 对话记录分库存储（hosts.db · settings.db · chat.db），
+                  多应用并发读写互不阻塞；旧单库与 JSON 配置首次启动时自动迁移。
                 </div>
               </div>
             ),

@@ -401,9 +401,8 @@ pub fn run() {
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(DEFAULT_PORT);
 
-            // 共享持久层（主机档案/已知指纹/审计/设置）：多进程并发由 WAL + busy_timeout 兜底
-            let db = bg_core::db::Db::open(&data_dir.join("bitgalaxy.db"));
-            let stores = Stores::open(db);
+            // 共享持久层（P6.5 按域拆库：hosts/settings + 旧库迁移）：多进程并发由 WAL + busy_timeout 兜底
+            let stores = Stores::open_domains(&data_dir);
             let policy = bg_core::policy::load_ai_policy(&data_dir, &stores);
 
             let agent_ctl = make_agent_ctl(app.handle().clone(), stores.clone(), data_dir);

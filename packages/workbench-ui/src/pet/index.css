@@ -104,6 +104,21 @@ html.in-tauri body {
   cursor: grabbing;
 }
 
+/* P6.5 桌宠资产未安装时的占位形态：圆形浮标 + emoji，保持可见可交互 */
+.pet-sprite-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(var(--pet-size, 256px) * 0.42);
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, rgba(59, 166, 216, 0.35), rgba(13, 26, 43, 0.85) 70%);
+  border: 1px solid rgba(59, 166, 216, 0.45);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  user-select: none;
+}
+
 /* 图层包装（多格式 clip 共用：frames/img/video 都装进 pet-layer） */
 .pet-sprite .pet-layer {
   position: absolute;

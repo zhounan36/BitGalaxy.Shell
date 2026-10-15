@@ -3,6 +3,7 @@
  * 浏览器宿主恒为内置 runtime（用户包能力降级）。
  */
 import { useCallback, useEffect, useState } from 'react'
+import { resolveBuiltin } from './builtinClips'
 import { createAssetUrlFactory, isPackCapable, listPetPacks } from './packApi'
 import { createPackRuntime, type PackRuntime, type PetPackInfo } from './packRuntime'
 
@@ -25,6 +26,8 @@ export function usePetPack(): PetPackState {
   }))
 
   const refresh = useCallback(async () => {
+    // 先解析内置包（P6.5 外置资源；未安装则内置动画整体降级为占位形态）
+    await resolveBuiltin()
     if (!isPackCapable) return
     try {
       const [toUrl, packs] = await Promise.all([createAssetUrlFactory(), listPetPacks()])

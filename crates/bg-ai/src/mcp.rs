@@ -104,9 +104,8 @@ pub fn run_stdio(data_dir: &Path) {
 }
 
 async fn run_stdio_async(data_dir: &Path) {
-    let db = bg_core::db::Db::open(&data_dir.join("bitgalaxy.db"));
-    db.migrate_from_json(data_dir);
-    let stores = Stores::open(db);
+    // P6.5 按域拆库（与桌面基座共用同一数据目录；迁移幂等，进程先后启动均安全）
+    let stores = Stores::open_domains(data_dir);
     let policy = bg_core::policy::load_ai_policy(data_dir, &stores);
     // MCP stdio 为独立进程：自建注册表实例（与桌面进程代码同源、池各自独立）
     let registry = ConnRegistry::new(stores.clone(), policy.limits.idle_close_sec);
