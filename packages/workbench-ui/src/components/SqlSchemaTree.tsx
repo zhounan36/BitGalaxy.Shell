@@ -64,8 +64,9 @@ interface MenuState {
 }
 
 /** 结构树（懒加载）：连接 → databases → 表 → 字段。
- *  双击表节点 = 打开表数据页签（主流 SQL 工具行为）；右键菜单按节点类型提供
- *  打开数据 / 查看结构 / 生成 SELECT / 复制 SELECT / 新建查询 / 刷新等。 */
+ *  连接后仅显示根节点（连接名），数据库列表点开后才按需拉取，不随连接一次性加载。
+ *  双击表节点 = 打开表数据页签（主流 SQL 工具行为）；右键菜单提供
+ *  打开数据 / 查看结构 / 生成 SELECT / 新建查询 / 刷新等。 */
 export function SqlSchemaTree({
   connId,
   connLabel,
@@ -100,33 +101,18 @@ export function SqlSchemaTree({
   /** 表节点 → kind（table | view）：双击/右键打开表页签时透传 */
   const tableKindRef = useRef(new Map<string, string | undefined>())
 
-  // 连接切换：重置树，加载 databases
-  const loadRoot = useCallback(async () => {
+  // 连接切换：树重置为裸根节点（连接名）。数据库列表不随连接自动拉取，
+  // 用户点开根节点时才按需加载（loadData），对齐 Navicat/DBeaver 点击逐级取数。
+  const loadRoot = useCallback(() => {
     if (!connId) {
       setTreeData([])
       setExpandedKeys([])
       return
     }
-    setLoading(true)
-    try {
-      const r = await request({ op: 'introspect', connId, scope: 'databases' })
-      if (!r.ok) {
-        onError(describeSqlError(r.errorKind, r.message).title, describeSqlError(r.errorKind, r.message).hint)
-        return
-      }
-      const dbs = r.databases ?? []
-      setTreeData(
-        dbs.map((d) => ({
-          key: dbKey(d.name),
-          title: d.name,
-          icon: <DatabaseOutlined />,
-        })),
-      )
-      tableKindRef.current.clear()
-    } finally {
-      setLoading(false)
-    }
-  }, [connId, request, onError])
+    setTreeData([{ key: 'root', title: connLabel, icon: <DatabaseOutlined /> }])
+    setExpandedKeys([])
+    tableKindRef.current.clear()
+  }, [connId, connLabel])
 
   useEffect(() => {
     void loadRoot()
@@ -138,6 +124,27 @@ export function SqlSchemaTree({
     async (key: string, parentTree: TreeNode[]): Promise<TreeNode[]> => {
       if (!connId) return parentTree
       const meta = metaRef.current(key)
+      if (meta.kind === 'root') {
+        // 根节点首次展开：拉数据库列表（懒加载入口，替代旧的连接即拉取）
+        const r = await request({ op: 'introspect', connId, scope: 'databases' })
+        if (!r.ok) {
+          const e = describeSqlError(r.errorKind, r.message)
+          onError(e.title, e.hint)
+          return parentTree
+        }
+        return parentTree.map((n) =>
+          n.key === key
+            ? {
+                ...n,
+                children: (r.databases ?? []).map((d) => ({
+                  key: dbKey(d.name),
+                  title: d.name,
+                  icon: <DatabaseOutlined />,
+                })),
+              }
+            : n,
+        )
+      }
       if (meta.kind === 'db') {
         const r = await request({ op: 'introspect', connId, scope: 'tables', schema: meta.name })
         if (!r.ok) {
@@ -248,7 +255,8 @@ export function SqlSchemaTree({
     [connId, findNode, loadChildren, loadRoot, treeData, updateNodeChildren],
   )
 
-  /** antd 原生懒加载：无 children 的节点渲染为可展开（箭头），展开时拉取子节点。
+  /** antd 原生懒加载：无 children 的节点渲染为可展开（箭头），展开时拉取子节点
+   *  （root→databases、db→tables、table→columns，全部点击后才取数）。
    *  不传 loadData 时 antd 把无 children 节点一律当叶子（无箭头），展开懒加载永不触发
    *  —— 表现为「连接后点库节点无反应，右键刷新才出表」。 */
   const loadData = useCallback(
@@ -276,7 +284,8 @@ export function SqlSchemaTree({
     setExpandedKeys(keys)
   }, [])
 
-  /** 双击表节点 = 打开数据页签（Navicat/DBeaver 行为）；双击库节点 = 展开/收起（树默认） */
+  /** 双击表节点 = 打开数据页签（Navicat/DBeaver 行为）；
+   *  连接/库节点的双击展开收起由 expandAction="doubleClick" 接管（展开即懒加载） */
   const onDoubleClick = useCallback(
     (_: unknown, node: unknown) => {
       const key = String((node as { key?: Key }).key ?? '')
@@ -431,6 +440,7 @@ export function SqlSchemaTree({
             <Tree
               showIcon
               blockNode
+              expandAction="doubleClick"
               treeData={treeData}
               expandedKeys={expandedKeys}
               selectedKeys={selectedKeys}
