@@ -18,6 +18,7 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "allow-stat-file",
-    "allow-read-file-chunk"
+    "allow-read-file-chunk",
+    "allow-spawn-ai-base"
   ]
 }

@@ -884,3 +884,68 @@
 .chat-send:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* ── AI 侧栏（三工具壳 P5）：FAB 开关 + 基座未运行闸门 ────────────────── */
+
+/* 右下角 AI 开关（侧栏关闭时显示；打开后由面板自带关闭按钮收起） */
+.ai-fab {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1079;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--float-chat);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  box-shadow: var(--shadow-2);
+  transition: transform 120ms ease, border-color 140ms ease;
+}
+
+.ai-fab:hover {
+  transform: scale(1.06);
+  border-color: var(--accent);
+}
+
+.ai-fab:active {
+  transform: scale(0.96);
+}
+
+/* 基座闸门：复用 chat-panel 容器（.wb-chat-wrap 内已 fixed 定位），中部提示 */
+.ai-base-gate-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  text-align: center;
+}
+
+.ai-base-gate-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ai-base-gate-hint {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+.ai-base-gate-err {
+  font-size: 12px;
+  color: #f0a08a;
+  word-break: break-all;
+  max-height: 6em;
+  overflow-y: auto;
+}

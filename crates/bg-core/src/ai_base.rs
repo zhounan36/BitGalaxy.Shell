@@ -1,0 +1,66 @@
+//! AI 基座拉起助手（四 EXE 架构）：三个工具壳（ssh/sql/serial）共用。
+//! AI 基座 = bgshell-desktop.exe（WS 7777，BGSH_PORT 覆盖），由工具壳按需
+//! 静默拉起（--silent 后台常驻，不弹工作台/桌宠窗口）。
+//! 拉起前先探测端口：基座已在线时不再 spawn，避免二次实例触发
+//! single-instance 回调唤起窗口（基座侧对 --silent 也做了抑制兜底）。
+
+use std::net::TcpStream;
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// AI 基座端口（与主程序一致；BGSH_PORT 环境变量覆盖）
+pub fn ai_base_port() -> u16 {
+    std::env::var("BGSH_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(7777)
+}
+
+/// 端口是否已有监听（仅 127.0.0.1；WS 服务只绑回环，TCP 可连即视为在线）
+pub fn port_listening(port: u16) -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
+}
+
+/// 基座 exe：与当前工具壳 exe 同目录（安装包四 EXE 同目录分发；dev 同在 target/{debug,release}）
+fn ai_base_exe() -> Result<PathBuf, String> {
+    let dir = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .parent()
+        .ok_or("无法定位当前 exe 所在目录")?
+        .to_path_buf();
+    let exe = dir.join("bgshell-desktop.exe");
+    if exe.is_file() {
+        Ok(exe)
+    } else {
+        Err(format!("未找到 AI 基座 bgshell-desktop.exe（{}）", exe.display()))
+    }
+}
+
+/// 确保 AI 基座在线：已监听直接返回；否则静默拉起并等待 WS 端口就绪。
+/// 返回 Ok(true)=本次拉起 / Ok(false)=已在线；Err=找不到 exe、spawn 失败或就绪超时。
+/// 注意：含最长 15s 轮询等待，调用方应放在阻塞线程（如 spawn_blocking）。
+pub fn ensure_ai_base() -> Result<bool, String> {
+    let port = ai_base_port();
+    if port_listening(port) {
+        return Ok(false);
+    }
+    let exe = ai_base_exe()?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--silent");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW：基座 --silent 下本就无控制台，双保险防闪窗
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.spawn().map_err(|e| format!("拉起 AI 基座失败：{e}"))?;
+    // 基座 setup → WsServer::start 绑定成功通常 <2s；15s 兜底冷启动（WebView2 初始化）
+    for _ in 0..50 {
+        if port_listening(port) {
+            return Ok(true);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    Err("AI 基座已启动但端口 15s 内未就绪".into())
+}

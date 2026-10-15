@@ -2,6 +2,7 @@
 //! 所有壳（desktop/ssh/sql/serial）与上层 crate（bg-ssh/bg-ai/bg-sql/bg-server）
 //! 共用的协议、存储、策略与基础工具都在这里，不依赖任何上层模块。
 
+pub mod ai_base;
 pub mod db;
 pub mod disk;
 pub mod error;

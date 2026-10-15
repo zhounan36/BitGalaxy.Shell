@@ -3,6 +3,7 @@ import { Button, Empty, Tabs, Typography, message } from 'antd'
 import { PlusOutlined, ReloadOutlined, UsbOutlined } from '@ant-design/icons'
 import type { SerialOptions, SerialPortInfo } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
+import { AiSidebar } from '../components/AiSidebar'
 import { SerialConnectModal } from '../components/SerialConnectModal'
 import { SerialDebugPane } from '../components/SerialDebugPane'
 
@@ -12,7 +13,8 @@ interface SerialTab {
 }
 
 /** 串口独立应用入口：多页签串口调试（每个 COM 口一个页签）。
- *  后端为独立 WS 服务（7773，serial 入口 HTML 内嵌 __BGSH_WS__ 注入）。 */
+ *  后端为独立 WS 服务（7773，serial 入口 HTML 内嵌 __BGSH_WS__ 注入）；
+ *  AI 侧栏（AiSidebar 连 7777 基座，P5）。 */
 export function SerialApp() {
   const [tabs, setTabs] = useState<SerialTab[]>([])
   const [activeKey, setActiveKey] = useState<string>()
@@ -132,6 +134,7 @@ export function SerialApp() {
         onRefresh={refreshPorts}
         onConnect={openSession}
       />
+      <AiSidebar />
     </div>
   )
 }

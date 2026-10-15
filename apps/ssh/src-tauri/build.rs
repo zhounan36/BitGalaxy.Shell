@@ -6,6 +6,7 @@ fn main() {
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
             "stat_file",
             "read_file_chunk",
+            "spawn_ai_base",
         ])),
     )
     .expect("failed to run tauri-build");

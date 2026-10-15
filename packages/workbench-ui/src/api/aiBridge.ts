@@ -1,6 +1,8 @@
-/** 终端「问AI」桥：工作台终端 → AI 对话面板。
- * 完整版目标为宠物窗、精简版为工作台主窗（Tauri 宿主走 'ai://ask' 事件）；
- * 浏览器宿主（dev）用 BroadcastChannel 兜底。 */
+/** 终端「问AI」桥：终端 → AI 对话面板。
+ * 投递目标按入口分流：工具壳（入口 HTML 注入了 __BGSH_WS__）发给本窗 'main'
+ * （四 EXE 架构：AI 侧栏就在本窗，AiSidebar 监听）；工作台完整版发给宠物窗
+ * 'pet'；旧 SSH 精简版（__BGSH_PET__=false 且未注入端口）发给工作台主窗。
+ * Tauri 事件均为进程内投递；浏览器宿主（dev）用 BroadcastChannel 兜底。 */
 
 export interface AiAskPayload {
   /** 去重 id（补发/多端监听时避免重复追加消息） */
@@ -18,13 +20,13 @@ const CHANNEL = 'bgshell.ai-ask'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
-/** 终端「问AI」：唤起 AI 对话面板并把选区 + 问题投递过去。
- * 完整版（__BGSH_PET__）：发给宠物窗；SSH 精简版：发给工作台主窗（本窗内嵌 ChatPanel）。 */
+/** 终端「问AI」：唤起 AI 对话面板并把选区 + 问题投递过去（目标见文件头注释）。 */
 export async function requestAiAsk(payload: Omit<AiAskPayload, 'uid'>): Promise<void> {
   const full: AiAskPayload = { ...payload, uid: crypto.randomUUID() }
   if (isTauri) {
     const { emitTo } = await import('@tauri-apps/api/event')
-    const target = __BGSH_PET__ ? 'pet' : 'main'
+    const injectedPort = (window as { __BGSH_WS__?: string }).__BGSH_WS__
+    const target = __BGSH_PET__ && !injectedPort ? 'pet' : 'main'
     // 目标窗的监听若刚挂载（启动中）可能错过首帧，1.2s 后补发一次（uid 相同，面板按 uid 去重）
     await emitTo(target, EVENT, full)
     window.setTimeout(() => {

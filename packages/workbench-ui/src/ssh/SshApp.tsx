@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Input, Layout, Modal, Tabs, message } from 'antd'
 import { CodeOutlined, DashboardOutlined, FolderOutlined } from '@ant-design/icons'
-import type { HostRecord, SessionKind } from '@bgshell/protocol'
-import { agentSocket } from '../api/ws'
+import type { AiCommand, HostRecord, SessionKind } from '@bgshell/protocol'
+import { agentSocket, aiSocket } from '../api/ws'
 import {
   clearSessionCwd,
   isSessionAltScreen,
@@ -11,6 +11,8 @@ import {
   type UploadSource,
 } from '../api/termUpload'
 import { AgentControls } from '../components/AgentControls'
+import { AiCommandPanel } from '../components/AiCommandPanel'
+import { AiSidebar } from '../components/AiSidebar'
 import { HostEditDrawer } from '../components/HostEditDrawer'
 import { HostList, type HostStatus } from '../components/HostList'
 import { MetricsPane } from '../components/MetricsPane'
@@ -39,7 +41,7 @@ const KIND_ICON: Record<ShellKind, React.ReactNode> = {
 
 /** SSH 独立应用入口：主机管理 + 终端 / 文件管理 / 运行状态多页签。
  *  后端为独立 WS 服务（7771，ssh 入口 HTML 内嵌 __BGSH_WS__ 注入）；
- *  AI 侧栏（连 7777 主程序）在 P5 接入。 */
+ *  AI 侧栏（AiSidebar 经 aiSocket 连 7777 主程序 AI 基座，P5）。 */
 export function SshApp() {
   const [connected, setConnected] = useState(false)
   const [hosts, setHosts] = useState<HostRecord[]>([])
@@ -60,6 +62,9 @@ export function SshApp() {
   } | null>(null)
   const [authPassword, setAuthPassword] = useState('')
   const [authWaiting, setAuthWaiting] = useState(false)
+  // ── AI 候选命令（基座 propose_command 广播）：点击粘贴进对应终端执行 ──
+  const [aiCommands, setAiCommands] = useState<AiCommand[]>([])
+  const [aiCmdOpen, setAiCmdOpen] = useState(true)
 
   const refreshHosts = useCallback(() => agentSocket.sendControl({ t: 'hosts', m: { op: 'list' } }), [])
 
@@ -170,6 +175,19 @@ export function SshApp() {
       off()
     }
   }, [refreshHosts])
+
+  // AI 通道（连 7777 基座）：静默建连（基座未运行则忽略，侧栏闸门里可拉起），
+  // 订阅 propose_command 广播 → 候选命令面板（点击粘贴进对应终端）
+  useEffect(() => {
+    void aiSocket.connect(2).catch(() => {})
+    const off = aiSocket.onControl((frame) => {
+      if (frame.t === 'ai-commands') {
+        setAiCommands((prev) => [...prev, ...frame.m.commands].slice(-20))
+        setAiCmdOpen(true)
+      }
+    })
+    return off
+  }, [])
 
   // 主机列表变化时自动探测全部主机
   useEffect(() => {
@@ -427,6 +445,16 @@ export function SshApp() {
       </Modal>
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       {termUpload && <TermDropUploadCard view={termUpload} onClose={() => setTermUpload(null)} />}
+      {aiCmdOpen && aiCommands.length > 0 && (
+        <AiCommandPanel
+          commands={aiCommands}
+          terminals={tabs.filter((t) => t.kind === 'shell').map((t) => ({ key: t.key, hostName: t.hostName }))}
+          activeKey={activeKey}
+          onClose={() => setAiCmdOpen(false)}
+          onClear={() => setAiCommands([])}
+        />
+      )}
+      <AiSidebar />
       </Layout>
     </div>
   )

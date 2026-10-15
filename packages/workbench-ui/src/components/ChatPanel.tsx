@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { agentSocket } from '../api/ws'
+import { agentSocket, type AgentSocket } from '../api/ws'
 import { writeClipboardText } from '../api/clipboard'
 import type { AiAskPayload } from '../api/aiBridge'
 import type { AiChatSummary, AiHistoryMessage } from '@bgshell/protocol'
@@ -149,13 +149,16 @@ function composeAskText(p: AiAskPayload): string {
   return `${head}\n${p.question}\n\n终端选区内容：\n\`\`\`\n${p.selection}\n\`\`\``
 }
 
-/** AI 对话面板（双宿主）：宠物窗与工作台主窗共用（SSH 精简版的唯一 AI 入口）；与鲸鱼娘对话驱动 SSH 任务，危险命令弹批准卡片 */
+/** AI 对话面板（多宿主）：宠物窗与工作台主窗共用默认 agentSocket（7777 同进程）；
+ *  三工具壳（SSH/SQL/串口）经 socket 注入 aiSocket（跨进程连基座 7777）；
+ *  与鲸鱼娘对话驱动 SSH 任务，危险命令弹批准卡片 */
 export function ChatPanel({
   open,
   onClose,
   incomingAsk,
   onPanelResize,
   sizeMax,
+  socket,
 }: {
   open: boolean
   onClose: () => void
@@ -165,7 +168,11 @@ export function ChatPanel({
   onPanelResize?: (size: ChatPanelSize) => void
   /** 面板尺寸上限（缺省按所在窗口视口；桌宠宿主按屏幕减去宠物区） */
   sizeMax?: ChatPanelSize
+  /** 数据通道（缺省本进程 agentSocket；工具壳传 aiSocket 连 AI 基座 7777） */
+  socket?: AgentSocket
 }) {
+  // 单例 socket，组件生命周期内引用稳定；缺省回落主进程通道
+  const sock = socket ?? agentSocket
   const [msgs, setMsgs] = useState<ChatMsg[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState<string>()
@@ -272,7 +279,7 @@ export function ChatPanel({
   }
 
   useEffect(() => {
-    const off = agentSocket.onControl((frame) => {
+    const off = sock.onControl((frame) => {
       if (frame.t === 'ai-history') {
         // 恢复上次的对话（Agent 重启后记录仍在）：接管服务端返回的 chatId 继续聊
         chatIdRef.current = frame.m.chatId
@@ -410,9 +417,9 @@ export function ChatPanel({
 
   // 挂载即请求历史（面板常驻挂载、关闭只是不渲染）：恢复上次的对话记录
   useEffect(() => {
-    agentSocket
+    sock
       .connect()
-      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'history' } }))
+      .then(() => sock.sendControl({ t: 'ai', m: { op: 'history' } }))
       .catch(() => {})
   }, [])
 
@@ -439,9 +446,9 @@ export function ChatPanel({
     if (!text) return
     setMsgs((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', text }])
     setBusy('思考中…')
-    agentSocket
+    sock
       .connect()
-      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'chat', chatId: chatIdRef.current, text } }))
+      .then(() => sock.sendControl({ t: 'ai', m: { op: 'chat', chatId: chatIdRef.current, text } }))
       .catch((err: Error) => {
         setBusy(undefined)
         setMsgs((prev) => [...prev, { id: crypto.randomUUID(), role: 'assistant', text: `连接 Agent 失败：${err.message}`, error: true }])
@@ -478,10 +485,10 @@ export function ChatPanel({
     ])
     setApproval(null)
     if (approved) setBusy('执行中…')
-    void agentSocket
+    void sock
       .connect()
       .then(() =>
-        agentSocket.sendControl({ t: 'ai-approve', m: { chatId: chatIdRef.current, reqId: snapshot.reqId, approved } }),
+        sock.sendControl({ t: 'ai-approve', m: { chatId: chatIdRef.current, reqId: snapshot.reqId, approved } }),
       )
       .catch((err: Error) => {
         // 发送失败（Agent 不可达/断线重连中）：恢复卡片让用户稍后重点，
@@ -508,10 +515,10 @@ export function ChatPanel({
     } else {
       setMsgs((prev) => [...prev, { id: crypto.randomUUID(), role: 'user', text: `（取消了 ${snapshot.title}）` }])
     }
-    void agentSocket
+    void sock
       .connect()
       .then(() =>
-        agentSocket.sendControl({
+        sock.sendControl({
           t: 'ai',
           m: send
             ? { op: 'input-reply', chatId: chatIdRef.current, reqId: snapshot.reqId, value }
@@ -534,9 +541,9 @@ export function ChatPanel({
     setBusy('正在停止…')
     setApproval(null)
     setSecretReq(null)
-    void agentSocket
+    void sock
       .connect()
-      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'cancel', chatId: chatIdRef.current } }))
+      .then(() => sock.sendControl({ t: 'ai', m: { op: 'cancel', chatId: chatIdRef.current } }))
       .catch((err: Error) => {
         setBusy(undefined)
         setMsgs((prev) => [
@@ -548,10 +555,10 @@ export function ChatPanel({
 
   /** 只终止这一条执行中的命令：对话继续，AI 会看到「用户终止了该命令」 */
   const cancelTool = (toolCallId: string) => {
-    void agentSocket
+    void sock
       .connect()
       .then(() =>
-        agentSocket.sendControl({ t: 'ai', m: { op: 'cancel-tool', chatId: chatIdRef.current, toolCallId } }),
+        sock.sendControl({ t: 'ai', m: { op: 'cancel-tool', chatId: chatIdRef.current, toolCallId } }),
       )
       .catch(() => {
         // 连接断开时后端整轮也会因超时收尾；卡片由 ai-result 兜底清理
@@ -560,10 +567,10 @@ export function ChatPanel({
 
   /** 介入 SSH 控制台（console_command 运行中）：把文本写进 PTY stdin（"\x03" = Ctrl+C） */
   const sendConsole = (toolCallId: string, text: string) => {
-    void agentSocket
+    void sock
       .connect()
       .then(() =>
-        agentSocket.sendControl({ t: 'ai', m: { op: 'console-input', chatId: chatIdRef.current, toolCallId, text } }),
+        sock.sendControl({ t: 'ai', m: { op: 'console-input', chatId: chatIdRef.current, toolCallId, text } }),
       )
       .catch(() => {})
   }
@@ -573,18 +580,18 @@ export function ChatPanel({
     if (busy || approval || secretReq) return
     setConfirmDel(undefined)
     setHistOpen(true)
-    void agentSocket
+    void sock
       .connect()
-      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'history-list' } }))
+      .then(() => sock.sendControl({ t: 'ai', m: { op: 'history-list' } }))
       .catch(() => {})
   }
 
   /** 复原一段历史对话：接管服务端返回的 chatId，继续在此会话上聊（上下文由 Agent 从库恢复） */
   const restoreChat = (id: string) => {
     setHistOpen(false)
-    void agentSocket
+    void sock
       .connect()
-      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'history', chatId: id } }))
+      .then(() => sock.sendControl({ t: 'ai', m: { op: 'history', chatId: id } }))
       .catch(() => {})
   }
 
@@ -605,9 +612,9 @@ export function ChatPanel({
       setExpandedTools(new Set())
       setConsoleOut({})
     }
-    void agentSocket
+    void sock
       .connect()
-      .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'history-delete', chatId: id } }))
+      .then(() => sock.sendControl({ t: 'ai', m: { op: 'history-delete', chatId: id } }))
       .catch(() => setHistOpen(false))
   }
 
@@ -643,9 +650,9 @@ export function ChatPanel({
         <button type="button" className="chat-close" title="开启新对话（历史记录保留在数据库中）" onClick={() => {
           const old = chatIdRef.current
           // 结束旧会话：终止进行中的任务并清掉 Agent 侧记忆（记录本身保留，可随时查阅）
-          void agentSocket
+          void sock
             .connect()
-            .then(() => agentSocket.sendControl({ t: 'ai', m: { op: 'reset', chatId: old } }))
+            .then(() => sock.sendControl({ t: 'ai', m: { op: 'reset', chatId: old } }))
             .catch(() => {})
           chatIdRef.current = newChatId()
           streamIdRef.current = undefined

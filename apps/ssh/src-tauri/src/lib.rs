@@ -93,6 +93,16 @@ fn read_file_chunk(path: String, offset: u64, len: u32) -> Result<tauri::ipc::Re
     Ok(tauri::ipc::Response::new(buf))
 }
 
+/// 拉起 AI 基座（bgshell-desktop，7777）：AI 侧栏/askAi 发现基座未运行时调用。
+/// 命令内部会阻塞等待基座 WS 端口就绪（最长 15s），放阻塞线程避免卡 UI。
+#[tauri::command]
+async fn spawn_ai_base() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(bg_core::ai_base::ensure_ai_base)
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|_| ())
+}
+
 /// Agent 自身控制（设置弹窗）：自启 / 启动打开 / 退出
 type AgentCtl = Arc<dyn Fn(AgentOp) -> BoxFuture<'static, AgentResult> + Send + Sync>;
 
@@ -380,7 +390,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         // 原生文件选择器（主机编辑：私钥文件路径浏览）
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![stat_file, read_file_chunk])
+        .invoke_handler(tauri::generate_handler![stat_file, read_file_chunk, spawn_ai_base])
         .setup(move |app| {
             let data_dir = resolve_data_dir();
             let _ = std::fs::create_dir_all(&data_dir);

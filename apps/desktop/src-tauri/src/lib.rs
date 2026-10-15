@@ -303,8 +303,12 @@ fn dev_server_ready(port: u16) -> bool {
 pub fn run() {
     let silent = std::env::args().any(|a| a == "--silent");
     let builder = tauri::Builder::default()
-        // 桌面单实例：完整版唤回宠物窗（隐藏时也能找回），SSH 精简版唤起工作台主窗
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        // 桌面单实例：完整版唤回宠物窗（隐藏时也能找回），SSH 精简版唤起工作台主窗。
+        // --silent（工具壳 spawn_ai_base 在基座已在线时的竞态兜底）不唤起任何窗口
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if args.iter().any(|a| a == "--silent") {
+                return;
+            }
             #[cfg(feature = "pet")]
             {
                 if let Some(win) = app.get_webview_window("pet") {
