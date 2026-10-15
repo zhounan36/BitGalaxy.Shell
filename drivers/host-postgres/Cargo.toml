@@ -1,0 +1,21 @@
+[package]
+name = "host-postgres"
+version = "0.1.0"
+edition = "2021"
+description = "PostgreSQL 驱动宿主：stdio NDJSON-RPC，tokio-postgres 纯 Rust"
+
+[[bin]]
+name = "postgres-host"
+path = "src/main.rs"
+
+[dependencies]
+host-common = { path = "../host-common" }
+tokio-postgres = "0.7"
+postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
+postgres-protocol = "0.6"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }

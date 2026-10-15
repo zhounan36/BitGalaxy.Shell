@@ -13,7 +13,7 @@ export type Origination = 'auto' | 'local' | 'cloud'
 
 // ── 会话种类 ─────────────────────────────────────────────────────────────
 
-export type SessionKind = 'shell' | 'sftp' | 'metrics' | 'serial'
+export type SessionKind = 'shell' | 'sftp' | 'metrics' | 'serial' | 'sql'
 
 // ── 串口（COM 口控制台透传）──────────────────────────────────────────────
 
@@ -30,6 +30,10 @@ export interface SerialOptions {
   stopBits?: number
   /** none / software / hardware，缺省 none */
   flowControl?: 'none' | 'software' | 'hardware'
+  /** 打开时 DTR 预设电平（缺省 true；Arduino 复位/ESP32 下载模式依赖） */
+  dtr?: boolean
+  /** 打开时 RTS 预设电平（缺省 true） */
+  rts?: boolean
 }
 
 /** 本机串口描述（serial-ports 帧） */
@@ -47,6 +51,35 @@ export interface SerialPortsResult {
   ok: boolean
   ports?: SerialPortInfo[]
   message?: string
+}
+
+/** 串口控制操作（serial-ctl 帧）：DTR/RTS 电平、Break、运行时改波特率、信号查询 */
+export interface SerialCtlOp {
+  /** dtr / rts / break / set-baud / signals */
+  op: 'dtr' | 'rts' | 'break' | 'set-baud' | 'signals'
+  /** dtr/rts 的目标电平（缺省 true） */
+  level?: boolean
+  /** break 持续时间 ms（缺省 250） */
+  ms?: number
+  /** set-baud 的新波特率 */
+  baudRate?: number
+}
+
+/** 串口输入信号线状态（CD/CTS/DSR/RI） */
+export interface SerialSignals {
+  cd: boolean
+  cts: boolean
+  dsr: boolean
+  ri: boolean
+}
+
+/** serial-ctl-result 回包 */
+export interface SerialCtlResult {
+  ok: boolean
+  op: string
+  message?: string
+  /** op=signals 时的信号线状态 */
+  signals?: SerialSignals
 }
 
 // ── 主机档案（M1：本地 hosts.json；M2 起与云端档案同步，设计稿 §5.4）──────────
@@ -211,6 +244,131 @@ export interface SftpProgress {
   speedBps?: number
   /** 本次续传已跳过的字节数（断点续传起点，0 = 全新传输） */
   resumedB?: number
+}
+
+// ── SQL（数据库管理）───────────────────────────────────────────────────
+
+/** 数据库类型（驱动随安装包内置） */
+export type SqlDbType = 'mysql' | 'mariadb' | 'postgres' | 'sqlite'
+
+/** 数据库连接规格（connect op；密码仅此帧传输一次，后端只存内存） */
+export interface SqlConnSpec {
+  type: SqlDbType
+  /** 所属 SSH 主机档案 id（隧道经此主机转发；sqlite 时用于下载文件） */
+  hostId: string
+  /** 远端数据库地址（缺省 127.0.0.1） */
+  host?: string
+  /** 远端数据库端口（缺省 mysql 3306 / postgres 5432） */
+  port?: number
+  user?: string
+  password?: string
+  database?: string
+  /** sqlite：远端 .db 文件路径（经 SFTP 下载后本地只读查询） */
+  sqlitePath?: string
+  /** 显示名（连接管理器用） */
+  name?: string
+}
+
+/** SQL 操作（字段按 op 取用） */
+export type SqlRequest =
+  | { op: 'drivers-list' }
+  | { op: 'connect'; conn: SqlConnSpec }
+  | { op: 'disconnect'; connId: string }
+  | { op: 'query'; connId: string; sql: string; maxRows?: number; timeoutMs?: number }
+  | { op: 'query-more'; connId: string; queryId: string; maxRows?: number }
+  | { op: 'execute'; connId: string; sql: string; timeoutMs?: number }
+  | { op: 'cancel'; queryId: string }
+  | { op: 'introspect'; connId: string; scope: 'databases' | 'tables' | 'columns' | 'indexes'; schema?: string; table?: string }
+  | { op: 'fetch-sqlite'; conn: SqlConnSpec; path: string }
+
+export type SqlOp = SqlRequest & { rid: string }
+
+/** 失败分类（Agent 侧 classify_sql_error 产出） */
+export type SqlErrorKind =
+  | 'sql_error'
+  | 'network'
+  | 'permission_denied'
+  | 'timeout'
+  | 'driver_crashed'
+  | 'driver_unavailable'
+  | 'tunnel_failed'
+  | 'too_large'
+  | 'unknown'
+
+export interface SqlColumn {
+  name: string
+  dataType?: string
+  nullable?: boolean
+}
+
+export interface SqlDbInfo {
+  name: string
+}
+
+export interface SqlTableInfo {
+  name: string
+  kind?: string
+  rowsEstimate?: number
+}
+
+export interface SqlColumnInfo {
+  name: string
+  dataType?: string
+  pk: boolean
+  nullable: boolean
+  default?: string
+}
+
+export interface SqlIndexInfo {
+  name: string
+  unique: boolean
+  columns: string[]
+}
+
+export interface SqlDriverInfo {
+  name: string
+  version: string
+  /** installed | not-installed | downloading */
+  state: string
+  description?: string
+}
+
+/** SQL 操作回包（字段按 op 取用） */
+export interface SqlResult {
+  op: string
+  ok: boolean
+  rid?: string
+  message?: string
+  errorKind?: SqlErrorKind | string
+  /** connect：连接 id（后续操作引用） */
+  connId?: string
+  serverVersion?: string
+  /** query/query-more：驱动侧查询句柄（query-more 引用） */
+  queryId?: string
+  columns?: SqlColumn[]
+  /** 行数据（JSON 值二维数组，NULL = null） */
+  rows?: unknown[][]
+  rowCount?: number
+  /** 结果集被 maxRows 截断 */
+  truncated?: boolean
+  affected?: number
+  durationMs?: number
+  databases?: SqlDbInfo[]
+  tables?: SqlTableInfo[]
+  fields?: SqlColumnInfo[]
+  indexes?: SqlIndexInfo[]
+  drivers?: SqlDriverInfo[]
+  /** fetch-sqlite：本地临时文件路径 */
+  sqliteRef?: string
+}
+
+/** SQL 长任务进度（SQLite 远端文件下载） */
+export interface SqlProgress {
+  op: string
+  rid?: string
+  stage?: string
+  transferred?: number
+  total?: number
 }
 
 // ── Metrics（运行状态采集）───────────────────────────────────────────────
@@ -395,6 +553,7 @@ export type ClientFrame =
   | { t: 'retry-auth'; s: string; m: { password?: string } } // password 缺省 = 取消重试
   | { t: 'hosts'; m: HostOp }
   | { t: 'sftp'; s: string; m: SftpOp }
+  | { t: 'sql'; s: string; m: SqlOp }
   | { t: 'metrics'; s: string; m: { intervalSec: number } } // 0 = 暂停采集
   | { t: 'probe'; m: { hostId: string } }
   | { t: 'test-host'; m: HostInput } // 测试连接：用表单凭据做一次真实 SSH 认证，不落主机档案
@@ -402,6 +561,7 @@ export type ClientFrame =
   | { t: 'ai'; m: AiOp }
   | { t: 'ai-approve'; m: { chatId: string; reqId: string; approved: boolean } }
   | { t: 'serial-list' } // 枚举本机串口（serial-ports 回包）
+  | { t: 'serial-ctl'; s: string; m: SerialCtlOp } // 串口控制（serial-ctl-result 回包）
   | { t: 'settings'; m: SettingsOp }
 
 // ── 控制帧：Agent → 客户端 ───────────────────────────────────────────────
@@ -422,7 +582,11 @@ export interface AuthRetryInfo {
 }
 
 export type ServerFrame =
-  | { t: 'session-opened'; s: string; m: { hostId: string; kind: SessionKind } }
+  | {
+      t: 'session-opened'
+      s: string
+      m: { hostId: string; kind: SessionKind; dtr?: boolean; rts?: boolean }
+    }
   | { t: 'session-closed'; s: string; m: { reason: string } }
   | { t: 'hostkey-unknown'; s: string; m: HostKeyInfo }
   | { t: 'auth-retry'; s: string; m: AuthRetryInfo }
@@ -448,6 +612,9 @@ export type ServerFrame =
   | { t: 'ai-console'; m: { chatId: string; toolCallId: string; delta: string } }
   | { t: 'settings-result'; m: SettingsResult }
   | { t: 'serial-ports'; m: SerialPortsResult }
+  | { t: 'serial-ctl-result'; s: string; m: SerialCtlResult }
+  | { t: 'sql-result'; s: string; m: SqlResult }
+  | { t: 'sql-progress'; s: string; m: SqlProgress }
   | { t: 'error'; s?: string; m: { code: string; message: string } }
 
 // ── 数据帧（WS 二进制帧）────────────────────────────────────────────────

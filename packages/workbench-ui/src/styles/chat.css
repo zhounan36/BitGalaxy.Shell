@@ -4,9 +4,11 @@
   position: absolute;
   right: calc(var(--pet-size, 256px) - 46px);
   bottom: 20px;
+  /* 边框计入宽高：拖拽把手按 getBoundingClientRect 测量、按 style 回写，不统一会每次拖拽漂移 2px */
+  box-sizing: border-box;
   width: 360px;
   height: 460px;
-  max-height: calc(100vh - 40px);
+  /* 尺寸上下限由 ChatPanel 拖拽逻辑按宿主夹取（内联 width/height 覆盖默认值），不设 max-height 免得夹住拖大 */
   display: flex;
   flex-direction: column;
   border-radius: var(--radius-lg);
@@ -23,6 +25,71 @@
 
 .chat-panel ::selection {
   background: rgba(59, 166, 216, 0.4);
+}
+
+/* ── 拖拽调整尺寸把手（面板锚右下角，拖左边/上边/左上角变大变小）──
+   置于面板边缘内侧（panel overflow:hidden），z 高于内容，触控区 8px，视觉仅角落斜纹 */
+.chat-rz {
+  position: absolute;
+  z-index: 40;
+  touch-action: none;
+}
+
+/* 左边：调宽度 */
+.chat-rz-w {
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+/* 上边：调高度 */
+.chat-rz-h {
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+/* 左上角：同时调宽高（压住前两条的角落，取 nwse 语义 = 向左上拖变大） */
+.chat-rz-wh {
+  left: 0;
+  top: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+}
+
+/* 角落斜纹提示：两条平行的 45° 短斜线（低调不抢视觉），随悬停亮起 */
+.chat-rz-wh::before,
+.chat-rz-wh::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  width: 12px;
+  height: 1px;
+  background: var(--text-muted);
+  opacity: 0.55;
+  transform: rotate(45deg);
+  transform-origin: left center;
+  pointer-events: none;
+}
+
+.chat-rz-wh::before {
+  left: 2px;
+}
+
+.chat-rz-wh::after {
+  left: 7px;
+}
+
+/* 拖拽/悬停时把手亮起 */
+.chat-rz-wh:hover::before,
+.chat-rz-wh:hover::after {
+  opacity: 0.95;
+  background: var(--accent-bright);
 }
 
 .chat-head {

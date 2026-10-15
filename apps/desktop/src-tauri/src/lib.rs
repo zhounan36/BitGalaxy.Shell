@@ -32,6 +32,7 @@ pub mod serial;
 pub mod server;
 pub mod session;
 pub mod sftp;
+pub mod sql;
 pub mod ssh;
 pub mod stores;
 pub mod toolcore;
@@ -168,6 +169,12 @@ fn read_file_chunk(path: String, offset: u64, len: u32) -> Result<tauri::ipc::Re
     Ok(tauri::ipc::Response::new(buf))
 }
 
+/// 写文本文件（串口调试记录落盘：前端收集帧日志，保存对话框定路径后经此写入）
+#[tauri::command]
+fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
 /// Agent 自身控制（工作台设置页）：自启 / 启动时打开工作台 / 退出
 fn make_agent_ctl(app: tauri::AppHandle, stores: Stores, data_dir: PathBuf) -> server::AgentCtl {
     Arc::new(move |op: AgentOp| {
@@ -264,6 +271,7 @@ fn with_ipc_commands(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry
         quit_app,
         stat_file,
         read_file_chunk,
+        write_text_file,
         pet_pack::pet_pack_import,
         pet_pack::pet_packs_list,
         pet_pack::pet_pack_delete,
@@ -279,7 +287,8 @@ fn with_ipc_commands(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry
         set_pet_visible,
         quit_app,
         stat_file,
-        read_file_chunk
+        read_file_chunk,
+        write_text_file
     ])
 }
 
@@ -357,7 +366,7 @@ pub fn run() {
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(7777);
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = server::start_server(port, stores_for_server, policy, agent_ctl, Some(ready_tx)).await {
+                if let Err(e) = server::start_server(port, stores_for_server, policy, agent_ctl, data_dir, Some(ready_tx)).await {
                     eprintln!("[bgshell] WS 服务启动失败: {e}");
                 }
             });

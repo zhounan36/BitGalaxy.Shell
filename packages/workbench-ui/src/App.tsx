@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react'
 import { Button, Input, Layout, Modal, Tabs, message } from 'antd'
-import { CodeOutlined, DashboardOutlined, FolderOutlined, UsbOutlined } from '@ant-design/icons'
+import { CodeOutlined, DatabaseOutlined, DashboardOutlined, FolderOutlined, UsbOutlined } from '@ant-design/icons'
 import type { AiCommand, HostRecord, SerialOptions, SerialPortInfo, SessionKind } from '@bgshell/protocol'
 import { agentSocket } from './api/ws'
 import { onAiAsk, type AiAskPayload } from './api/aiBridge'
@@ -17,9 +17,12 @@ import { DropUploadModal } from './components/DropUploadModal'
 import { HostEditDrawer } from './components/HostEditDrawer'
 import { HostList, type HostStatus } from './components/HostList'
 import { MetricsPane } from './components/MetricsPane'
+import { NewConnectionModal } from './components/NewConnectionModal'
 import { SerialConnectModal } from './components/SerialConnectModal'
+import { SerialDebugPane } from './components/SerialDebugPane'
 import { SettingsModal } from './components/SettingsModal'
 import { SftpPane } from './components/SftpPane'
+import { SqlPane } from './components/SqlPane'
 import { TermDropUploadCard, type TermDropUploadView } from './components/TermDropUploadCard'
 import { TerminalPane } from './components/TerminalPane'
 import { TitleBar } from './components/TitleBar'
@@ -29,14 +32,17 @@ interface SessionTab {
   kind: SessionKind
   hostId: string
   hostName: string
+  /** kind=serial：串口调试面板用的连接参数摘要（端口/波特率/打开预设） */
+  serial?: SerialOptions
 }
 
-const KIND_LABEL: Record<SessionKind, string> = { shell: '', sftp: ' · 文件', metrics: ' · 状态', serial: ' · 串口' }
+const KIND_LABEL: Record<SessionKind, string> = { shell: '', sftp: ' · 文件', metrics: ' · 状态', serial: ' · 串口', sql: ' · 数据库' }
 const KIND_ICON: Record<SessionKind, React.ReactNode> = {
   shell: <CodeOutlined />,
   sftp: <FolderOutlined />,
   metrics: <DashboardOutlined />,
   serial: <UsbOutlined />,
+  sql: <DatabaseOutlined />,
 }
 
 // AI 对话面板（仅 SSH 精简版加载）：lazy + 构建常量折叠——完整版的动态 import
@@ -53,6 +59,8 @@ export function App() {
   const [activeKey, setActiveKey] = useState<string>()
   const [editing, setEditing] = useState<{ open: boolean; host?: HostRecord }>({ open: false })
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // ── 统一「新建连接」面板：SSH 主机 / 串口 / SQL 数据库三类入口合一 ──────────
+  const [newConnOpen, setNewConnOpen] = useState(false)
   // ── 串口连接（kind='serial'：本机 COM 口透传到终端）──────────────────────
   const [serialOpen, setSerialOpen] = useState(false)
   const [serialPorts, setSerialPorts] = useState<SerialPortInfo[]>([])
@@ -99,10 +107,11 @@ export function App() {
 
   const refreshSerialPorts = useCallback(() => agentSocket.sendControl({ t: 'serial-list' }), [])
 
-  // 专注模式只属于终端页签：切到文件/状态页签、关闭全部页签时自动退出，避免无处退出的死角
+  // 专注模式只属于 shell 终端页签（SerialDebugPane 自带双栏布局、无专注退出入口）：
+  // 切到其他页签、关闭全部页签时自动退出，避免无处退出的死角
   useEffect(() => {
     const active = tabs.find((t) => t.key === activeKey)
-    if (termFocus && active?.kind !== 'shell' && active?.kind !== 'serial') setTermFocus(false)
+    if (termFocus && active?.kind !== 'shell') setTermFocus(false)
   }, [termFocus, tabs, activeKey])
 
   useEffect(() => {
@@ -384,7 +393,7 @@ export function App() {
   // 串口会话：hostId 固定占位 'serial'（后端不查主机档案），页签名显示端口名
   const openSerialSession = (opts: SerialOptions) => {
     const sessionId = crypto.randomUUID()
-    setTabs((prev) => [...prev, { key: sessionId, kind: 'serial', hostId: 'serial', hostName: opts.port }])
+    setTabs((prev) => [...prev, { key: sessionId, kind: 'serial', hostId: 'serial', hostName: opts.port, serial: opts }])
     setActiveKey(sessionId)
     setSerialOpen(false)
     agentSocket.sendControl({
@@ -408,7 +417,8 @@ export function App() {
   }
 
   const onHostAction = (host: HostRecord, action: string) => {
-    if (action === 'shell' || action === 'sftp' || action === 'metrics') openSession(host, action)
+    if (action === 'shell' || action === 'sftp' || action === 'metrics' || action === 'sql')
+      openSession(host, action)
     else if (action === 'edit') setEditing({ open: true, host })
     else if (action === 'delete') {
       Modal.confirm({
@@ -430,21 +440,9 @@ export function App() {
                   hosts={hosts}
                   hostStatus={hostStatus}
                   onAction={onHostAction}
-                  onAdd={() => setEditing({ open: true })}
+                  onAdd={() => setNewConnOpen(true)}
                   onRefresh={refreshHosts}
                 />
-              </div>
-              <div style={{ padding: '8px 12px' }}>
-                <Button
-                  icon={<UsbOutlined />}
-                  block
-                  onClick={() => {
-                    setSerialOpen(true)
-                    refreshSerialPorts()
-                  }}
-                >
-                  连接串口
-                </Button>
               </div>
               <AgentControls
                 onOpenSettings={() => setSettingsOpen(true)}
@@ -461,7 +459,8 @@ export function App() {
             </div>
             <div className="bgshell-empty-title">选择一个主机开始</div>
             <div className="bgshell-empty-hint">
-              单击左侧主机打开终端；通过主机菜单可进入「文件管理」或「运行状态」。
+              通过左上角「新建连接」添加 SSH 主机、串口设备或 SQL 数据库；
+              单击主机打开终端，主机菜单可进入「文件管理」或「运行状态」。
             </div>
           </div>
         ) : (
@@ -487,25 +486,32 @@ export function App() {
                 </span>
               ),
               children:
-                t.kind === 'shell' || t.kind === 'serial' ? (
+                t.kind === 'shell' ? (
                   <TerminalPane
                     sessionId={t.key}
                     hostName={t.hostName}
                     focusMode={termFocus}
                     onFocusToggle={() => setTermFocus((prev) => !prev)}
-                    onFilesDrop={
-                      // 串口会话背后无 SFTP：不支持拖拽上传
-                      t.kind === 'shell'
-                        ? (files) =>
-                            startTermUpload(
-                              t.key,
-                              files.map((f) => ({ name: f.name, sizeB: f.size, file: f })),
-                            )
-                        : undefined
+                    onFilesDrop={(files) =>
+                      startTermUpload(
+                        t.key,
+                        files.map((f) => ({ name: f.name, sizeB: f.size, file: f })),
+                      )
                     }
+                  />
+                ) : t.kind === 'serial' ? (
+                  // 串口调试工作台（双栏）：控制台 + Hex 监视/快捷发送/信号控制
+                  <SerialDebugPane
+                    sessionId={t.key}
+                    portName={t.serial?.port ?? t.hostName}
+                    baudRate={t.serial?.baudRate ?? 115200}
+                    initDtr={t.serial?.dtr ?? true}
+                    initRts={t.serial?.rts ?? true}
                   />
                 ) : t.kind === 'sftp' ? (
                   <SftpPane sessionId={t.key} />
+                ) : t.kind === 'sql' ? (
+                  <SqlPane sessionId={t.key} hostId={t.hostId} />
                 ) : (
                   <MetricsPane sessionId={t.key} />
                 ),
@@ -554,6 +560,25 @@ export function App() {
         onClose={() => setSerialOpen(false)}
         onRefresh={refreshSerialPorts}
         onConnect={openSerialSession}
+      />
+      {/* 统一「新建连接」面板：SSH 主机 / 串口设备 / SQL 数据库入口合一 */}
+      <NewConnectionModal
+        open={newConnOpen}
+        hosts={hosts}
+        onClose={() => setNewConnOpen(false)}
+        onAddHost={() => {
+          setNewConnOpen(false)
+          setEditing({ open: true })
+        }}
+        onOpenSerial={() => {
+          setNewConnOpen(false)
+          setSerialOpen(true)
+          refreshSerialPorts()
+        }}
+        onSelectSqlHost={(host) => {
+          setNewConnOpen(false)
+          openSession(host, 'sql')
+        }}
       />
       {aiCmdOpen && aiCommands.length > 0 && (
         <AiCommandPanel

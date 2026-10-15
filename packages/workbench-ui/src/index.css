@@ -833,14 +833,14 @@ body {
 
 
 /* ── AI 对话面板（SSH 精简版工作台宿主）：覆盖 chat.css 默认的宠物窗定位 ──
-   右下浮层（与 AiCommandPanel 同侧，z-index 低一档：候选命令面板优先可见） */
+   右下浮层（与 AiCommandPanel 同侧，z-index 低一档：候选命令面板优先可见）。
+   宽高只是未拖拽时的默认值，拖拽后由 ChatPanel 内联 style 覆盖（上下限由其夹取） */
 .wb-chat-wrap .chat-panel {
   position: fixed;
   right: 16px;
   bottom: 16px;
   width: 440px;
   height: min(560px, calc(100vh - 120px));
-  max-height: calc(100vh - 120px);
   z-index: 1080;
   animation: wb-chat-in 160ms ease;
 }

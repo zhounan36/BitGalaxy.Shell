@@ -24,6 +24,7 @@
     "allow-set-pet-visible",
     "allow-quit-app",
     "allow-stat-file",
-    "allow-read-file-chunk"
+    "allow-read-file-chunk",
+    "allow-write-text-file"
   ]
 }

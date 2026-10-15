@@ -10,6 +10,7 @@ fn main() {
             "quit_app",
             "stat_file",
             "read_file_chunk",
+            "write_text_file",
         ])),
     )
     .expect("failed to run tauri-build");

@@ -8,6 +8,9 @@ build/
 out/
 *.tsbuildinfo
 apps/desktop/src-tauri/target/
+drivers/target/
+# SQL 驱动宿主内置资产（scripts/prep-drivers.mjs 产出，随安装包打包）
+apps/desktop/src-tauri/drivers/
 apps/desktop/src-tauri/binaries/*.exe
 apps/desktop/src-tauri/gen/schemas/
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from 'react'
-import { Alert, Button, Collapse, Form, Modal, Select, Space, Typography } from 'antd'
+import { Alert, Button, Collapse, Form, Modal, Select, Space, Switch, Typography } from 'antd'
 import { ReloadOutlined, UsbOutlined } from '@ant-design/icons'
 import type { SerialOptions, SerialPortInfo } from '@bgshell/protocol'
 
@@ -52,7 +52,15 @@ export function SerialConnectModal({ open, ports, error, onClose, onRefresh, onC
       <Form
         form={form}
         layout="vertical"
-        initialValues={{ baudRate: 115200, dataBits: 8, parity: 'none', stopBits: 1, flowControl: 'none' }}
+        initialValues={{
+          baudRate: 115200,
+          dataBits: 8,
+          parity: 'none',
+          stopBits: 1,
+          flowControl: 'none',
+          dtr: true,
+          rts: true,
+        }}
       >
         <Form.Item name="port" label="端口" rules={[{ required: true, message: '请选择串口' }]}>
           <Select
@@ -107,7 +115,7 @@ export function SerialConnectModal({ open, ports, error, onClose, onRefresh, onC
                   <Form.Item name="stopBits" label="停止位" style={{ marginBottom: 12 }}>
                     <Select options={[1, 2].map((v) => ({ value: v, label: String(v) }))} />
                   </Form.Item>
-                  <Form.Item name="flowControl" label="流控" style={{ marginBottom: 0 }}>
+                  <Form.Item name="flowControl" label="流控" style={{ marginBottom: 12 }}>
                     <Select
                       options={[
                         { value: 'none', label: '无' },
@@ -116,6 +124,17 @@ export function SerialConnectModal({ open, ports, error, onClose, onRefresh, onC
                       ]}
                     />
                   </Form.Item>
+                  <Space size={16}>
+                    <Form.Item name="dtr" label="打开时 DTR" valuePropName="checked" style={{ marginBottom: 0 }}>
+                      <Switch />
+                    </Form.Item>
+                    <Form.Item name="rts" label="打开时 RTS" valuePropName="checked" style={{ marginBottom: 0 }}>
+                      <Switch />
+                    </Form.Item>
+                  </Space>
+                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>
+                    连接瞬间的 DTR/RTS 电平：Arduino 会因 DTR 跳变自动复位，调试时可关闭
+                  </Typography.Text>
                 </>
               ),
             },

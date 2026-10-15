@@ -1,15 +1,18 @@
-//! 串口会话通道（P1：控制台透传，方案见 .trae/documents/串口通信方案.md）。
-//! kind="serial" 的会话不走 SSH 连接注册表：本机 COM 口经 tokio-serial 打开，
-//! 读半部循环 → DF_STDOUT 数据帧，stdin 队列 → 专职写任务（与 shell 会话同构）。
-//! 热插拔：读错误（拔线/端口消失）→ 会话以 "serial-lost" 关闭。
+//! 串口会话通道（P1 控制台透传 + P2 调试控制，方案见 .trae/documents/串口通信方案.md）。
+//! kind="serial" 的会话不走 SSH 连接注册表：本机 COM 口经 tokio-serial 打开。
+//!
+//! P2 起改为「单 select! 双工任务独占 SerialStream」模型：split 后拿不回
+//! DTR/RTS/Break 等控制方法（且 Windows COM 句柄单开），因此整个流由一个
+//! 任务独占，交错处理 读（→ DF_STDOUT 回调）与 Cmd 通道（写入/控制命令）。
+//! 热插拔：读错误（拔线/端口消失）→ on_end("serial-lost") 回调。
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
-use tokio_serial::SerialStream;
+use tokio::io::AsyncReadExt;
+use tokio::sync::{mpsc, oneshot};
+use tokio_serial::{SerialPort, SerialStream};
 
-use crate::protocol::{SerialOptions, SerialPortM};
+use crate::protocol::{SerialOptions, SerialPortM, SerialSignalsM};
 
 /// 枚举本机串口（serial-ports 帧负载）
 pub fn list_ports() -> Result<Vec<SerialPortM>, String> {
@@ -43,40 +46,199 @@ pub fn list_ports() -> Result<Vec<SerialPortM>, String> {
         .collect())
 }
 
-/// 串口写通道（读半部由会话 reader 任务接管转发为 DF_STDOUT）。
-/// resize 对串口无意义（无 PTY 概念），会话层直接忽略。
+/// 双工任务命令（由 SerialChannel 各方法投递）
+enum Cmd {
+    Data(Vec<u8>, oneshot::Sender<Result<(), String>>),
+    Dtr(bool, oneshot::Sender<Result<(), String>>),
+    Rts(bool, oneshot::Sender<Result<(), String>>),
+    /// 拉起 Break：set_break 立即生效并回执，持续 ms 后由内部定时器自动 clear
+    Break(u32, oneshot::Sender<Result<(), String>>),
+    /// Break 持续时间到（内部定时器投递，无需回执）
+    BreakEnd,
+    Baud(u32, oneshot::Sender<Result<(), String>>),
+    Signals(oneshot::Sender<Result<SerialSignalsM, String>>),
+}
+
+/// 串口通道句柄：所有读写/控制经 Cmd 通道送达独占 SerialStream 的双工任务。
 pub struct SerialChannel {
-    write: Mutex<tokio::io::WriteHalf<SerialStream>>,
+    cmd_tx: mpsc::UnboundedSender<Cmd>,
 }
 
 impl SerialChannel {
-    /// 打开串口，返回写通道与读半部。
-    /// 打开失败给出分类提示（占用/不存在等），经 fail_open 呈现给用户。
+    /// 打开串口并启动双工任务。
+    /// `on_data`：读到的字节（DF_STDOUT 推送）；`on_end`：读循环结束
+    /// （"serial-closed" 端口正常关闭 / "serial-lost" 拔线或端口消失）。
+    /// 返回通道句柄 + 双工任务 JoinHandle（会话关闭时 abort，释放端口句柄）。
     pub fn open(
         opts: &SerialOptions,
-    ) -> Result<(Arc<SerialChannel>, tokio::io::ReadHalf<SerialStream>), String> {
+        on_data: impl Fn(&[u8]) + Send + 'static,
+        on_end: impl Fn(&'static str) + Send + 'static,
+    ) -> Result<(Arc<SerialChannel>, tokio::task::JoinHandle<()>), String> {
         let builder = serialport::new(&opts.port, opts.baud_rate)
             .data_bits(map_data_bits(opts.data_bits)?)
             .parity(map_parity(opts.parity.as_deref())?)
             .stop_bits(map_stop_bits(opts.stop_bits)?)
             .flow_control(map_flow_control(opts.flow_control.as_deref())?);
-        let stream = SerialStream::open(&builder).map_err(|e| classify_open_error(&e, &opts.port))?;
-        let (read, write) = tokio::io::split(stream);
-        Ok((
-            Arc::new(SerialChannel {
-                write: Mutex::new(write),
-            }),
-            read,
-        ))
+        let mut stream = SerialStream::open(&builder).map_err(|e| classify_open_error(&e, &opts.port))?;
+
+        // 打开时 DTR/RTS 预设（Arduino 复位/ESP32 下载模式依赖；缺省全拉高）
+        let _ = stream.write_data_terminal_ready(opts.dtr);
+        let _ = stream.write_request_to_send(opts.rts);
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<Cmd>();
+        // 任务自持一份 sender 供 Break 定时器回投 BreakEnd：
+        // 因此 cmd_rx.recv() 不会因句柄全 drop 而返回 None，任务退出统一由
+        // 会话层 abort（handle_closed → serial_reader.abort()）负责
+        let break_tx = cmd_tx.clone();
+        let task = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                tokio::select! {
+                    read = stream.read(&mut buf) => {
+                        match read {
+                            Ok(n) if n > 0 => on_data(&buf[..n]),
+                            Ok(_) => {
+                                // 串口读到 0 字节（端口被关闭）视同结束
+                                on_end("serial-closed");
+                                return;
+                            }
+                            Err(_) => {
+                                on_end("serial-lost");
+                                return;
+                            }
+                        }
+                    }
+                    cmd = cmd_rx.recv() => {
+                        let Some(cmd) = cmd else { return };
+                        handle_cmd(&mut stream, cmd, &break_tx).await;
+                    }
+                }
+            }
+        });
+        Ok((Arc::new(SerialChannel { cmd_tx }), task))
     }
 
     /// 串口写入（5s 写超时，与 PTY write_input 一致：端口异常时快速失败，
     /// 避免会话 stdin 写任务无限挂起堆积）
     pub async fn write_input(&self, data: &[u8]) -> Result<(), String> {
-        let mut w = self.write.lock().await;
-        match tokio::time::timeout(Duration::from_secs(5), w.write_all(data)).await {
-            Ok(r) => r.map_err(|e| e.to_string()),
-            Err(_) => Err("写入超时（串口可能已被移除）".into()),
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::Data(data.to_vec(), tx))
+            .map_err(|_| "串口已关闭".to_string())?;
+        wait_ack(rx).await
+    }
+
+    /// DTR 电平控制（Arduino 自动复位、设备复位脚控制）
+    pub async fn set_dtr(&self, level: bool) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::Dtr(level, tx))
+            .map_err(|_| "串口已关闭".to_string())?;
+        wait_ack(rx).await
+    }
+
+    /// RTS 电平控制
+    pub async fn set_rts(&self, level: bool) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::Rts(level, tx))
+            .map_err(|_| "串口已关闭".to_string())?;
+        wait_ack(rx).await
+    }
+
+    /// 发送 Break（持续 ms 后自动恢复；serialport 无时长版 write_break，
+    /// set_break + 定时 clear_break 配对，回执表示 Break 已拉起）
+    pub async fn send_break(&self, ms: u32) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::Break(ms, tx))
+            .map_err(|_| "串口已关闭".to_string())?;
+        wait_ack(rx).await
+    }
+
+    /// 运行时改波特率（对未知设备扫波特率用）
+    pub async fn set_baud(&self, baud: u32) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::Baud(baud, tx))
+            .map_err(|_| "串口已关闭".to_string())?;
+        wait_ack(rx).await
+    }
+
+    /// 查询输入信号线状态（CD/CTS/DSR/RI）
+    pub async fn signals(&self) -> Result<SerialSignalsM, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Cmd::Signals(tx))
+            .map_err(|_| "串口已关闭".to_string())?;
+        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err("串口已关闭".into()),
+            Err(_) => Err("信号查询超时".into()),
+        }
+    }
+}
+
+/// 等待双工任务回执（5s 超时统一口径：端口异常时快速失败不挂起）
+async fn wait_ack(rx: oneshot::Receiver<Result<(), String>>) -> Result<(), String> {
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => Err("串口已关闭".into()),
+        Err(_) => Err("串口操作超时".into()),
+    }
+}
+
+/// 双工任务内执行控制命令（独占 SerialStream，可安全 await 写入）
+async fn handle_cmd(
+    stream: &mut SerialStream,
+    cmd: Cmd,
+    break_tx: &mpsc::UnboundedSender<Cmd>,
+) {
+    match cmd {
+        Cmd::Data(data, ack) => {
+            use tokio::io::AsyncWriteExt;
+            // 写超时 5s：端口异常时快速失败，不让写阻塞后续命令
+            let r = match tokio::time::timeout(Duration::from_secs(5), stream.write_all(&data)).await {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(_) => Err("写入超时（串口可能已被移除）".into()),
+            };
+            let _ = ack.send(r);
+        }
+        Cmd::Dtr(level, ack) => {
+            let _ = ack.send(stream.write_data_terminal_ready(level).map_err(|e| e.to_string()));
+        }
+        Cmd::Rts(level, ack) => {
+            let _ = ack.send(stream.write_request_to_send(level).map_err(|e| e.to_string()));
+        }
+        Cmd::Break(ms, ack) => {
+            let r = stream.set_break().map_err(|e| e.to_string());
+            let ok = r.is_ok();
+            let _ = ack.send(r);
+            if ok {
+                // 持续 ms 后自动 clear_break（定时器投递 BreakEnd 回双工任务）
+                let tx = break_tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(ms as u64)).await;
+                    let _ = tx.send(Cmd::BreakEnd);
+                });
+            }
+        }
+        Cmd::BreakEnd => {
+            let _ = stream.clear_break();
+        }
+        Cmd::Baud(baud, ack) => {
+            let _ = ack.send(stream.set_baud_rate(baud).map_err(|e| e.to_string()));
+        }
+        Cmd::Signals(ack) => {
+            let r = (|| -> Result<SerialSignalsM, String> {
+                Ok(SerialSignalsM {
+                    cd: stream.read_carrier_detect().map_err(|e| e.to_string())?,
+                    cts: stream.read_clear_to_send().map_err(|e| e.to_string())?,
+                    dsr: stream.read_data_set_ready().map_err(|e| e.to_string())?,
+                    ri: stream.read_ring_indicator().map_err(|e| e.to_string())?,
+                })
+            })();
+            let _ = ack.send(r);
         }
     }
 }

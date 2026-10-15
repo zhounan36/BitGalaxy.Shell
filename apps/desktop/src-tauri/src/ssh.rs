@@ -461,6 +461,21 @@ impl SshConnection {
         }
     }
 
+    /// 打开 direct-tcpip 通道（SSH 隧道）：连到远端 host:port，10s 超时。
+    /// SQL 模块用它把驱动进程的 TCP 流量转发到远端数据库端口。
+    pub async fn open_direct_tcpip(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<russh::Channel<russh::client::Msg>, SshError> {
+        let fut = self.handle.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0);
+        match tokio::time::timeout(Duration::from_secs(10), fut).await {
+            Ok(Ok(ch)) => Ok(ch),
+            Ok(Err(e)) => Err(SshError::Other(format!("隧道通道打开失败: {e}"))),
+            Err(_) => Err(SshError::Timeout),
+        }
+    }
+
     pub async fn close(&self) {
         let _ = self.handle.disconnect(russh::Disconnect::ByApplication, "close", "en");
     }
