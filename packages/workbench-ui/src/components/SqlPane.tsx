@@ -17,6 +17,7 @@ import {
 import type { TabsProps } from 'antd'
 import {
   AppstoreOutlined,
+  BulbOutlined,
   ClearOutlined,
   CloseOutlined,
   ClockCircleOutlined,
@@ -37,7 +38,9 @@ import type {
   SqlResult,
 } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
+import { askAi } from '../api/askAi'
 import { SqlEditor } from './SqlEditor'
+import { SqlAiModal, SQL_AI_SYSTEM } from './SqlAiModal'
 import { SqlConnModal } from './SqlConnModal'
 import type { SqlConnFormValues } from './SqlConnModal'
 import { SqlSchemaTree } from './SqlSchemaTree'
@@ -87,6 +90,14 @@ interface ErrorState {
   hint?: string
 }
 
+/** 结果区「问 AI」弹窗状态（报错分析 / 结果分析） */
+interface PaneAiState {
+  title: string
+  loading: boolean
+  text?: string
+  error?: string
+}
+
 /** SQL 数据库管理面板（Navicat 精简版）：连接管理 + 结构树 + 多标签编辑器 +
  *  结果网格 + 表数据/表结构页签 + 执行历史。协议走 agentSocket 控制帧
  *  （t='sql' / 'sql-result' / 'sql-progress'）。 */
@@ -109,6 +120,10 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
   const [history, setHistory] = useState<SqlHistoryItem[]>([])
   const [historyOpen, setHistoryOpen] = useState(false)
   const [treeTick, setTreeTick] = useState(0)
+
+  // 最近一次执行的 SQL（结果区「问 AI」的上下文）+ AI 弹窗状态
+  const lastSqlRef = useRef('')
+  const [paneAi, setPaneAi] = useState<PaneAiState>()
 
   const pendingRef = useRef(new Map<string, { resolve: (r: SqlResult) => void; timer: number }>())
   const runningQueryIdRef = useRef<string | undefined>(undefined)
@@ -278,6 +293,7 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
       if (!conn || running || !sql.trim()) return
       setRunning(true)
       setRunningKind('query')
+      lastSqlRef.current = sql
       setQueryError(undefined)
       setExecInfo(undefined)
       setResultView(undefined)
@@ -324,6 +340,7 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
         onOk: async () => {
           setRunning(true)
           setRunningKind('execute')
+          lastSqlRef.current = sql
           setQueryError(undefined)
           setResultView(undefined)
           setExecInfo(undefined)
@@ -369,6 +386,47 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
     },
     [conn, runQuery, confirmExecute],
   )
+
+  /** 把 SQL + 报错信息发给 AI 分析（一键修复建议） */
+  const askAiOnError = useCallback(() => {
+    if (!queryError) return
+    const dialect = conn ? `数据库类型：${conn.type}。` : ''
+    const errText = `${queryError.title}${queryError.hint ? `\n${queryError.hint}` : ''}`
+    const sql = lastSqlRef.current.trim()
+    const prompt = `执行下面的 SQL 时数据库返回错误，请分析错误原因并给出修复建议；如需修改 SQL，请用 \`\`\`sql 代码块给出修复后的完整语句。${dialect}\n\n${
+      sql ? `SQL：\n${sql}\n\n` : ''
+    }错误信息：\n${errText}`
+    setPaneAi({ title: 'AI 分析报错', loading: true })
+    void askAi(prompt, SQL_AI_SYSTEM).then((r) =>
+      setPaneAi(
+        r.ok
+          ? { title: 'AI 分析报错', loading: false, text: r.text }
+          : { title: 'AI 分析报错', loading: false, error: r.message ?? 'AI 请求失败，请重试' },
+      ),
+    )
+  }, [queryError, conn])
+
+  /** 把 SQL + 结果摘要（行数/耗时/列）发给 AI 分析数据是否合理 */
+  const askAiOnResult = useCallback(() => {
+    if (!resultView) return
+    const dialect = conn ? `数据库类型：${conn.type}。` : ''
+    const cols = resultView.columns.map((c) => c.name).join(', ')
+    const summary = `返回 ${resultView.rowCount} 行${
+      resultView.durationMs !== undefined ? `，耗时 ${resultView.durationMs} ms` : ''
+    }${resultView.truncated ? '（结果已截断）' : ''}；列：${cols || '（无）'}`
+    const sql = lastSqlRef.current.trim()
+    const prompt = `我执行了下面的 SQL 并得到结果，请结合结果摘要分析数据是否合理、是否有异常或值得优化的地方；如需修改 SQL，请用 \`\`\`sql 代码块给出。${dialect}\n\nSQL：\n${
+      sql || '（未知）'
+    }\n\n结果摘要：${summary}`
+    setPaneAi({ title: 'AI 分析结果', loading: true })
+    void askAi(prompt, SQL_AI_SYSTEM).then((r) =>
+      setPaneAi(
+        r.ok
+          ? { title: 'AI 分析结果', loading: false, text: r.text }
+          : { title: 'AI 分析结果', loading: false, error: r.message ?? 'AI 请求失败，请重试' },
+      ),
+    )
+  }, [resultView, conn])
 
   /** 结构树「生成 SELECT」：当前不在查询页签时先切回查询页签再执行（结果区在查询布局内） */
   const runSqlFromTree = useCallback(
@@ -772,6 +830,16 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
                 description={
                   queryError.hint && <span style={{ whiteSpace: 'pre-wrap' }}>{queryError.hint}</span>
                 }
+                action={
+                  <Button
+                    size="small"
+                    icon={<BulbOutlined />}
+                    loading={paneAi?.title === 'AI 分析报错' && paneAi.loading}
+                    onClick={askAiOnError}
+                  >
+                    问 AI
+                  </Button>
+                }
               />
             )}
             {execInfo && (
@@ -814,6 +882,16 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
                   {resultView.truncated && (
                     <Tag color="orange">结果已截断（请加 WHERE/LIMIT 或调大每页行数）</Tag>
                   )}
+                  <div style={{ flex: 1 }} />
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<BulbOutlined />}
+                    loading={paneAi?.title === 'AI 分析结果' && paneAi.loading}
+                    onClick={askAiOnResult}
+                  >
+                    问 AI 分析
+                  </Button>
                 </div>
               </>
             )}
@@ -936,6 +1014,23 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
           })
           adoptConn(r, spec)
         }}
+      />
+
+      {/* ── 结果区问 AI 弹窗：报错/结果分析，AI 修复的 SQL 可回填编辑器或已自动复制 ── */}
+      <SqlAiModal
+        open={!!paneAi}
+        title={paneAi?.title ?? ''}
+        markdown
+        loading={paneAi?.loading}
+        error={paneAi?.error}
+        text={paneAi?.text}
+        autoCopy
+        onInsert={(sql) => {
+          setActiveSql(sql)
+          setPaneAi(undefined)
+          message.success('已回填到编辑器')
+        }}
+        onClose={() => setPaneAi(undefined)}
       />
     </div>
   )

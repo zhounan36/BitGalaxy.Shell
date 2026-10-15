@@ -7,12 +7,17 @@
 **目标**：一个 NSIS 安装包内置四个 EXE，各自完整独立：
 | EXE | 职责 | 端口 |
 |---|---|---|
-| `bgshell-desktop` | **AI 基座**：AI 对话引擎 + 远程工具（exec_command/SFTP）+ Pet + 托盘 + 主机档案管理 | 7777 |
+| `bgshell-desktop` | **AI 基座（后台服务，无主工作台窗）**：AI 对话引擎 + 远程工具（exec_command/SFTP）+ Pet + 托盘 + 主机档案管理 | 7777 |
 | `bgshell-ssh` | SSH 终端 + SFTP 工作台（含拖出下载 /dl）+ 主机管理 + metrics | 7771 |
 | `bgshell-sql` | SQL 客户端：**直连数据库**（用户名/密码，Navicat 习惯），驱动宿主随包 | 7772 |
 | `bgshell-serial` | 串口工具（SerialDebugPane 为主体） | 7773 |
 
 用户已拍板：三个工具应用是完整 Tauri 桌面应用（复用 workbench-ui 组件与风格）；SQL 移除 SSH 隧道与远端 SQLite（SFTP 下载）依赖，SQLite 只开本地文件；**AI 是基座服务**——三应用内嵌 AI 侧栏（复用 ChatPanel），支持右键框选界面数据作为上下文对话、展示 AI 工具调用列表；Pet 只是 AI 的形象，无 Pet 时 AI 能力不消失；AI 远程工具由 AI 基座自行执行（保留 SSH 引擎），不依赖 SSH 应用运行。
+
+**2026-10-15 补充拍板（AI 基座「不单独存在」）**：
+- 基座**移除主工作台窗口**，可见形态仅托盘 + 桌宠；托盘提供设置入口与退出
+- 完整 AI 对话界面 = **三工具侧栏 + 桌宠面板双入口**（广播机制天然支持，按 uid 去重）
+- 基座**不注册开机自启**；任一工具启动时检测 7777 未监听则静默 spawn（spawn_ai_base），用户从不手动打开基座
 
 ---
 
@@ -85,17 +90,19 @@ drivers/host-common, host-mysql, host-postgres, host-sqlite   # 目录不动，�
 - 全量 SSH/SFTP/主机管理/TestHost/Probe/ConfirmHostKey/RetryAuth/Metrics 帧 + dl_http 拖出下载随迁
 - 前端从现 App.tsx 抽 hosts + tabs + TerminalPane/SftpPane/DropUpload/Settings（删 SQL/串口入口）
 
-### 主程序瘦身（AI 基座）
-- dispatch 删 Open/Close/Sftp/Sql/Serial*/Metrics/Probe/TestHost 分支，保留 Ai/AiApprove/Settings/Agent/Hosts（Pet 窗与主窗管理主机档案）
+### 主程序后台服务化（AI 基座）
+- **移除主工作台窗口**：基座无独立应用界面，可见形态仅托盘 + 桌宠窗；设置 / 主机档案 / AI 对话面板 UI 移入桌宠窗（托盘「设置」打开桌宠窗对应面板）
+- dispatch 删 Open/Close/Sftp/Sql/Serial*/Metrics/Probe/TestHost 分支，保留 Ai/AiApprove/Settings/Agent/Hosts
 - serial/sftp/sql 代码不再链接进主 bin，主程序体积下降
 - 托盘菜单加三项拉起工具 EXE（`std::process::Command` spawn）；MCP stdio 留主程序
+- 基座不注册开机自启（移除现有 autostart 注册逻辑），由三工具 spawn_ai_base 按需拉起
 
 ---
 
 ## 五、前端组织（单 package 五入口 MPA）
 
 - `packages/workbench-ui` 保持单 package，Vite rollupOptions.input 五入口：
-  `index.html`（主程序：ChatPanel + Settings + 主机管理）、`ssh/index.html`、`sql/index.html`、`serial/index.html`、`pet/index.html`
+  `index.html`（基座兜底页：桌宠关闭时的引导/拉起入口，不承载工作台）、`ssh/index.html`、`sql/index.html`、`serial/index.html`、`pet/index.html`（基座主 UI：桌宠 + AI 对话面板 + 设置 + 主机管理）
 - App.tsx（593 行）拆分为 `src/apps/{desktop,ssh,sql,serial}/App.tsx` 四个入口 root；共享组件留 `src/components`；删除 `BGSH_FLAVOR`/`__BGSH_PET__` 精简版机制（五入口取代其概念）
 - **双连接**：后端 WS URL 按入口注入——**每入口 HTML 内嵌 `<script>window.__BGSH_WS__="7771"</script>`**（vite define 是全局的，不能按入口区分；dev 与 prod 统一 `ws://127.0.0.1:${window.__BGSH_WS__}/ws` 直连，删 vite proxy，各后端白名单放行 17177）
 - 新增 `aiSocket`（复用 AgentSocket 类，连 7777）供三应用 AI 侧栏；ChatPanel ws 依赖注入化，Pet 窗与侧栏各自按 uid 去重
@@ -118,7 +125,7 @@ drivers/host-common, host-mysql, host-postgres, host-sqlite   # 目录不动，�
 | P3 | SerialSessionManager 抽取 + apps/serial 壳 | 串口开合/DTR/RTS/热插拔/预设 |
 | P4 | apps/ssh 壳 + ssh/App 拆分，dl_http 随迁 | SSH/SFTP/上传/拖出下载/metrics 回归 |
 | P5 | 端口表落地、ask-context 帧、aiSocket、三应用 AI 侧栏、spawn_ai_base | 双客户端（Pet+侧栏）同收流式、任一处审批、未运行可拉起 |
-| P6 | 主程序瘦身：删 dispatch 分支与 serial/sftp/sql 链接、托盘三项、数据迁移 | 主程序体积下降、AI 远程工具仍可用、旧库迁移正确 |
+| P6 | 基座后台服务化：删主工作台窗（桌宠窗承载设置/主机档案/对话面板）、删 dispatch 分支与 serial/sftp/sql 链接、托盘三项、去开机自启、数据迁移 | 基座无主窗仍全功能、AI 远程工具可用、三工具可拉起、旧库迁移正确 |
 | P7 | 单 NSIS 合包、prep-apps.mjs、快捷方式 hook、卸载清理 | 全新安装后四 EXE 互拉、升级覆盖 |
 
 ## 风险与回退
