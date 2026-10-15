@@ -1,33 +1,30 @@
-//! SQL 数据库管理模块：驱动宿主进程（安装包内置）+ SSH direct-tcpip 隧道 +
+//! bg-sql：SQL 数据库引擎 crate（直连版）。驱动宿主进程（安装包内置）+
 //! 会话式 op 分发（仿 sftp.rs 的 rid 模式）。
 //!
-//! 会话生命周期：connect → （驱动进程 + 隧道 + 驱动侧 connId）→ query/introspect/… → disconnect。
-//! SQLite：远端 .db 文件经 SFTP 下载到本地临时目录，驱动只读打开，会话关闭即删。
+//! 会话生命周期：connect → （驱动进程 + 驱动侧 connId）→ query/introspect/… → disconnect。
+//! 连接方式：MySQL/PostgreSQL 由本进程直连目标库（用户名/密码，Navicat 习惯）；
+//! SQLite 直接打开本地 .db 文件（只读，会话关闭不删用户文件）。
+//! 历史：P1 曾有 SSH direct-tcpip 隧道与远端 SQLite 下载（fetch-sqlite），
+//! P2 四 EXE 拆分时改为直连（tunnel.rs 已删除）。
 pub mod driver;
 pub mod driver_mgr;
 pub mod error;
-pub mod tunnel;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64 as StdAtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-use crate::pool::{ConnRegistry, CreateCtx};
-use crate::protocol::{
-    SqlColumnM, SqlDatabaseM, SqlDriverInfoM, SqlIndexM, SqlColumnInfoM, SqlOpM,
-    SqlProgressM, SqlResultM, SqlTableM, ServerFrame,
+use bg_core::protocol::{
+    SqlColumnM, SqlConnsResultM, SqlConnRecord, SqlDatabaseM, SqlDriverInfoM, SqlIndexM,
+    SqlColumnInfoM, SqlOpM, SqlResultM, SqlTableM, ServerFrame,
 };
-use crate::ssh::HostKeyAsk;
-use crate::wire::Outbound;
+use bg_core::stores::SqlConnStore;
+use bg_core::wire::Outbound;
 
 use driver::DriverHost;
 use driver_mgr::DriverManager;
 use error::classify_sql_error;
-use tunnel::{open_tunnel, Tunnel, TunnelTarget};
 
 const CONNECT_DEADLINE: Duration = Duration::from_secs(15);
 const INTROSPECT_DEADLINE: Duration = Duration::from_secs(10);
@@ -38,27 +35,19 @@ const RESULT_FRAME_LIMIT: usize = 1024 * 1024;
 const DEFAULT_MAX_ROWS: u32 = 500;
 const HARD_MAX_ROWS: u32 = 2000;
 
-/// 一条 SQL 连接会话（驱动进程 + 隧道 + 驱动侧 connId）
+/// 一条 SQL 连接会话（驱动进程 + 驱动侧 connId）
 struct SqlSession {
-    /// 归属的 WS 连接（进程级单例被工作台/桌宠多路共享，断开只清本连接的会话）
+    /// 归属的 WS 连接（进程级单例被多路共享，断开只清本连接的会话）
     ws: u64,
     driver: Arc<DriverHost>,
-    #[allow(dead_code)]
-    tunnel: Option<Tunnel>,
     conn_id: String,
-    /// SSH 连接持有凭证 (host_id, holder_id)：MySQL/PG 经隧道持有 SSH 会话；
-    /// 断开/清理时必须 release，否则该主机 SSH 连接永不空闲回收
-    lease: Option<(String, String)>,
-    temp_files: Vec<PathBuf>,
 }
 
 pub struct SqlHandler {
-    registry: Arc<ConnRegistry>,
     mgr: DriverManager,
+    /// 连接档案（sql-connections.db 独立域库）
+    conns: SqlConnStore,
     sessions: Arc<StdMutex<HashMap<String, HashMap<String, SqlSession>>>>,
-    /// fetch-sqlite 已下载、尚未被 connect 认领的临时文件（sid → (ws, 路径)）；
-    /// connect 认领后转入会话 temp_files，close 时兜底删除防泄漏
-    pending_files: Arc<StdMutex<HashMap<String, (u64, Vec<PathBuf>)>>>,
     /// WS 连接代际计数器 + 活跃连接表：new_conn 插入 / close_all 移除；
     /// 迟到的 connect 完成时发现 ws 已不在表内即拒收（防孤儿注册）
     next_ws: StdAtomicU64,
@@ -68,28 +57,11 @@ pub struct SqlHandler {
 }
 
 impl SqlHandler {
-    pub fn new(registry: Arc<ConnRegistry>, data_dir: &std::path::Path) -> SqlHandler {
-        // 启动清扫：上次进程异常退出遗留的孤儿临时 .db（正常路径随会话删除）。
-        // 仅删 mtime 超 1 小时的文件——活动下载分钟级完成，且防双实例共享 temp 时误删
-        let stale = std::env::temp_dir().join("bgshell-sql");
-        if let Ok(rd) = std::fs::read_dir(&stale) {
-            let cutoff = std::time::SystemTime::now() - Duration::from_secs(3600);
-            for entry in rd.flatten() {
-                let p = entry.path();
-                let old = std::fs::metadata(&p)
-                    .and_then(|m| m.modified())
-                    .map(|t| t < cutoff)
-                    .unwrap_or(false);
-                if old {
-                    let _ = std::fs::remove_file(&p);
-                }
-            }
-        }
+    pub fn new(data_dir: &std::path::Path) -> SqlHandler {
         SqlHandler {
-            registry,
             mgr: DriverManager::new(data_dir),
+            conns: SqlConnStore::open(data_dir),
             sessions: Arc::new(StdMutex::new(HashMap::new())),
-            pending_files: Arc::new(StdMutex::new(HashMap::new())),
             next_ws: StdAtomicU64::new(1),
             live_ws: Arc::new(StdMutex::new(HashSet::new())),
             dead_sids: Arc::new(StdMutex::new(HashSet::new())),
@@ -105,10 +77,8 @@ impl SqlHandler {
 
     /// 入口：按 op 分发到独立任务（不阻塞 WS 帧分发循环），结果回 sql-result 帧
     pub fn handle_op(&self, ws: u64, sid: &str, m: &SqlOpM, out: &Outbound) {
-        let registry = self.registry.clone();
         let mgr_root = self.mgr.root.clone();
         let sessions = self.sessions.clone();
-        let pending_files = self.pending_files.clone();
         let live_ws = self.live_ws.clone();
         let dead_sids = self.dead_sids.clone();
         let sid = sid.to_string();
@@ -118,16 +88,77 @@ impl SqlHandler {
             let mgr = DriverManager::new(&mgr_root);
             let handler = SqlHandlerInner {
                 ws,
-                registry,
                 mgr,
                 sessions,
-                pending_files,
                 live_ws,
                 dead_sids,
                 out: out.clone(),
             };
             handler.dispatch(&sid, &m).await;
         });
+    }
+
+    /// sql-conns 帧：连接档案 CRUD（sql-connections.db）
+    pub fn handle_conns(&self, m: &serde_json::Value, out: &Outbound) {
+        let op = m.get("op").and_then(|v| v.as_str()).unwrap_or_default();
+        let store = self.conns.clone();
+        let m = m.clone();
+        let out = out.clone();
+        // SQLite 快操作（毫秒级），同步执行即可
+        let reply = |ok: bool, conns: Option<Vec<SqlConnRecord>>, conn: Option<SqlConnRecord>, message: Option<String>| {
+            out.send_frame(&ServerFrame::SqlConnsResult {
+                m: SqlConnsResultM { op: op.to_string(), ok, conns, conn, message },
+            });
+        };
+        match op {
+            "list" => reply(true, Some(store.list()), None, None),
+            "create" => {
+                let Ok(rec) = serde_json::from_value::<SqlConnRecord>(m.get("conn").cloned().unwrap_or(serde_json::Value::Null)) else {
+                    reply(false, None, None, Some("缺少连接参数".into()));
+                    return;
+                };
+                let now = bg_core::stores::now_iso();
+                let rec = SqlConnRecord {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                    ..rec
+                };
+                match store.create(&rec) {
+                    Ok(()) => reply(true, Some(store.list()), Some(rec), None),
+                    Err(e) => reply(false, None, None, Some(e.to_string())),
+                }
+            }
+            "update" => {
+                let Ok(mut rec) = serde_json::from_value::<SqlConnRecord>(m.get("conn").cloned().unwrap_or(serde_json::Value::Null)) else {
+                    reply(false, None, None, Some("缺少连接参数".into()));
+                    return;
+                };
+                if rec.id.is_empty() {
+                    reply(false, None, None, Some("缺少连接 id".into()));
+                    return;
+                }
+                rec.updated_at = bg_core::stores::now_iso();
+                match store.update(&rec) {
+                    Ok(true) => reply(true, Some(store.list()), Some(rec), None),
+                    Ok(false) => reply(false, None, None, Some("连接不存在".into())),
+                    Err(e) => reply(false, None, None, Some(e.to_string())),
+                }
+            }
+            "delete" => {
+                let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                if id.is_empty() {
+                    reply(false, None, None, Some("缺少连接 id".into()));
+                    return;
+                }
+                if store.delete(id) {
+                    reply(true, Some(store.list()), None, None);
+                } else {
+                    reply(false, None, None, Some("连接不存在".into()));
+                }
+            }
+            _ => reply(false, None, None, Some("未知操作".into())),
+        }
     }
 
     /// WS 连接断开：只关闭**该连接**的 SQL 会话（单例被工作台/桌宠共享，
@@ -154,24 +185,7 @@ impl SqlHandler {
         map.retain(|_, conns| !conns.is_empty());
         drop(map);
         for s in removed {
-            spawn_cleanup(&self.registry, s);
-        }
-        // 本连接的 pending 临时文件一并清理（fetch-sqlite 后未 connect 的）
-        let mut pending = self.pending_files.lock().unwrap();
-        let mut stale: Vec<Vec<PathBuf>> = Vec::new();
-        pending.retain(|_, (w, files)| {
-            if *w == ws {
-                stale.push(files.clone());
-                false
-            } else {
-                true
-            }
-        });
-        drop(pending);
-        for files in stale {
-            for f in files {
-                let _ = std::fs::remove_file(f);
-            }
+            spawn_cleanup(s);
         }
         let _ = self.compact_dead_sids();
     }
@@ -181,12 +195,7 @@ impl SqlHandler {
         let conns = self.sessions.lock().unwrap().remove(sid);
         if let Some(conns) = conns {
             for (_, s) in conns {
-                spawn_cleanup(&self.registry, s);
-            }
-        }
-        if let Some((_, files)) = self.pending_files.lock().unwrap().remove(sid) {
-            for f in files {
-                let _ = std::fs::remove_file(f);
+                spawn_cleanup(s);
             }
         }
         // tab 关闭后再发 connect（前端重开同 sid？sid 为 uuid 不会复用）——
@@ -211,10 +220,8 @@ impl SqlHandler {
 struct SqlHandlerInner {
     /// 本次 op 所在 WS 连接代际
     ws: u64,
-    registry: Arc<ConnRegistry>,
     mgr: DriverManager,
     sessions: Arc<StdMutex<HashMap<String, HashMap<String, SqlSession>>>>,
-    pending_files: Arc<StdMutex<HashMap<String, (u64, Vec<PathBuf>)>>>,
     live_ws: Arc<StdMutex<HashSet<u64>>>,
     dead_sids: Arc<StdMutex<HashSet<String>>>,
     out: Outbound,
@@ -223,10 +230,6 @@ struct SqlHandlerInner {
 impl SqlHandlerInner {
     fn send(&self, sid: &str, m: SqlResultM) {
         self.out.send_frame(&ServerFrame::SqlResult { s: sid.to_string(), m });
-    }
-
-    fn progress(&self, sid: &str, m: SqlProgressM) {
-        self.out.send_frame(&ServerFrame::SqlProgress { s: sid.to_string(), m });
     }
 
     fn fail(&self, sid: &str, op: &str, rid: Option<String>, msg: &str) {
@@ -253,7 +256,6 @@ impl SqlHandlerInner {
             "execute" => self.op_execute(sid, m).await,
             "cancel" => self.op_cancel(sid, m).await,
             "introspect" => self.op_introspect(sid, m).await,
-            "fetch-sqlite" => self.op_fetch_sqlite(sid, m).await,
             _ => {
                 self.fail(sid, op, rid, &format!("未知 SQL 操作: {op}"));
             }
@@ -314,76 +316,23 @@ impl SqlHandlerInner {
             }
         };
 
-        // 2. 通道：SQLite 下载远端文件；其余开 SSH 隧道
-        let mut temp_files = Vec::new();
-        // (隧道, host, port, sqlite 路径, SSH 持有凭证)
-        let (tunnel, connect_host, connect_port, sqlite_path, lease) = if kind == "sqlite" {
-            let Some(remote) = spec.sqlite_path.clone().or(spec.database.clone()) else {
-                self.fail(sid, "connect", rid, "sqlite 连接缺少 sqlitePath（远端 .db 文件路径）");
+        // 2. 直连目标：MySQL/PG 直连远端库；SQLite 打开本地文件
+        let (connect_host, connect_port, sqlite_path) = if kind == "sqlite" {
+            let Some(local) = spec.sqlite_path.clone().or(spec.database.clone()) else {
+                self.fail(sid, "connect", rid, "sqlite 连接缺少 sqlitePath（本地 .db 文件路径）");
                 return;
             };
-            // fetch-sqlite 已下载的本地临时文件直接复用（前端把本地路径回传给 connect），
-            // 否则视为远端路径走 SFTP 下载
-            let local = if std::path::Path::new(&remote).is_file() {
-                PathBuf::from(&remote)
-            } else {
-                match self.download_sqlite(sid, &spec.host_id, &remote, rid.clone()).await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.fail(sid, "connect", rid, &e);
-                        return;
-                    }
-                }
-            };
-            // 认领：从 pending 摘除，归属本会话 temp_files（断连/断开时统一删除）
-            if let Some((_, files)) = self.pending_files.lock().unwrap().get_mut(sid) {
-                files.retain(|f| f != &local);
+            if !std::path::Path::new(&local).is_file() {
+                self.fail(sid, "connect", rid, &format!("本地数据库文件不存在: {local}"));
+                return;
             }
-            temp_files.push(local.clone());
-            (None, String::new(), 0u16, Some(local), None)
+            (String::new(), 0u16, Some(local))
         } else {
-            // SSH 隧道：远端 127.0.0.1:3306/5432 → Agent 本地端口。
-            // holder 每连接唯一：同一 tab 多条连接全部断开才允许 SSH 空闲回收
-            let holder = format!("sql-{}", uuid::Uuid::new_v4());
-            let conn = {
-                match self
-                    .registry
-                    .acquire_session(
-                        &spec.host_id,
-                        &holder,
-                        CreateCtx {
-                            // TOFU：SQL 通道复用工作台已确认的连接；全新主机需先开一次终端
-                            ask: HostKeyAsk::FailClosed,
-                            initiator: "workbench-sql".into(),
-                        },
-                    )
-                    .await
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        self.fail(sid, "connect", rid, &format!("SSH 连接失败（全新主机请先开一次终端确认指纹）: {}", e.message));
-                        return;
-                    }
-                }
-            };
-            let lease = (spec.host_id.clone(), holder);
-            let target = TunnelTarget {
-                host: spec.host.clone().unwrap_or_else(|| "127.0.0.1".into()),
-                port: spec.port.unwrap_or(if kind == "mysql" { 3306 } else { 5432 }),
-            };
-            match open_tunnel(conn, target).await {
-                Ok(t) => {
-                    let port = t_port(&t);
-                    (Some(t), "127.0.0.1".to_string(), port, None, Some(lease))
-                }
-                Err(e) => {
-                    // 隧道未建立：SSH 持有即刻归还，否则该主机连接永不空闲回收
-                    let (hid, holder) = lease;
-                    self.registry.release(&hid, &holder);
-                    self.fail(sid, "connect", rid, &e);
-                    return;
-                }
-            }
+            (
+                spec.host.clone().unwrap_or_default(),
+                spec.port.unwrap_or(if kind == "mysql" { 3306 } else { 5432 }),
+                None,
+            )
         };
 
         // 3. 驱动 connect（密码只在此处传入，走 stdin JSON，不进命令行/日志）
@@ -397,7 +346,7 @@ impl SqlHandlerInner {
             params["database"] = serde_json::Value::String(db.clone());
         }
         if let Some(p) = &sqlite_path {
-            params["sqlitePath"] = serde_json::Value::String(p.display().to_string());
+            params["sqlitePath"] = serde_json::Value::String(p.clone());
         }
 
         match driver.call("connect", params, CONNECT_DEADLINE).await {
@@ -410,12 +359,6 @@ impl SqlHandlerInner {
                 if conn_id.is_empty() {
                     self.fail(sid, "connect", rid, "驱动未返回 connId");
                     driver.shutdown().await;
-                    if let Some((hid, holder)) = lease {
-                        self.registry.release(&hid, &holder);
-                    }
-                    for f in temp_files {
-                        let _ = std::fs::remove_file(f);
-                    }
                     return;
                 }
                 let server_version =
@@ -423,10 +366,7 @@ impl SqlHandlerInner {
                 if !self.register_session(sid, SqlSession {
                     ws: self.ws,
                     driver,
-                    tunnel,
                     conn_id: conn_id.clone(),
-                    lease,
-                    temp_files,
                 }) {
                     // WS/tab 已在连接过程中关闭：会话已被就地清理
                     return;
@@ -443,12 +383,6 @@ impl SqlHandlerInner {
             Err(e) => {
                 self.fail(sid, "connect", rid, &e.to_string());
                 driver.shutdown().await;
-                if let Some((hid, holder)) = lease {
-                    self.registry.release(&hid, &holder);
-                }
-                for f in temp_files {
-                    let _ = std::fs::remove_file(f);
-                }
             }
         }
     }
@@ -459,7 +393,7 @@ impl SqlHandlerInner {
         if !self.live_ws.lock().unwrap().contains(&self.ws)
             || self.dead_sids.lock().unwrap().contains(sid)
         {
-            spawn_cleanup(&self.registry, s);
+            spawn_cleanup(s);
             return false;
         }
         let mut map = self.sessions.lock().unwrap();
@@ -467,7 +401,7 @@ impl SqlHandlerInner {
         // connId 由驱动生成，通常唯一；极端撞车时显式清理旧会话防泄漏
         if let Some(old) = conns.insert(s.conn_id.clone(), s) {
             drop(map);
-            spawn_cleanup(&self.registry, old);
+            spawn_cleanup(old);
         }
         true
     }
@@ -703,40 +637,6 @@ impl SqlHandlerInner {
         }
     }
 
-    /// fetch-sqlite：下载远端 .db 到本地临时目录（只读查询用）
-    async fn op_fetch_sqlite(&self, sid: &str, m: &SqlOpM) {
-        let rid = m.rid.clone();
-        let Some(spec) = m.conn.clone() else {
-            self.fail(sid, "fetch-sqlite", rid, "缺少 conn（hostId）");
-            return;
-        };
-        let Some(path) = m.path.clone().or(spec.sqlite_path.clone()) else {
-            self.fail(sid, "fetch-sqlite", rid, "缺少 path（远端 .db 文件路径）");
-            return;
-        };
-        match self.download_sqlite(sid, &spec.host_id, &path, rid.clone()).await {
-            Ok(local) => {
-                // 登记 pending（带 WS 代际归属）：connect 认领后转入会话 temp_files；
-                // tab/WS 关闭兜底删除防泄漏
-                self.pending_files
-                    .lock()
-                    .unwrap()
-                    .entry(sid.to_string())
-                    .or_insert((self.ws, Vec::new()))
-                    .1
-                    .push(local.clone());
-                self.send(sid, SqlResultM {
-                    op: "fetch-sqlite".into(),
-                    ok: true,
-                    rid,
-                    sqlite_ref: Some(local.display().to_string()),
-                    ..empty_result()
-                });
-            }
-            Err(e) => self.fail(sid, "fetch-sqlite", rid, &e),
-        }
-    }
-
     async fn op_disconnect(&self, sid: &str, m: &SqlOpM) {
         let rid = m.rid.clone();
         let Some(conn_id) = m.conn_id_ref() else {
@@ -750,12 +650,6 @@ impl SqlHandlerInner {
         if let Some(s) = session {
             let _ = s.driver.call("disconnect", serde_json::json!({ "connId": conn_id }), Duration::from_secs(2)).await;
             s.driver.shutdown().await;
-            if let Some((hid, holder)) = &s.lease {
-                self.registry.release(hid, holder);
-            }
-            for f in s.temp_files {
-                let _ = std::fs::remove_file(f);
-            }
         }
         self.send(sid, SqlResultM {
             op: "disconnect".into(),
@@ -764,94 +658,16 @@ impl SqlHandlerInner {
             ..empty_result()
         });
     }
-
-    /// 下载远端 SQLite 文件到本地临时目录（64KB 流式，进度推送）
-    async fn download_sqlite(
-        &self,
-        sid: &str,
-        host_id: &str,
-        remote: &str,
-        rid: Option<String>,
-    ) -> Result<PathBuf, String> {
-        let lease = self
-            .registry
-            .acquire_sftp(host_id, "workbench-sql")
-            .await
-            .map_err(|e| format!("SSH 连接失败: {}", e.message))?;
-        let sftp = lease.sftp.clone();
-        let meta = crate::sftp::stat_deadline(&sftp, remote)
-            .await
-            .map_err(|e| format!("读取远端文件失败: {e}"))?;
-        if meta.is_dir() {
-            return Err("目标是目录，不是 .db 文件".into());
-        }
-        let mut file = crate::sftp::open_read_deadline(&sftp, remote)
-            .await
-            .map_err(|e| format!("打开远端文件失败: {e}"))?;
-
-        let dir = std::env::temp_dir().join("bgshell-sql");
-        let _ = std::fs::create_dir_all(&dir);
-        let local = dir.join(format!("{}.db", uuid::Uuid::new_v4()));
-        // 下载主体：任何失败（读写/落盘）都要删半成品文件，避免 %TEMP% 残留堆积
-        let result = async {
-            let mut out = tokio::fs::File::create(&local)
-                .await
-                .map_err(|e| format!("创建本地临时文件失败: {e}"))?;
-
-            let total = meta.size.map(|s| s as u64);
-            let mut transferred: u64 = 0;
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = file
-                    .read(&mut buf)
-                    .await
-                    .map_err(|e| format!("读远端文件失败: {e}"))?;
-                if n == 0 {
-                    break;
-                }
-                out.write_all(&buf[..n])
-                    .await
-                    .map_err(|e| format!("写本地文件失败: {e}"))?;
-                transferred += n as u64;
-                self.progress(sid, SqlProgressM {
-                    op: "fetch-sqlite".into(),
-                    rid: rid.clone(),
-                    stage: Some("下载远端 SQLite 文件".into()),
-                    transferred: Some(transferred),
-                    total,
-                });
-            }
-            out.flush().await.map_err(|e| format!("落盘失败: {e}"))?;
-            Ok::<PathBuf, String>(local.clone())
-        }
-        .await;
-        if result.is_err() {
-            let _ = std::fs::remove_file(&local);
-        }
-        result
-    }
 }
 
-fn t_port(t: &Tunnel) -> u16 {
-    t.local_port
-}
-
-/// 异步清理一个会话：disconnect + 关驱动进程 + 释放 SSH 持有 + 删临时文件（不阻塞调用方）
-fn spawn_cleanup(registry: &Arc<ConnRegistry>, s: SqlSession) {
-    let registry = registry.clone();
+/// 异步清理一个会话：disconnect + 关驱动进程（不阻塞调用方）
+fn spawn_cleanup(s: SqlSession) {
     tokio::spawn(async move {
         let _ = s
             .driver
             .call("disconnect", serde_json::json!({ "connId": s.conn_id }), Duration::from_secs(2))
             .await;
         s.driver.shutdown().await;
-        // Tunnel 在 s drop 时随 Drop 停止（listener 关闭）；SSH holder 必须显式归还
-        if let Some((hid, holder)) = &s.lease {
-            registry.release(hid, holder);
-        }
-        for f in s.temp_files {
-            let _ = std::fs::remove_file(f);
-        }
     });
 }
 

@@ -1,4 +1,4 @@
-//! 会话管理器：一个 WS 连接对应一个实例。
+﻿//! 会话管理器：一个 WS 连接对应一个实例。
 //! 三种会话 kind（shell/sftp/metrics）经统一连接注册表（[`crate::pool::ConnRegistry`]）
 //! 获取同主机共享的 SSH 连接：shell 各自开 PTY 通道，sftp/metrics 复用池连接；
 //! 会话关闭 release 持有者，连接由注册表在无引用后按空闲超时回收。
@@ -10,13 +10,13 @@ use tokio::task::JoinHandle;
 
 use crate::metrics;
 use crate::pool::{ConnRegistry, CreateCtx};
-use crate::protocol::{
-    self, HostsResultM, ProbeResultM, ServerFrame, SessionOpenedM, SftpResultM, DF_STDOUT,
-};
 use crate::sftp::SftpController;
 use crate::ssh::{AuthSlot, ConfirmSlot, HostKeyAsk, PtyShell, SshConnection};
-use crate::stores::Stores;
-use crate::wire::Outbound;
+use bg_core::protocol::{
+    self, HostsResultM, ProbeResultM, ServerFrame, SessionOpenedM, SftpResultM, DF_STDOUT,
+};
+use bg_core::stores::Stores;
+use bg_core::wire::Outbound;
 
 type SessionMap = Arc<StdMutex<HashMap<String, SessionEntry>>>;
 
@@ -27,10 +27,6 @@ struct SessionEntry {
     conn: Option<Arc<SshConnection>>,
     /// shell 会话的 PTY 通道（stdin/resize；与连接分离，同主机多 shell 各自独立）
     pty: Option<Arc<PtyShell>>,
-    /// 串口会话的写通道（kind="serial"；stdin 与 shell 同构走 stdin_tx）
-    serial: Option<Arc<crate::serial::SerialChannel>>,
-    /// 串口 IO 双工任务（独占 SerialStream；关闭时 abort → drop → 关句柄释放端口）
-    serial_reader: Option<JoinHandle<()>>,
     sftp: Option<Arc<SftpController>>,
     metrics_task: Option<JoinHandle<()>>,
     /// 建连期间到达的 metrics 订阅，就绪后自动启动
@@ -54,8 +50,6 @@ impl SessionEntry {
             host_id: None,
             conn: None,
             pty: None,
-            serial: None,
-            serial_reader: None,
             sftp: None,
             metrics_task: None,
             metrics_pending: None,
@@ -113,15 +107,7 @@ impl SessionManager {
         let kind = opts.kind.clone().unwrap_or_else(|| "shell".into());
         let cols = opts.cols.unwrap_or(80);
         let rows = opts.rows.unwrap_or(24);
-        let serial_opts = opts.serial.clone();
         tokio::spawn(async move {
-            // 串口会话：不走 SSH 主机档案与连接注册表（本机 COM 口无共享复用需求），
-            // 在查主机档案之前分流，直接打开端口做透传
-            if kind == "serial" {
-                this.open_serial(&session_id, serial_opts).await;
-                return;
-            }
-
             let Some(host) = this.stores.hosts.get(&host_id) else {
                 this.fail_open(&session_id, "主机档案不存在");
                 return;
@@ -149,7 +135,7 @@ impl SessionManager {
             let conn = match this.registry.acquire_session(&host_id, &session_id, create).await {
                 Ok(c) => c,
                 Err(e) => {
-                    let reason = if e.code == crate::toolcore::ERR_HOSTKEY_MISMATCH {
+                    let reason = if e.code == bg_core::error::ERR_HOSTKEY_MISMATCH {
                         "主机指纹校验未通过（疑似中间人攻击）".to_string()
                     } else {
                         e.message
@@ -317,154 +303,11 @@ impl SessionManager {
         self.handle_closed(session_id, &format!("open-failed: {reason}"));
     }
 
-    // ── serial（串口会话）────────────────────────────────────────────────────
-
-    /// 打开串口会话（kind="serial"）：本机 COM 口透传到终端面板。
-    /// 双工 IO 任务独占 SerialStream（读 → DF_STDOUT；stdin 队列经 Cmd 写）；
-    /// 不进连接注册表，resize 无意义（会话层忽略）。
-    async fn open_serial(&self, session_id: &str, serial_opts: Option<protocol::SerialOptions>) {
-        let Some(serial_opts) = serial_opts else {
-            self.fail_open(session_id, "缺少串口参数（serial.port）");
-            return;
-        };
-        let (dtr_preset, rts_preset) = (serial_opts.dtr, serial_opts.rts);
-
-        // 双工任务：读字节 → DF_STDOUT（按 sessionId 推回，与 shell reader 同路径）；
-        // 读 Err = 拔线/端口消失（热插拔）→ serial-lost 关闭会话
-        let opened = {
-            let this = self.clone();
-            let sid = session_id.to_string();
-            let this2 = self.clone();
-            let sid2 = session_id.to_string();
-            crate::serial::SerialChannel::open(
-                &serial_opts,
-                move |data| {
-                    this.out
-                        .send_binary(protocol::encode_data_frame(DF_STDOUT, &sid, data));
-                },
-                move |reason| {
-                    this2.handle_closed(&sid2, reason);
-                },
-            )
-        };
-        let (channel, io_task) = match opened {
-            Ok(x) => x,
-            Err(e) => {
-                self.fail_open(session_id, &e);
-                return;
-            }
-        };
-
-        // stdin 专用写入任务：按序消费队列写串口（写失败即退出，sender drop 自然结束）
-        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        {
-            let ch = channel.clone();
-            tokio::spawn(async move {
-                while let Some(data) = stdin_rx.recv().await {
-                    if ch.write_input(&data).await.is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-
-        let port = serial_opts.port.clone();
-        let baud = serial_opts.baud_rate;
-        {
-            let mut sessions = self.sessions.lock().unwrap();
-            let Some(entry) = sessions.get_mut(session_id) else {
-                // 建连期间被用户关闭（或 reader 已抢先触发 serial-lost）：
-                // 双工任务随 abort/drop 释放端口，不再发送 SessionOpened
-                io_task.abort();
-                return;
-            };
-            entry.serial = Some(channel);
-            entry.stdin_tx = Some(stdin_tx);
-            entry.serial_reader = Some(io_task);
-        }
-
-        self.send_control(ServerFrame::SessionOpened {
-            s: session_id.to_string(),
-            m: SessionOpenedM {
-                host_id: "serial".into(),
-                kind: "serial".into(),
-                dtr: Some(dtr_preset),
-                rts: Some(rts_preset),
-            },
-        });
-        self.stores.audit.append(
-            "session.opened",
-            serde_json::json!({
-                "sessionId": session_id,
-                "kind": "serial",
-                "target": format!("{port} @ {baud}"),
-            }),
-        );
-    }
-
-    /// serial-ctl：串口控制（DTR/RTS/Break/改波特率/信号查询）。
-    /// 只作用于 kind="serial" 的会话；控制失败不杀会话（读循环的 serial-lost 兜底）。
-    pub async fn serial_ctl(&self, session_id: &str, m: protocol::SerialCtlM) {
-        let fail = |op: &str, msg: String| {
-            self.send_control(ServerFrame::SerialCtlResult {
-                s: session_id.to_string(),
-                m: protocol::SerialCtlResultM {
-                    ok: false,
-                    op: op.to_string(),
-                    message: Some(msg),
-                    signals: None,
-                },
-            });
-        };
-        let lookup = {
-            let sessions = self.sessions.lock().unwrap();
-            match sessions.get(session_id) {
-                None => Err("会话不存在或已关闭".to_string()),
-                Some(e) if e.kind != "serial" => Err("非串口会话不支持 serial-ctl".to_string()),
-                Some(e) => Ok(e.serial.clone()),
-            }
-        };
-        let chan = match lookup {
-            Ok(Some(chan)) => chan,
-            Ok(None) => {
-                fail(&m.op, "串口通道未就绪".into());
-                return;
-            }
-            Err(msg) => {
-                fail(&m.op, msg);
-                return;
-            }
-        };
-
-        let result = match m.op.as_str() {
-            "dtr" => chan.set_dtr(m.level.unwrap_or(true)).await.map(|_| None),
-            "rts" => chan.set_rts(m.level.unwrap_or(true)).await.map(|_| None),
-            "break" => chan.send_break(m.ms.unwrap_or(250)).await.map(|_| None),
-            "set-baud" => match m.baud_rate {
-                Some(b) => chan.set_baud(b).await.map(|_| None),
-                None => Err("缺少 baudRate".to_string()),
-            },
-            "signals" => chan.signals().await.map(Some),
-            other => Err(format!("未知 serial-ctl 操作: {other}")),
-        };
-        let (ok, message, signals) = match result {
-            Ok(sig) => (true, None, sig),
-            Err(e) => (false, Some(e), None),
-        };
-        self.send_control(ServerFrame::SerialCtlResult {
-            s: session_id.to_string(),
-            m: protocol::SerialCtlResultM {
-                ok,
-                op: m.op,
-                message,
-                signals,
-            },
-        });
-    }
-
     // ── terminal ───────────────────────────────────────────────────────────
 
-    pub fn input(&self, session_id: &str, data: &[u8]) {
+    /// 终端输入（DF_STDIN）：命中 SSH 会话入队即返回 true；
+    /// 未命中返回 false（调用方回落串口会话表等其他会话类型）
+    pub fn try_input(&self, session_id: &str, data: &[u8]) -> bool {
         let tx = {
             let sessions = self.sessions.lock().unwrap();
             sessions.get(session_id).and_then(|e| e.stdin_tx.clone())
@@ -472,6 +315,9 @@ impl SessionManager {
         // 入队即返回：实际写入由会话的 stdin 任务执行（写挂起不影响 WS 分发循环）
         if let Some(tx) = tx {
             let _ = tx.send(data.to_vec());
+            true
+        } else {
+            false
         }
     }
 
@@ -480,8 +326,6 @@ impl SessionManager {
             let mut sessions = self.sessions.lock().unwrap();
             match sessions.get_mut(session_id) {
                 Some(e) if e.pty.is_some() => e.pty.clone(),
-                // 串口无 PTY 尺寸概念：直接忽略（不缓存 pending_size）
-                Some(e) if e.kind == "serial" => None,
                 // PTY 未就绪（open 建连中）：缓存尺寸，open 完成后补发。
                 // 此前直接丢弃会让远端永远停留在占位 80x24，与前端实际
                 // 尺寸不一致 → 方向键调历史时 readline 折行/光标错位，
@@ -954,12 +798,6 @@ impl SessionManager {
         if let Some(task) = entry.metrics_task.take() {
             task.abort();
         }
-        // 串口 IO 双工任务：abort 后任务 future（内含整个 SerialStream）被 drop，
-        // SerialStream 的 NamedPipeClient 持有 COM 句柄 → drop 即 CloseHandle，
-        // 端口句柄在下一个调度 tick 释放（无需显式 close）
-        if let Some(task) = entry.serial_reader.take() {
-            task.abort();
-        }
         // 传输/上传任务收尾；底层 SFTP 通道由注册表统一管理（多会话共享，不在此关闭）
         if let Some(sftp) = entry.sftp.take() {
             tokio::spawn(async move {
@@ -973,7 +811,6 @@ impl SessionManager {
         // stdin 写入任务随 sender drop 结束；PTY 通道随 Arc drop 关闭（远端 shell 收 EOF）
         entry.stdin_tx.take();
         entry.pty.take();
-        entry.serial.take();
         self.send_control(ServerFrame::SessionClosed {
             s: session_id.to_string(),
             m: protocol::SessionClosedM {
@@ -1004,7 +841,7 @@ impl SessionManager {
                 });
             }
             "create" | "update" => {
-                let input = serde_json::from_value::<crate::protocol::HostInput>(
+                let input = serde_json::from_value::<bg_core::protocol::HostInput>(
                     m.get("host").cloned().unwrap_or(serde_json::Value::Null),
                 );
                 match input {
@@ -1177,14 +1014,14 @@ fn err_sftp(op: &str, rid: Option<String>, message: &str) -> SftpResultM {
 /// 组装传输预检报告（preflight op 与 AI 工具 sftp_*_file 共用）
 /// 方向语义：upload → path=本地源（Agent 本地盘，浏览器宿主用 size 提示）、to=远端目标；
 ///          download → path=远端源、to=本地目标。
-pub(crate) async fn build_preflight_report(
+pub async fn build_preflight_report(
     ctrl: &SftpController,
     direction: &str,
     path: &str,
     to: &str,
     size_hint: Option<u64>,
-) -> Result<crate::protocol::PreflightReportM, String> {
-    use crate::protocol::{PreflightItemM, PreflightReportM};
+) -> Result<bg_core::protocol::PreflightReportM, String> {
+    use bg_core::protocol::{PreflightItemM, PreflightReportM};
 
     const LARGE_FILE: u64 = 1024 * 1024 * 1024; // ≥1GB 提醒（交互阈值，双端一致）
     fn item(code: &str, message: String) -> PreflightItemM {
@@ -1249,7 +1086,7 @@ pub(crate) async fn build_preflight_report(
         // 本地目标
         let local = std::path::Path::new(to);
         report.local_exists = local.exists();
-        if let Some(free) = crate::disk::available_space(local) {
+        if let Some(free) = bg_core::disk::available_space(local) {
             report.local_free_b = Some(free);
             if size > free {
                 report.blockers.push(item(
@@ -1258,9 +1095,9 @@ pub(crate) async fn build_preflight_report(
                 ));
             }
         }
-        if let Some(fs) = crate::disk::fs_name(local) {
+        if let Some(fs) = bg_core::disk::fs_name(local) {
             report.local_fs = Some(fs.clone());
-            if let Some(max) = crate::disk::max_file_bytes(&fs) {
+            if let Some(max) = bg_core::disk::max_file_bytes(&fs) {
                 report.local_max_file_b = Some(max);
                 // FAT32 单文件上限仅对单文件下载可判定（目录任务逐文件各异）
                 if count <= 1 && size > max {

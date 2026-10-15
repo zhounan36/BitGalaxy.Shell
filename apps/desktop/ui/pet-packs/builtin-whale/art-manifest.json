@@ -1,0 +1,250 @@
+{
+    "version":  4,
+    "character":  "鲸鱼娘（大肥鱼）· DeepSeek 社区二创女仆装鲸鱼娘",
+    "design":  {
+                   "features":  "深海蓝渐变长发（发根深蓝→发尾浅青蓝）、弧形呆毛、白色层叠蕾丝女仆发箍+亮蓝蝴蝶结、头侧鲸鱼鳍状耳朵（外深蓝内白褶边）、深蓝外圈亮蓝虹膜大眼睛、金边椭圆蓝宝石领结、小蓝鲸水花图案白围裙、多层白花边深蓝短裙、白花边短袜+深蓝玛丽珍鞋、厚实深蓝鲸尾、金色十字星点缀",
+                   "style":  "Q版三头身（states）+ 成熟比例修长身形（fullbody）",
+                   "canon":  "以开源资产库官方设定稿为唯一身份基准"
+               },
+    "referenceBase":  {
+                          "repo":  "https://github.com/TreapGoGo/deepseek-whale-girl",
+                          "site":  "https://treapgogo.github.io/deepseek-whale-girl/index.html",
+                          "license":  "MIT (c) 2026 TreapGoGo",
+                          "chibiSheet":  {
+                                             "file":  "refs/dafeiyu-chibi-character-sheet.png",
+                                             "ratio":  "16:9"
+                                         },
+                          "matureSheet":  {
+                                              "file":  "refs/dafeiyu-mature-character-sheet.png",
+                                              "ratio":  "16:9"
+                                          },
+                          "note":  "两套官方设定稿为补帧/新状态的 i2i 身份基准；画布内对应参考节点见 _jobstate.json refBase"
+                      },
+    "generated":  {
+                      "model":  "seedream_4.5",
+                      "resolution":  "2K",
+                      "date":  "2026-10-12",
+                      "credits":  246,
+                      "rounds":  "第一轮 13 张（形象偏差废弃，气泡底图保留）；第二轮以官方设定稿为参考重生成 11 张；第三轮补帧 51 张（i2i 双参考：官方Q版设定稿+各状态帧0，153 积分）+ 问题帧重生成 7 张次（21 积分）",
+                      "canvas":  "https://jimeng.jianying.com/ai-tool/ai-canvas/2c517347-f00a-45fe-b18c-0ef41aae6d70"
+                  },
+    "license":  "参考设定稿：MIT（TreapGoGo/deepseek-whale-girl，需保留署名）；鲸鱼娘形象谱系归社区创作者所有（溟月/上善无形 CC BY-NC-SA 4.0，ZipZipPipe 女仆装禁商用）。本项目限非商业使用。",
+    "frames":  {
+                   "pattern":  "\u003cstate\u003e/\u003cstate\u003e_NN.png",
+                   "size":  "512×512（fullbody 512×683）",
+                   "retina":  "同目录 \u003cname\u003e@2x.png（1024×1024 / 1024×1366）",
+                   "background":  "透明（白底已抠，边缘 1px 羽化）",
+                   "framing":  "同状态所有帧使用联合取景框，动画无抖动",
+                   "masters":  "raw/\u003cstate\u003e/ 保留 2K 白底原图，供日后重抠/重缩放"
+               },
+    "states":  {
+                   "idle_breath":  {
+                                       "file":  "idle_breath/idle_breath_00.png",
+                                       "ratio":  "1:1",
+                                       "loop":  true,
+                                       "plannedFrames":  8,
+                                       "frames":  8,
+                                       "fps":  6,
+                                       "event":  "无会话 · 待机呼吸",
+                                       "anchor":  {
+                                                      "x":  0.5,
+                                                      "y":  0.961
+                                                  },
+                                       "norm":  {
+                                                    "mode":  "height",
+                                                    "target":  474,
+                                                    "anchor":  "bottom"
+                                                }
+                                   },
+                   "idle_blink":  {
+                                      "file":  "idle_blink/idle_blink_00.png",
+                                      "ratio":  "1:1",
+                                      "loop":  false,
+                                      "plannedFrames":  3,
+                                      "frames":  3,
+                                      "fps":  5,
+                                      "event":  "待机中随机眨眼",
+                                      "anchor":  {
+                                                     "x":  0.5,
+                                                     "y":  0.961
+                                                 },
+                                      "norm":  {
+                                                   "mode":  "height",
+                                                   "target":  474,
+                                                   "anchor":  "bottom"
+                                               }
+                                  },
+                   "working":  {
+                                   "file":  "working/working_00.png",
+                                   "ratio":  "1:1",
+                                   "loop":  true,
+                                   "plannedFrames":  8,
+                                   "frames":  8,
+                                   "fps":  6,
+                                   "event":  "会话有输出 · 打字+内心独白气泡",
+                                   "anchor":  {
+                                                  "x":  0.5,
+                                                  "y":  0.961
+                                              },
+                                   "norm":  {
+                                                "mode":  "height",
+                                                "target":  400,
+                                                "anchor":  "bottom"
+                                            }
+                               },
+                   "need_input":  {
+                                      "file":  "need_input/need_input_00.png",
+                                      "ratio":  "1:1",
+                                      "loop":  true,
+                                      "plannedFrames":  4,
+                                      "frames":  4,
+                                      "fps":  5,
+                                      "event":  "hostkey-unknown / 密库解锁 · 问号气泡",
+                                      "anchor":  {
+                                                     "x":  0.5,
+                                                     "y":  0.961
+                                                 },
+                                      "norm":  {
+                                                   "mode":  "align",
+                                                   "target":  0,
+                                                   "anchor":  "bottom"
+                                               }
+                                  },
+                   "angry":  {
+                                 "file":  "angry/angry_00.png",
+                                 "ratio":  "1:1",
+                                 "loop":  false,
+                                 "plannedFrames":  6,
+                                 "frames":  6,
+                                 "fps":  8,
+                                 "event":  "open-failed / probe 失败 · 3s 自愈",
+                                 "line":  "真当我是便宜货？！",
+                                 "anchor":  {
+                                                "x":  0.5,
+                                                "y":  0.961
+                                            },
+                                 "norm":  {
+                                              "mode":  "height",
+                                              "target":  474,
+                                              "anchor":  "bottom"
+                                          }
+                             },
+                   "wave":  {
+                                "file":  "wave/wave_00.png",
+                                "ratio":  "1:1",
+                                "loop":  false,
+                                "plannedFrames":  6,
+                                "frames":  6,
+                                "fps":  6,
+                                "event":  "hover / 出场问候",
+                                "anchor":  {
+                                               "x":  0.5,
+                                               "y":  0.961
+                                           },
+                                "norm":  {
+                                             "mode":  "height",
+                                             "target":  474,
+                                             "anchor":  "bottom"
+                                         }
+                            },
+                   "drag":  {
+                                "file":  "drag/drag_00.png",
+                                "ratio":  "1:1",
+                                "loop":  true,
+                                "plannedFrames":  8,
+                                "frames":  8,
+                                "fps":  8,
+                                "event":  "被用户拖拽 · 鲸尾扑腾（drag_fwd 反放 ping-pong 展开）",
+                                "anchor":  {
+                                               "x":  0.5,
+                                               "y":  0.5
+                                           },
+                                "norm":  {
+                                             "mode":  "height",
+                                             "target":  460,
+                                             "anchor":  "center"
+                                         }
+                            },
+                   "eating":  {
+                                  "file":  "eating/eating_00.png",
+                                  "ratio":  "1:1",
+                                  "loop":  true,
+                                  "plannedFrames":  8,
+                                  "frames":  8,
+                                  "fps":  6,
+                                  "event":  "30s 无输出 · 干饭",
+                                  "line":  "我先去吃饭，好了叫我",
+                                  "anchor":  {
+                                                 "x":  0.5,
+                                                 "y":  0.961
+                                             },
+                                  "norm":  {
+                                               "mode":  "height",
+                                               "target":  400,
+                                               "anchor":  "bottom"
+                                           }
+                              },
+                   "sleep":  {
+                                 "file":  "sleep/sleep_00.png",
+                                 "ratio":  "1:1",
+                                 "loop":  true,
+                                 "plannedFrames":  8,
+                                 "frames":  8,
+                                 "fps":  3,
+                                 "event":  "空闲 5min · DeepSleep 深睡",
+                                 "anchor":  {
+                                                "x":  0.5,
+                                                "y":  0.961
+                                            },
+                                 "norm":  {
+                                              "mode":  "width",
+                                              "target":  470,
+                                              "anchor":  "bottom"
+                                          }
+                             },
+                   "ready":  {
+                                 "file":  "ready/ready_00.png",
+                                 "ratio":  "1:1",
+                                 "loop":  false,
+                                 "plannedFrames":  4,
+                                 "frames":  4,
+                                 "fps":  6,
+                                 "event":  "唤醒/登录 · 登场亮相",
+                                 "line":  "探索未至之境",
+                                 "anchor":  {
+                                                "x":  0.5,
+                                                "y":  0.961
+                                            },
+                                 "norm":  {
+                                              "mode":  "height",
+                                              "target":  474,
+                                              "anchor":  "bottom"
+                                          }
+                             }
+               },
+    "ui":  {
+               "fullbody":  {
+                                "file":  "ui/fullbody_00.png",
+                                "ratio":  "3:4",
+                                "desc":  "成熟比例全身立绘（官方正比设定稿基准）· 关于页/UI 皮肤 · 已抠图 512×683 + @2x"
+                            },
+               "bubble":  {
+                              "file":  "ui/bubble_00.png",
+                              "ratio":  "4:3",
+                              "desc":  "深海蓝蕾丝对话气泡底图 · 9-slice 源（第一轮产物，与角色无关故保留）"
+                          }
+           },
+    "transitions":  {
+                        "idle_breath -\u003e working":  "open 会话 / PTY 数据",
+                        "working -\u003e idle_breath":  "close 会话",
+                        "working -\u003e need_input":  "TOFU / 解锁请求",
+                        "need_input -\u003e working":  "用户确认",
+                        "idle_breath -\u003e sleep":  "空闲 5 分钟",
+                        "working -\u003e eating":  "30s 无输出",
+                        "eating|sleep -\u003e idle_breath|working":  "输出恢复 / 唤醒",
+                        "* -\u003e angry":  "open-failed / probe 失败（3s 自愈）"
+                    },
+    "next":  [
+                 "水波粒子建议程序化生成"
+             ]
+}

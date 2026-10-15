@@ -10,11 +10,11 @@ use std::time::Duration;
 use russh_sftp::client::SftpSession;
 
 use crate::ssh::{self, HostKeyAsk, HostKeyCtx, SshConnection, SshError};
-use crate::stores::Stores;
-use crate::toolcore::{
+use bg_core::error::{
     ToolError, ERR_AUTH_FAILED, ERR_CONNECT_FAILED, ERR_HOST_NOT_FOUND, ERR_HOSTKEY_MISMATCH,
     ERR_HOSTKEY_UNKNOWN, ERR_SFTP_FAILED,
 };
+use bg_core::stores::Stores;
 
 struct RegistryEntry {
     conn: Arc<SshConnection>,
@@ -225,8 +225,8 @@ impl ConnRegistry {
                         "host.password_updated",
                         serde_json::json!({ "hostId": hid, "reason": "auth-retry" }),
                     );
-                    out.send_frame(&crate::protocol::ServerFrame::Hosts {
-                        m: crate::protocol::HostsResultM {
+                    out.send_frame(&bg_core::protocol::ServerFrame::Hosts {
+                        m: bg_core::protocol::HostsResultM {
                             op: "list".into(),
                             ok: true,
                             hosts: Some(stores.hosts.list()),

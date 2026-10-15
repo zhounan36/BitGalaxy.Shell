@@ -1,5 +1,5 @@
 //! 远程指标采集：单次 exec 拉取全部指标（POSIX/Linux 目标），标记分段解析。
-use crate::protocol::{MetricsDisk, MetricsProcess, MetricsSample};
+use bg_core::protocol::{MetricsDisk, MetricsProcess, MetricsSample};
 
 fn mark(name: &str) -> String {
     format!("==BGSH:{name}==")
@@ -96,6 +96,6 @@ pub fn parse_metrics(stdout: &str) -> MetricsSample {
         mem_used_b: mem.get(1).map(|s| parse_f(s)).unwrap_or(0.0),
         disks,
         processes,
-        ts: crate::stores::now_iso(),
+        ts: bg_core::stores::now_iso(),
     }
 }

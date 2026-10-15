@@ -511,7 +511,7 @@ export function App() {
                 ) : t.kind === 'sftp' ? (
                   <SftpPane sessionId={t.key} />
                 ) : t.kind === 'sql' ? (
-                  <SqlPane sessionId={t.key} hostId={t.hostId} />
+                  <SqlPane sessionId={t.key} />
                 ) : (
                   <MetricsPane sessionId={t.key} />
                 ),

@@ -18,8 +18,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::protocol::{SftpEntry, SftpProgressM, SftpResultM, ServerFrame, DF_SFTP_DOWNLOAD};
-use crate::wire::Outbound;
+use bg_core::protocol::{SftpEntry, SftpProgressM, SftpResultM, ServerFrame, DF_SFTP_DOWNLOAD};
+use bg_core::wire::Outbound;
 
 const CHUNK: usize = 64 * 1024;
 
@@ -42,7 +42,8 @@ const LOCAL_IO_PREFIXES: [&str; 8] = [
 /// SFTP v3 无专用错误状态码（ENOSPC/EACCES 等以 Failure+errno 文本返回），
 /// 按子串归类；本地 IO 错误（Windows 中文文案）一并覆盖。
 /// 返回：local_io / permission_denied / no_space / quota / file_exists / text_file_busy / network / unknown
-pub(crate) fn classify_sftp_error(msg: &str) -> Option<String> {
+/// 错误分类（AI 工具层复用，故 pub）
+pub fn classify_sftp_error(msg: &str) -> Option<String> {
     // 本地文件操作失败（下载写 .part / 上传读源）与远端账号权限无关：
     // 单独归类，避免 Windows"拒绝访问 (os error 5)"被误映射为远端 permission_denied 建议
     if LOCAL_IO_PREFIXES.iter().any(|p| msg.contains(p)) {
@@ -204,10 +205,10 @@ fn scan_remote_inner<'a>(
 /// 请求发出后永远等不到回应。15s 无响应报错（消息含 "timeout" 会被
 /// classify_sftp_error 归为 network，上层驱逐池条目后下次自动重建）。
 /// 权限被拒由服务器即时返回（毫秒级），不受该超时影响——两类失败可快速区分。
-pub(crate) const SFTP_META_DEADLINE: Duration = Duration::from_secs(15);
+pub const SFTP_META_DEADLINE: Duration = Duration::from_secs(15);
 
 /// stat 元数据（15s 超时）：死连接快速失败，权限/不存在即时返回
-pub(crate) async fn stat_deadline(sftp: &SftpSession, path: &str) -> Result<Metadata, String> {
+pub async fn stat_deadline(sftp: &SftpSession, path: &str) -> Result<Metadata, String> {
     match tokio::time::timeout(SFTP_META_DEADLINE, sftp.metadata(path)).await {
         Ok(r) => r.map_err(sftp_err),
         Err(_) => Err(format!("sftp stat timeout (15s): {path}")),
@@ -215,7 +216,7 @@ pub(crate) async fn stat_deadline(sftp: &SftpSession, path: &str) -> Result<Meta
 }
 
 /// 打开远端文件用于读取（15s 超时）
-pub(crate) async fn open_read_deadline(sftp: &SftpSession, path: &str) -> Result<File, String> {
+pub async fn open_read_deadline(sftp: &SftpSession, path: &str) -> Result<File, String> {
     match tokio::time::timeout(SFTP_META_DEADLINE, sftp.open(path)).await {
         Ok(r) => r.map_err(sftp_err),
         Err(_) => Err(format!("sftp open timeout (15s): {path}")),
@@ -224,7 +225,7 @@ pub(crate) async fn open_read_deadline(sftp: &SftpSession, path: &str) -> Result
 
 /// 打开远端文件用于写入（15s 超时）：append=true 走 APPEND 续写，否则
 /// create 截断新建。无写权限时服务器即时拒绝（permission_denied）
-pub(crate) async fn open_remote_write(
+pub async fn open_remote_write(
     sftp: &SftpSession,
     path: &str,
     append: bool,
@@ -580,13 +581,13 @@ impl SftpController {
                     }
                     Ok(n) => {
                         transferred += n as u64;
-                        let payload = crate::protocol::encode_op_payload(&op_id_task, &buf[..n]);
-                        out.send_binary(crate::protocol::encode_data_frame(
+                        let payload = bg_core::protocol::encode_op_payload(&op_id_task, &buf[..n]);
+                        out.send_binary(bg_core::protocol::encode_data_frame(
                             DF_SFTP_DOWNLOAD,
                             &session_id,
                             &payload,
                         ));
-                        use crate::protocol::ServerFrame;
+                        use bg_core::protocol::ServerFrame;
                         out.send_frame(&ServerFrame::SftpProgress {
                             s: session_id.clone(),
                             m: SftpProgressM {
@@ -879,7 +880,7 @@ const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 const DIR_CONCURRENCY: usize = 3;
 
 /// 任务级共享进度状态（目录任务的多个并发子文件共同累加）
-pub(crate) struct XferState {
+pub struct XferState {
     out: Outbound,
     sid: String,
     op_id: String,
@@ -918,7 +919,7 @@ impl XferState {
     }
 
     /// AI 路径构造：无 WS 出口的空进度状态（emit 帧全部静默丢弃）
-    pub(crate) fn noop() -> XferState {
+    pub fn noop() -> XferState {
         let (tx, _rx) = mpsc::unbounded_channel();
         XferState::new(&Outbound { tx }, "ai", "noop")
     }
@@ -1042,7 +1043,7 @@ fn part_path(local: &Path) -> PathBuf {
 }
 
 /// 单文件下载（断点续传；fresh = 覆盖语义：忽略已存在目标与 .part 断点，全新重传）
-pub(crate) async fn xfer_download_one(
+pub async fn xfer_download_one(
     sftp: Arc<SftpSession>,
     remote: String,
     local: PathBuf,
@@ -1146,7 +1147,7 @@ pub(crate) async fn xfer_download_one(
 }
 
 /// 单文件上传（断点续传；fresh = 覆盖语义：无视远端已有内容，create 截断全量重传）
-pub(crate) async fn xfer_upload_one(
+pub async fn xfer_upload_one(
     sftp: Arc<SftpSession>,
     local: PathBuf,
     remote: String,

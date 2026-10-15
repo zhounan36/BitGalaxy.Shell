@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "builtin-whale",
+  "name": "内置 · 鲸鱼娘",
+  "author": "溟月/上善无形（形象）· ZipZipPipe（女仆装）· TreapGoGo（设定稿 MIT）",
+  "version": "1.0.0",
+  "states": {
+    "sleep": { "frames": 8, "fps": 3, "loop": true },
+    "ready": { "frames": 4, "fps": 6, "loop": false },
+    "idle_breath": { "frames": 8, "fps": 6, "loop": true },
+    "idle_blink": { "frames": 3, "fps": 5, "loop": false },
+    "wave": { "frames": 6, "fps": 6, "loop": false },
+    "working": { "frames": 8, "fps": 6, "loop": true },
+    "need_input": { "frames": 4, "fps": 5, "loop": true },
+    "eating": { "frames": 8, "fps": 6, "loop": true },
+    "angry": { "frames": 6, "fps": 8, "loop": false },
+    "drag": { "frames": 8, "fps": 8, "loop": true }
+  }
+}

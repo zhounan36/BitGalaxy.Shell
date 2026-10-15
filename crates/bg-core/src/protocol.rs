@@ -253,6 +253,11 @@ pub enum ClientFrame {
         s: String,
         m: SqlOpM,
     },
+    /// SQL 连接档案 CRUD（sql-conns 回包；op: list/create/update/delete）
+    #[serde(rename = "sql-conns")]
+    SqlConns {
+        m: serde_json::Value,
+    },
     /// 枚举本机串口（serial-ports 回包）
     #[serde(rename = "serial-list")]
     SerialList,
@@ -433,7 +438,8 @@ pub struct SqlConnSpecM {
     /// mysql | mariadb | postgres | sqlite
     #[serde(rename = "type")]
     pub kind: String,
-    /// 所属 SSH 主机档案 id（隧道经此主机转发；sqlite 时也用于下载文件）
+    /// 历史字段：SSH 隧道时代的主机档案 id（P2 直连改造后不再使用，保留兼容旧帧）
+    #[serde(default)]
     pub host_id: String,
     /// 远端数据库地址（经隧道转发的目标；缺省 127.0.0.1）
     #[serde(default)]
@@ -454,6 +460,48 @@ pub struct SqlConnSpecM {
     /// 显示名（前端连接管理器用）
     #[serde(default)]
     pub name: Option<String>,
+}
+
+/// SQL 连接档案（sql-connections.db 持久化行；Navicat 风格连接管理）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlConnRecord {
+    pub id: String,
+    pub name: String,
+    /// mysql | mariadb | postgres | sqlite
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// 目标库地址（sqlite 忽略）
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub user: String,
+    /// 明文密码（沿用 hosts 表先例：Secrets 内存缓存无法跨启动）
+    #[serde(default)]
+    pub password: String,
+    #[serde(default)]
+    pub database: String,
+    /// sqlite：本地 .db 文件路径
+    #[serde(default)]
+    pub sqlite_path: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// sql-conns 帧回包
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlConnsResultM {
+    pub op: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conns: Option<Vec<SqlConnRecord>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conn: Option<SqlConnRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -549,6 +597,11 @@ pub enum ServerFrame {
     AiResult {
         m: AiResultM,
     },
+    /// 一次性问答回包（ai op:"ask"，reqId 关联；无历史/无工具）
+    #[serde(rename = "ai-ask-result")]
+    AiAskResult {
+        m: AiAskResultM,
+    },
     #[serde(rename = "ai-approval")]
     AiApproval {
         m: AiApprovalM,
@@ -596,6 +649,11 @@ pub enum ServerFrame {
     SqlResult {
         s: String,
         m: SqlResultM,
+    },
+    /// SQL 连接档案 CRUD 回包
+    #[serde(rename = "sql-conns-result")]
+    SqlConnsResult {
+        m: SqlConnsResultM,
     },
     /// SQL 长任务进度（驱动下载 / SQLite 文件下载）
     #[serde(rename = "sql-progress")]
@@ -811,6 +869,17 @@ pub struct AiDeltaM {
 pub struct AiResultM {
     #[serde(rename = "chatId")]
     pub chat_id: String,
+    pub ok: bool,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// 一次性问答回包（SQL 终端右键 AI 等场景）：reqId 关联，不经对话历史
+#[derive(Debug, Clone, Serialize)]
+pub struct AiAskResultM {
+    #[serde(rename = "reqId")]
+    pub req_id: String,
     pub ok: bool,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]

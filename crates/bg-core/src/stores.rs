@@ -135,6 +135,126 @@ impl HostStore {
     }
 }
 
+// ── SQL 连接档案（sql-connections.db 独立域库；SQL 应用专用）──────────────────
+
+const SQL_CONNS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sql_connections (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    conn_type   TEXT NOT NULL,
+    host        TEXT NOT NULL DEFAULT '',
+    port        INTEGER NOT NULL DEFAULT 0,
+    username    TEXT NOT NULL DEFAULT '',
+    password    TEXT NOT NULL DEFAULT '',
+    database    TEXT NOT NULL DEFAULT '',
+    sqlite_path TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);";
+
+fn row_to_sql_conn(row: &rusqlite::Row) -> rusqlite::Result<crate::protocol::SqlConnRecord> {
+    Ok(crate::protocol::SqlConnRecord {
+        id: row.get("id")?,
+        name: row.get("name")?,
+        kind: row.get("conn_type")?,
+        host: row.get("host")?,
+        port: row.get::<_, i64>("port")? as u16,
+        user: row.get("username")?,
+        password: row.get("password")?,
+        database: row.get("database")?,
+        sqlite_path: row.get("sqlite_path")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+#[derive(Clone)]
+pub struct SqlConnStore {
+    db: Db,
+}
+
+impl SqlConnStore {
+    /// 打开/创建 sql-connections.db（数据目录下）
+    pub fn open(data_dir: &std::path::Path) -> SqlConnStore {
+        SqlConnStore {
+            db: Db::open_domain(&data_dir.join("sql-connections.db"), SQL_CONNS_SCHEMA),
+        }
+    }
+
+    pub fn list(&self) -> Vec<crate::protocol::SqlConnRecord> {
+        self.db
+            .with(|c| {
+                let mut stmt = c.prepare("SELECT * FROM sql_connections ORDER BY created_at")?;
+                let rows = stmt.query_map([], row_to_sql_conn)?;
+                rows.collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn get(&self, id: &str) -> Option<crate::protocol::SqlConnRecord> {
+        self.db
+            .with(|c| {
+                c.query_row(
+                    "SELECT * FROM sql_connections WHERE id = ?1",
+                    [id],
+                    row_to_sql_conn,
+                )
+                .optional()
+            })
+            .ok()
+            .flatten()
+    }
+
+    pub fn create(&self, rec: &crate::protocol::SqlConnRecord) -> rusqlite::Result<()> {
+        self.db.with(|c| {
+            c.execute(
+                "INSERT INTO sql_connections (id, name, conn_type, host, port, username, password, database, sqlite_path, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                rusqlite::params![
+                    rec.id,
+                    rec.name,
+                    rec.kind,
+                    rec.host,
+                    rec.port as i64,
+                    rec.user,
+                    rec.password,
+                    rec.database,
+                    rec.sqlite_path,
+                    rec.created_at,
+                    rec.updated_at,
+                ],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn update(&self, rec: &crate::protocol::SqlConnRecord) -> rusqlite::Result<bool> {
+        let n = self.db.with(|c| {
+            c.execute(
+                "UPDATE sql_connections SET name=?1, conn_type=?2, host=?3, port=?4, username=?5, password=?6, database=?7, sqlite_path=?8, updated_at=?9 WHERE id=?10",
+                rusqlite::params![
+                    rec.name,
+                    rec.kind,
+                    rec.host,
+                    rec.port as i64,
+                    rec.user,
+                    rec.password,
+                    rec.database,
+                    rec.sqlite_path,
+                    rec.updated_at,
+                    rec.id,
+                ],
+            )
+        })?;
+        Ok(n > 0)
+    }
+
+    pub fn delete(&self, id: &str) -> bool {
+        self.db
+            .with(|c| c.execute("DELETE FROM sql_connections WHERE id = ?1", [id]))
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KnownHostEntry {
     pub host: String,

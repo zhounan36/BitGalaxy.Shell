@@ -1,0 +1,13 @@
+[package]
+name = "bg-sql"
+version = "0.1.0"
+edition = "2021"
+description = "BitGalaxy Shell SQL 引擎：驱动宿主进程 RPC + 会话式 op 分发（直连：MySQL/PG 网络直连 + 本地 SQLite）"
+
+[dependencies]
+bg-core = { path = "../bg-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "process", "sync", "time", "net", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"

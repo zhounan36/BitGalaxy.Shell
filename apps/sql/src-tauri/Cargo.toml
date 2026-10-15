@@ -1,0 +1,28 @@
+[package]
+name = "bgshell-sql"
+version = "0.1.0"
+description = "BitGalaxy SQL：独立 SQL 客户端（直连 MySQL/PostgreSQL/本地 SQLite，驱动宿主随包内置）"
+edition = "2021"
+
+[lib]
+name = "bgshell_sql_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+bg-core = { path = "../../../crates/bg-core" }
+bg-sql = { path = "../../../crates/bg-sql" }
+bg-server = { path = "../../../crates/bg-server" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+# 连接表单本地文件选择（SQLite .db 浏览）
+tauri-plugin-dialog = "2"
+# SQL/结果网格复制：WebView2 下 navigator.clipboard.readText 不可靠，走原生剪贴板
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync"] }
+futures-util = "0.3"

@@ -16,27 +16,10 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
-use crate::protocol::{AgentOp, AgentResult};
-use crate::stores::Stores;
+use bg_core::protocol::{AgentOp, AgentResult};
+use bg_core::stores::Stores;
 
-pub mod ai;
-pub mod db;
-pub mod disk;
-pub mod dl_http;
-pub mod mcp;
-pub mod metrics;
-pub mod policy;
-pub mod pool;
-pub mod protocol;
-pub mod serial;
 pub mod server;
-pub mod session;
-pub mod sftp;
-pub mod sql;
-pub mod ssh;
-pub mod stores;
-pub mod toolcore;
-pub mod wire;
 #[cfg(feature = "pet")]
 pub mod pet_pack;
 
@@ -353,20 +336,27 @@ pub fn run() {
             append_log(&data_dir, &format!("[bgshell] v{VERSION} 启动（单进程架构）"));
 
             // ── 持久层 + WS 服务 ──────────────────────────────────────
-            let db = db::Db::open(&data_dir.join("bitgalaxy.db"));
+            let db = bg_core::db::Db::open(&data_dir.join("bitgalaxy.db"));
             db.migrate_from_json(&data_dir);
             let stores = Stores::open(db);
 
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
             let agent_ctl = make_agent_ctl(app.handle().clone(), stores.clone(), data_dir.clone());
             let stores_for_server = stores.clone();
-            let policy = policy::load_ai_policy(&data_dir, &stores);
+            let policy = bg_core::policy::load_ai_policy(&data_dir, &stores);
             let port: u16 = std::env::var("BGSH_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(7777);
+            let dispatcher = std::sync::Arc::new(server::DesktopDispatcher::new(
+                port,
+                stores_for_server,
+                policy,
+                agent_ctl,
+                data_dir,
+            ));
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = server::start_server(port, stores_for_server, policy, agent_ctl, data_dir, Some(ready_tx)).await {
+                if let Err(e) = bg_server::WsServer::start(port, dispatcher, Some(ready_tx)).await {
                     eprintln!("[bgshell] WS 服务启动失败: {e}");
                 }
             });

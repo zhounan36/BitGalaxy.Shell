@@ -10,27 +10,17 @@ use std::time::{Duration, Instant};
 use regex::Regex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::metrics;
-use crate::policy::{classify_command, AiPolicy, PolicyAction};
-use crate::pool::ConnRegistry;
-use crate::session::probe_tcp;
-use crate::sftp::SftpController;
-use crate::stores::Stores;
+use bg_core::policy::{classify_command, AiPolicy, PolicyAction};
+use bg_core::stores::Stores;
+use bg_ssh::metrics;
+use bg_ssh::pool::ConnRegistry;
+use bg_ssh::session::probe_tcp;
+use bg_ssh::sftp::SftpController;
 
 // ── 工具错误码（稳定，AI 可据此自纠）─────────────────────────────────────
-
-pub const ERR_HOST_NOT_FOUND: &str = "host-not-found";
-pub const ERR_HOSTKEY_UNKNOWN: &str = "hostkey-unknown";
-pub const ERR_HOSTKEY_MISMATCH: &str = "hostkey-mismatch";
-pub const ERR_AUTH_FAILED: &str = "auth-failed";
-pub const ERR_CONNECT_FAILED: &str = "connect-failed";
-pub const ERR_SFTP_FAILED: &str = "sftp-failed";
-pub const ERR_EXEC_FAILED: &str = "exec-failed";
-pub const ERR_EXEC_TIMEOUT: &str = "exec-timeout";
-pub const ERR_POLICY_DENIED: &str = "policy-denied";
-pub const ERR_ELICIT_DECLINED: &str = "elicit-declined";
-pub const ERR_ELICIT_UNSUPPORTED: &str = "elicit-unsupported";
-pub const ERR_DISABLED: &str = "tool-disabled";
+// ToolError/ERR_*/decision_of 已下沉 bg-core::error（pool.rs 等连接层也依赖，
+// 留在此处会造成 bg-ssh → bg-ai 循环依赖）；此处整体再导出，通道层引用不变。
+pub use bg_core::error::*;
 
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 // 本地工具限额
@@ -44,28 +34,6 @@ const LARGE_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 const TRANSFER_CHUNK: usize = 64 * 1024;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-pub struct ToolError {
-    pub code: &'static str,
-    pub message: String,
-}
-
-impl ToolError {
-    pub fn new(code: &'static str, message: impl Into<String>) -> ToolError {
-        ToolError { code, message: message.into() }
-    }
-}
-
-/// 拒绝类错误 → 审计决策字段
-pub fn decision_of(code: &str) -> &'static str {
-    match code {
-        ERR_POLICY_DENIED => "policy-denied",
-        ERR_ELICIT_DECLINED => "elicit-declined",
-        ERR_ELICIT_UNSUPPORTED => "elicit-unsupported",
-        ERR_DISABLED => "tool-disabled",
-        _ => "allow",
-    }
-}
 
 // ── 审批抽象（通道各自实现 UI：elicitation / 桌宠弹卡片）──────────────────
 
@@ -190,7 +158,7 @@ async fn dispatch(
 /// SFTP 连接获取的显式超时（挂起兜底）：主机不可达/防火墙静默丢包时
 /// 底层连接可能长期无响应，30s 内拿不到 SFTP 通道直接报 connect-failed，
 /// 让工具卡片尽快显示失败原因，而不是永远「执行中」。
-async fn acquire_sftp_deadline(ctx: &ToolCtx<'_>, host_id: &str) -> Result<crate::pool::SftpLease, ToolError> {
+async fn acquire_sftp_deadline(ctx: &ToolCtx<'_>, host_id: &str) -> Result<bg_ssh::pool::SftpLease, ToolError> {
     match tokio::time::timeout(Duration::from_secs(30), ctx.registry.acquire_sftp(host_id, ctx.client)).await {
         Ok(r) => r,
         Err(_) => Err(ToolError::new(
@@ -204,7 +172,7 @@ async fn acquire_sftp_deadline(ctx: &ToolCtx<'_>, host_id: &str) -> Result<crate
 /// 驱逐后下次操作自动重建，避免死连接被反复复用、每个操作都白等超时。
 /// 权限被拒（permission_denied）不在此列——服务器即时返回，无需重建。
 fn evict_on_network(ctx: &ToolCtx<'_>, host_id: &str, msg: &str) {
-    if crate::sftp::classify_sftp_error(msg).as_deref() == Some("network") {
+    if bg_ssh::sftp::classify_sftp_error(msg).as_deref() == Some("network") {
         ctx.registry.evict(host_id, "connection-error");
     }
 }
@@ -312,7 +280,7 @@ async fn run_read_file(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> Result<se
     let lease = acquire_sftp_deadline(ctx, host_id).await?;
     let sftp = &lease.sftp;
     // stat/open 带 15s 超时：无读权限即时返回，半开死连接快速失败并驱逐
-    let meta = crate::sftp::stat_deadline(sftp, path)
+    let meta = bg_ssh::sftp::stat_deadline(sftp, path)
         .await
         .map_err(|e| {
             evict_on_network(ctx, host_id, &e);
@@ -322,7 +290,7 @@ async fn run_read_file(ctx: &ToolCtx<'_>, args: &serde_json::Value) -> Result<se
     if size == 0 {
         return Ok(serde_json::json!({ "path": path, "offset": offset, "content": "", "sizeB": 0, "truncated": false }));
     }
-    let mut file = crate::sftp::open_read_deadline(sftp, path)
+    let mut file = bg_ssh::sftp::open_read_deadline(sftp, path)
         .await
         .map_err(|e| {
             evict_on_network(ctx, host_id, &e);
@@ -566,7 +534,7 @@ async fn run_console_command(
         if !text.is_empty() {
             (console.emit)(text.clone());
         }
-        crate::ssh::collect_text(&mut out, chunk, max_bytes, &mut truncated);
+        bg_ssh::ssh::collect_text(&mut out, chunk, max_bytes, &mut truncated);
         tail.push_str(&text);
         if let Some(caps) = marker.captures(&tail) {
             exit_code = caps.get(1).and_then(|m| m.as_str().parse().ok());
@@ -591,7 +559,7 @@ async fn run_console_command(
 }
 
 /// sudo -n 探测结果是否表明「需要密码」（而非命令本身失败/无 sudo 权限）
-fn needs_password(r: &crate::ssh::ExecOutput) -> bool {
+fn needs_password(r: &bg_ssh::ssh::ExecOutput) -> bool {
     if r.code == Some(0) {
         return false;
     }
@@ -600,13 +568,13 @@ fn needs_password(r: &crate::ssh::ExecOutput) -> bool {
 }
 
 /// sudo -S 结果是否为认证失败（密码错误），需作废缓存的密码
-fn auth_failed(r: &crate::ssh::ExecOutput) -> bool {
+fn auth_failed(r: &bg_ssh::ssh::ExecOutput) -> bool {
     let stderr = r.stderr.to_lowercase();
     (stderr.contains("incorrect password") || stderr.contains("try again") || stderr.contains("密码错误") || stderr.contains("认证失败"))
         && r.code != Some(0)
 }
 
-fn exec_output_json(r: &crate::ssh::ExecOutput) -> serde_json::Value {
+fn exec_output_json(r: &bg_ssh::ssh::ExecOutput) -> serde_json::Value {
     serde_json::json!({
         "exitCode": r.code,
         "stdout": r.stdout,
@@ -649,7 +617,7 @@ async fn run_write_file(
     let sftp = &lease.sftp;
     // 打开带 15s 超时：无写权限服务器即时拒绝（毫秒级），半开死连接快速
     // 失败（原先会一直挂到 600s 工具总预算）
-    let opened = crate::sftp::open_remote_write(sftp, path, mode == "append").await;
+    let opened = bg_ssh::sftp::open_remote_write(sftp, path, mode == "append").await;
     let write_result: Result<(), String> = match opened {
         Ok(mut file) => async move {
             file.write_all(bytes).await.map_err(|e| e.to_string())?;
@@ -924,8 +892,8 @@ async fn run_sftp_transfer(
     // 预检整体 15s 兜底：内部多为远端元数据操作，半开死连接快速失败并驱逐
     // （原先会挂到 600s 工具总预算）；权限探针本身毫秒级完成
     let report = match tokio::time::timeout(
-        crate::sftp::SFTP_META_DEADLINE,
-        crate::session::build_preflight_report(
+        bg_ssh::sftp::SFTP_META_DEADLINE,
+        bg_ssh::session::build_preflight_report(
             &ctrl,
             if upload { "upload" } else { "download" },
             src,
@@ -996,9 +964,9 @@ async fn run_sftp_transfer(
     guard_write(ctx, approver, &describe).await?;
 
     // 5) 复用原生引擎（断点续传 + 句柄确认关闭；AI 无 WS 进度出口 → noop 状态）
-    let state = Arc::new(crate::sftp::XferState::noop());
+    let state = Arc::new(bg_ssh::sftp::XferState::noop());
     let result = if upload {
-        crate::sftp::xfer_upload_one(
+        bg_ssh::sftp::xfer_upload_one(
             sftp.clone(),
             std::path::PathBuf::from(&local_path),
             remote_path.clone(),
@@ -1014,7 +982,7 @@ async fn run_sftp_transfer(
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
         }
-        crate::sftp::xfer_download_one(
+        bg_ssh::sftp::xfer_download_one(
             sftp.clone(),
             remote_path.clone(),
             std::path::PathBuf::from(&local_path),

@@ -7,6 +7,8 @@ dist-app/
 build/
 out/
 *.tsbuildinfo
+/target/
+# 根 workspace 合并前的旧构建缓存（可手动删除释放磁盘）
 apps/desktop/src-tauri/target/
 drivers/target/
 # SQL 驱动宿主内置资产（scripts/prep-drivers.mjs 产出，随安装包打包）

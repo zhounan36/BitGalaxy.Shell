@@ -1,0 +1,27 @@
+[package]
+name = "bgshell-serial"
+version = "0.1.0"
+description = "BitGalaxy 串口工具：本机 COM 口枚举与双工调试（DTR/RTS/Break/热插拔）"
+edition = "2021"
+
+[lib]
+name = "bgshell_serial_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+bg-core = { path = "../../../crates/bg-core" }
+bg-serial = { path = "../../../crates/bg-serial" }
+bg-server = { path = "../../../crates/bg-server" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+# 调试记录落盘（前端收集帧日志，保存对话框定路径后经 IPC 写入）
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync"] }
+futures-util = "0.3"

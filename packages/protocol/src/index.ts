@@ -254,16 +254,16 @@ export type SqlDbType = 'mysql' | 'mariadb' | 'postgres' | 'sqlite'
 /** 数据库连接规格（connect op；密码仅此帧传输一次，后端只存内存） */
 export interface SqlConnSpec {
   type: SqlDbType
-  /** 所属 SSH 主机档案 id（隧道经此主机转发；sqlite 时用于下载文件） */
-  hostId: string
-  /** 远端数据库地址（缺省 127.0.0.1） */
+  /** 历史字段：SSH 隧道时代的主机档案 id（直连后不再使用） */
+  hostId?: string
+  /** 数据库地址（缺省 127.0.0.1） */
   host?: string
-  /** 远端数据库端口（缺省 mysql 3306 / postgres 5432） */
+  /** 数据库端口（缺省 mysql 3306 / postgres 5432） */
   port?: number
   user?: string
   password?: string
   database?: string
-  /** sqlite：远端 .db 文件路径（经 SFTP 下载后本地只读查询） */
+  /** sqlite：本地 .db 文件路径 */
   sqlitePath?: string
   /** 显示名（连接管理器用） */
   name?: string
@@ -279,7 +279,37 @@ export type SqlRequest =
   | { op: 'execute'; connId: string; sql: string; timeoutMs?: number }
   | { op: 'cancel'; queryId: string }
   | { op: 'introspect'; connId: string; scope: 'databases' | 'tables' | 'columns' | 'indexes'; schema?: string; table?: string }
-  | { op: 'fetch-sqlite'; conn: SqlConnSpec; path: string }
+
+/** SQL 连接档案（sql-connections.db 持久化；Navicat 风格连接管理） */
+export interface SqlConnRecord {
+  id: string
+  name: string
+  type: SqlDbType
+  host: string
+  port: number
+  user: string
+  password: string
+  database: string
+  sqlitePath: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** sql-conns 帧请求（op: list/create/update/delete） */
+export type SqlConnsRequest =
+  | { op: 'list' }
+  | { op: 'create'; conn: Omit<SqlConnRecord, 'id' | 'createdAt' | 'updatedAt'> }
+  | { op: 'update'; conn: SqlConnRecord }
+  | { op: 'delete'; id: string }
+
+/** sql-conns 帧回包 */
+export interface SqlConnsResult {
+  op: string
+  ok: boolean
+  conns?: SqlConnRecord[]
+  conn?: SqlConnRecord
+  message?: string
+}
 
 export type SqlOp = SqlRequest & { rid: string }
 
@@ -554,6 +584,7 @@ export type ClientFrame =
   | { t: 'hosts'; m: HostOp }
   | { t: 'sftp'; s: string; m: SftpOp }
   | { t: 'sql'; s: string; m: SqlOp }
+  | { t: 'sql-conns'; m: SqlConnsRequest } // 连接档案 CRUD（sql-conns-result 回包）
   | { t: 'metrics'; s: string; m: { intervalSec: number } } // 0 = 暂停采集
   | { t: 'probe'; m: { hostId: string } }
   | { t: 'test-host'; m: HostInput } // 测试连接：用表单凭据做一次真实 SSH 认证，不落主机档案
@@ -615,6 +646,7 @@ export type ServerFrame =
   | { t: 'serial-ctl-result'; s: string; m: SerialCtlResult }
   | { t: 'sql-result'; s: string; m: SqlResult }
   | { t: 'sql-progress'; s: string; m: SqlProgress }
+  | { t: 'sql-conns-result'; m: SqlConnsResult }
   | { t: 'error'; s?: string; m: { code: string; message: string } }
 
 // ── 数据帧（WS 二进制帧）────────────────────────────────────────────────

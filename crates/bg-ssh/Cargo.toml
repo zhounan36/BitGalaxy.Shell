@@ -1,0 +1,21 @@
+[package]
+name = "bg-ssh"
+version = "0.1.0"
+edition = "2021"
+description = "BitGalaxy Shell SSH 引擎：连接注册表（多通道复用）/PTY 会话/SFTP 传输/拖出下载/远程指标"
+
+[dependencies]
+bg-core = { path = "../bg-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "fs", "process"] }
+futures-util = "0.3"
+# 默认后端 aws-lc-rs 需要 NASM；改用 ring（纯 cc 编译，无额外系统依赖）
+russh = { version = "0.59", default-features = false, features = ["ring", "flate2", "rsa"] }
+# rsa 0.10.0-rc.12 与当前解析的 pkcs8 不兼容（russh 按 rc.10 开发），钉住
+rsa = "=0.10.0-rc.10"
+russh-sftp = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+sha2 = "0.10"
+thiserror = "2"

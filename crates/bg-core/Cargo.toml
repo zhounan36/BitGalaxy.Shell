@@ -1,0 +1,20 @@
+[package]
+name = "bg-core"
+version = "0.1.0"
+edition = "2021"
+description = "BitGalaxy Shell 共享基座：帧协议、出站通道、SQLite 存储层、AI 策略、磁盘预检、统一工具错误"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+uuid = { version = "1", features = ["v4"] }
+# 传输预检：本地磁盘剩余空间（跨平台）
+fs2 = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+# 传输预检：GetVolumeInformationW 查卷格式（FAT32 单文件 4GB 上限）
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
