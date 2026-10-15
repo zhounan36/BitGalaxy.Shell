@@ -63,10 +63,13 @@ export class AgentSocket {
   private connectOnce(): Promise<void> {
     if (this.ready) return Promise.resolve()
     return new Promise((resolve, reject) => {
-      // Tauri 壳宿主（tauri.localhost）与 Agent 不同源：直连本机 Agent 端口；
-      // dev（vite）与浏览器宿主（Agent 内嵌工作台）保持同源。
-      const wsUrl =
-        location.hostname === 'tauri.localhost' || location.protocol === 'tauri:'
+      // 每入口注入的后端端口（各入口 HTML 内嵌 window.__BGSH_WS__="777x"）：
+      // 四 EXE 架构下不同前端入口连不同后端（7777 主程序 / 7771 ssh / 7772 sql / 7773 serial），
+      // dev 与 prod 统一直连。未注入（主入口 index.html）保持原逻辑。
+      const injectedPort = (window as { __BGSH_WS__?: string }).__BGSH_WS__
+      const wsUrl = injectedPort
+        ? `ws://127.0.0.1:${injectedPort}/ws`
+        : location.hostname === 'tauri.localhost' || location.protocol === 'tauri:'
           ? 'ws://127.0.0.1:7777/ws'
           : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
       const ws = new WebSocket(wsUrl)

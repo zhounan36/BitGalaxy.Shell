@@ -1,0 +1,13 @@
+[package]
+name = "bg-serial"
+version = "0.1.0"
+edition = "2021"
+description = "BitGalaxy Shell 串口通道：本机 COM 口枚举与双工会话（kind=serial）"
+
+[dependencies]
+bg-core = { path = "../bg-core" }
+tokio = { version = "1", features = ["io-util", "sync", "time", "macros", "rt"] }
+serde_json = "1"
+# 串口会话（kind="serial"）：serialport 枚举/参数 + tokio-serial 异步读写（SerialStream）
+serialport = "4"
+tokio-serial = "5"

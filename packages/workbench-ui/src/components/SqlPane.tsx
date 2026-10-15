@@ -30,6 +30,7 @@ import {
 } from '@ant-design/icons'
 import type {
   SqlConnSpec,
+  SqlConnRecord,
   SqlDbType,
   SqlOp,
   SqlRequest,
@@ -89,7 +90,7 @@ interface ErrorState {
 /** SQL 数据库管理面板（Navicat 精简版）：连接管理 + 结构树 + 多标签编辑器 +
  *  结果网格 + 表数据/表结构页签 + 执行历史。协议走 agentSocket 控制帧
  *  （t='sql' / 'sql-result' / 'sql-progress'）。 */
-export function SqlPane({ sessionId, hostId }: { sessionId: string; hostId: string }) {
+export function SqlPane({ sessionId }: { sessionId: string }) {
   const [conn, setConn] = useState<ConnState>()
   const [connModalOpen, setConnModalOpen] = useState(false)
   const [lastForm, setLastForm] = useState<Partial<SqlConnFormValues>>()
@@ -181,6 +182,44 @@ export function SqlPane({ sessionId, hostId }: { sessionId: string; hostId: stri
       spec,
     })
     setTreeTick((t) => t + 1)
+  }, [])
+
+  // 已保存连接（sql-connections.db）：挂载拉列表 + 订阅回包（新建/删除后服务端总回最新列表）
+  const [savedConns, setSavedConns] = useState<SqlConnRecord[]>([])
+  useEffect(() => {
+    agentSocket.sendControl({ t: 'sql-conns', m: { op: 'list' } })
+    const off = agentSocket.onControl((frame) => {
+      if (frame.t === 'sql-conns-result' && frame.m.conns) setSavedConns(frame.m.conns)
+    })
+    return off
+  }, [])
+
+  /** 已存连接一键直连 */
+  const connectFromSaved = useCallback(
+    async (rec: SqlConnRecord) => {
+      const spec: SqlConnSpec = {
+        type: rec.type,
+        host: rec.host || undefined,
+        port: rec.port || undefined,
+        user: rec.user || undefined,
+        password: rec.password || undefined,
+        database: rec.database || undefined,
+        sqlitePath: rec.type === 'sqlite' ? rec.sqlitePath || undefined : undefined,
+        name: rec.name,
+      }
+      const r = await request({ op: 'connect', conn: spec }, 180000)
+      if (r.ok) {
+        message.success(`连接成功${r.serverVersion ? `（${r.serverVersion}）` : ''}`)
+        adoptConn(r, spec)
+      } else {
+        message.error(describeSqlError(r.errorKind, r.message).title)
+      }
+    },
+    [request, adoptConn],
+  )
+
+  const deleteSavedConn = useCallback((id: string) => {
+    agentSocket.sendControl({ t: 'sql-conns', m: { op: 'delete', id } })
   }, [])
 
   const doDisconnect = useCallback(async () => {
@@ -514,6 +553,40 @@ export function SqlPane({ sessionId, hostId }: { sessionId: string; hostId: stri
         </Button>
       </div>
 
+      {/* ── 已保存连接（未连接时展示；点击直连，关闭按钮删除档案） ── */}
+      {!conn && savedConns.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '4px 12px',
+            borderBottom: '1px solid var(--border-subtle)',
+            background: 'var(--bg-base)',
+            flexWrap: 'wrap',
+          }}
+        >
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            已保存连接：
+          </Typography.Text>
+          {savedConns.map((c) => (
+            <Tag
+              key={c.id}
+              color="blue"
+              style={{ cursor: 'pointer', marginInlineEnd: 0 }}
+              closable
+              onClose={(e) => {
+                e.preventDefault()
+                deleteSavedConn(c.id)
+              }}
+              onClick={() => void connectFromSaved(c)}
+            >
+              {c.name}
+            </Tag>
+          ))}
+        </div>
+      )}
+
       {/* ── 主体：左结构树 / 右编辑器 + 结果 ── */}
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         <div
@@ -835,7 +908,6 @@ export function SqlPane({ sessionId, hostId }: { sessionId: string; hostId: stri
       {/* ── 新建连接弹窗 ── */}
       <SqlConnModal
         sessionId={sessionId}
-        hostId={hostId}
         open={connModalOpen}
         request={request}
         initialValues={lastForm}

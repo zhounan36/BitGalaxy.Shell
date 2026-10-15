@@ -8,9 +8,9 @@ use russh::keys::{Algorithm, HashAlg, PrivateKeyWithHashAlg, PublicKey};
 use russh::{ChannelMsg, ChannelWriteHalf};
 use tokio::sync::oneshot;
 
-use crate::protocol::{AuthRetryM, HostKeyInfo, HostRecord, ServerFrame};
-use crate::stores::KnownHosts;
-use crate::wire::Outbound;
+use bg_core::protocol::{AuthRetryM, HostKeyInfo, HostRecord, ServerFrame};
+use bg_core::stores::KnownHosts;
+use bg_core::wire::Outbound;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SshError {
@@ -114,7 +114,7 @@ impl Handler for ConnHandler {
                 // 挂起等待 UI 决定；会话关闭（发送端 drop）视为拒绝
                 match rx.await {
                     Ok(true) => {
-                        ctx.known.save(&crate::stores::KnownHostEntry {
+                        ctx.known.save(&bg_core::stores::KnownHostEntry {
                             host: ctx.host.clone(),
                             port: ctx.port,
                             key_type,
@@ -505,7 +505,8 @@ impl PtyShell {
     }
 }
 
-pub(crate) fn collect_text(buf: &mut Vec<u8>, chunk: &[u8], max_bytes: usize, truncated: &mut bool) {
+/// exec 输出聚合（AI 工具层复用，故 pub）
+pub fn collect_text(buf: &mut Vec<u8>, chunk: &[u8], max_bytes: usize, truncated: &mut bool) {
     if buf.len() >= max_bytes {
         *truncated = true;
         return;

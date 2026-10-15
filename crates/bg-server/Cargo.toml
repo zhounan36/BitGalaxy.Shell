@@ -1,0 +1,12 @@
+[package]
+name = "bg-server"
+version = "0.1.0"
+edition = "2021"
+description = "BitGalaxy Shell WS 服务泛化：单端口 /ws 帧通道 + Origin 白名单 + Dispatcher 路由组装"
+
+[dependencies]
+bg-core = { path = "../bg-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "sync"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+serde_json = "1"

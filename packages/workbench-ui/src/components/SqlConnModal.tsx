@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Alert, Form, Input, InputNumber, Modal, Progress, Select, Typography, message } from 'antd'
+import { Alert, Button, Checkbox, Form, Input, InputNumber, Modal, Progress, Select, Space, Typography, message } from 'antd'
 import type { SqlConnSpec, SqlDbType, SqlRequest, SqlResult } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
 import { describeSqlError } from './sqlTypes'
@@ -48,11 +48,10 @@ interface DriverProgress {
   total: number
 }
 
-/** 新建连接弹窗：连接表单 + 驱动下载进度（sql-progress）+ 错误提示。
- *  表单值由 SqlPane 按连接记住（内存，密码不落 localStorage）。 */
+/** 新建连接弹窗：直连表单 + 驱动进度（sql-progress）+ 错误提示 + 保存连接。
+ *  保存的连接落 sql-connections.db（后端 sql-conns 帧），跨启动可用。 */
 export function SqlConnModal({
   sessionId,
-  hostId,
   open,
   request,
   initialValues,
@@ -60,7 +59,6 @@ export function SqlConnModal({
   onConnected,
 }: {
   sessionId: string
-  hostId: string
   open: boolean
   request: (op: SqlRequest, timeoutMs?: number) => Promise<SqlResult>
   initialValues?: Partial<SqlConnFormValues>
@@ -69,8 +67,11 @@ export function SqlConnModal({
 }) {
   const [form, setForm] = useState<SqlConnFormValues>(defaultValues())
   const [connecting, setConnecting] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [saveConn, setSaveConn] = useState(true)
   const [progress, setProgress] = useState<DriverProgress>()
   const [error, setError] = useState<{ title: string; hint?: string }>()
+  const [testOk, setTestOk] = useState<string>()
 
   // 每次打开重置为记忆值（缺省补默认值），连接失败不清空已填内容
   useEffect(() => {
@@ -82,7 +83,12 @@ export function SqlConnModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
-  // 驱动下载 / SQLite 文件下载进度（connect/fetch-sqlite 期间后端推送 sql-progress）
+  // 表单任意字段变化后，上一次测试结果不再可信，自动清除
+  useEffect(() => {
+    setTestOk(undefined)
+  }, [form])
+
+  // 驱动启动进度（connect 期间后端推送 sql-progress）
   useEffect(() => {
     const off = agentSocket.onControl((frame) => {
       if (frame.t !== 'sql-progress' || frame.s !== sessionId) return
@@ -107,10 +113,27 @@ export function SqlConnModal({
     }))
   }
 
-  const doConnect = async () => {
+  // 本地 .db 文件选择（Tauri 原生对话框；浏览器环境降级为手填路径）
+  const browseSqlite = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const picked = await open({
+        title: '选择 SQLite 数据库文件',
+        filters: [{ name: 'SQLite 数据库', extensions: ['db', 'sqlite', 'sqlite3'] }],
+        multiple: false,
+      })
+      if (typeof picked === 'string') {
+        setForm((f) => ({ ...f, sqlitePath: picked }))
+      }
+    } catch {
+      message.warning('当前环境不支持文件选择，请手动输入路径')
+    }
+  }
+
+  /** 从表单构建连接规格；必填项缺失时展示错误并返回 null */
+  const buildSpec = (): SqlConnSpec | null => {
     const spec: SqlConnSpec = {
       type: form.type,
-      hostId,
       host: form.host || undefined,
       port: form.port || undefined,
       user: form.user || undefined,
@@ -120,27 +143,68 @@ export function SqlConnModal({
       name: form.name || undefined,
     }
     if (form.type === 'sqlite' && !spec.sqlitePath) {
-      setError({ title: '请填写远端 SQLite 文件路径' })
-      return
+      setError({ title: '请选择本地 SQLite 文件' })
+      return null
     }
+    if (form.type !== 'sqlite' && !form.host) {
+      setError({ title: '请填写数据库地址' })
+      return null
+    }
+    return spec
+  }
+
+  /** 测试连接：connect 成功即视为可达，展示服务器版本后立即断开清理，不落连接列表 */
+  const doTest = async () => {
+    const spec = buildSpec()
+    if (!spec) return
+    setTesting(true)
+    setError(undefined)
+    setTestOk(undefined)
+    setProgress(undefined)
+    try {
+      const r = await request({ op: 'connect', conn: spec }, 180000)
+      if (r.ok) {
+        setTestOk(`连接成功${r.serverVersion ? `（${r.serverVersion}）` : ''}`)
+        // 测试连接不保留：断开清理（失败不影响测试结论）
+        if (r.connId) {
+          try {
+            await request({ op: 'disconnect', connId: r.connId }, 15000)
+          } catch {
+            /* 清理失败可忽略 */
+          }
+        }
+      } else {
+        setError(describeSqlError(r.errorKind, r.message))
+      }
+    } finally {
+      setTesting(false)
+      setProgress(undefined)
+    }
+  }
+
+  const doConnect = async () => {
+    const spec = buildSpec()
+    if (!spec) return
     setConnecting(true)
     setError(undefined)
     setProgress(undefined)
     try {
-      // SQLite：先经 SFTP 拉取远端 .db 到本地临时文件，再以该文件建立连接
-      let connSpec = spec
-      if (spec.type === 'sqlite') {
-        setProgress({ stage: `下载文件 ${spec.sqlitePath}`, percent: 0, transferred: 0, total: 0 })
-        const f = await request({ op: 'fetch-sqlite', conn: spec, path: spec.sqlitePath ?? '' }, 600000)
-        if (f.ok && f.sqliteRef) {
-          connSpec = { ...spec, sqlitePath: f.sqliteRef }
-        }
-        // fetch 失败不阻断：回退用远端路径直接 connect，由后端裁决
-      }
-      // 驱动已内置安装包（无下载步骤）；宽超时兜底隧道建立与驱动握手
-      const r = await request({ op: 'connect', conn: connSpec }, 180000)
+      // 直连：驱动内置安装包，宽超时兜底网络握手
+      const r = await request({ op: 'connect', conn: spec }, 180000)
       if (r.ok) {
         message.success(`连接成功${r.serverVersion ? `（${r.serverVersion}）` : ''}`)
+        if (saveConn) {
+          agentSocket.sendControl({ t: 'sql-conns', m: { op: 'create', conn: {
+            name: form.name || TYPE_LABELS[form.type],
+            type: form.type,
+            host: form.type === 'sqlite' ? '' : form.host,
+            port: form.type === 'sqlite' ? 0 : form.port,
+            user: form.type === 'sqlite' ? '' : form.user,
+            password: form.type === 'sqlite' ? '' : form.password,
+            database: form.type === 'sqlite' ? '' : form.database,
+            sqlitePath: form.type === 'sqlite' ? form.sqlitePath : '',
+          } } })
+        }
         onConnected(r, spec)
         onClose()
       } else {
@@ -157,10 +221,17 @@ export function SqlConnModal({
       title="新建数据库连接"
       open={open}
       onCancel={onClose}
-      onOk={() => void doConnect()}
-      okText="连接"
-      cancelText="取消"
-      confirmLoading={connecting}
+      footer={[
+        <Button key="test" onClick={() => void doTest()} loading={testing} disabled={connecting}>
+          测试连接
+        </Button>,
+        <Button key="cancel" onClick={onClose} disabled={connecting || testing}>
+          取消
+        </Button>,
+        <Button key="connect" type="primary" onClick={() => void doConnect()} loading={connecting} disabled={testing}>
+          连接
+        </Button>,
+      ]}
       width={460}
       destroyOnHidden
     >
@@ -174,6 +245,9 @@ export function SqlConnModal({
             description={error.hint && <span style={{ whiteSpace: 'pre-wrap' }}>{error.hint}</span>}
           />
         )}
+        {testOk && !error && (
+          <Alert type="success" showIcon style={{ marginBottom: 12 }} message={testOk} />
+        )}
         <Form.Item label="数据库类型" required>
           <Select<SqlDbType>
             value={form.type}
@@ -185,12 +259,15 @@ export function SqlConnModal({
           />
         </Form.Item>
         {form.type === 'sqlite' ? (
-          <Form.Item label="远端 SQLite 文件路径" required>
-            <Input
-              value={form.sqlitePath}
-              onChange={(e) => setForm((f) => ({ ...f, sqlitePath: e.target.value }))}
-              placeholder="/var/lib/app/data.db"
-            />
+          <Form.Item label="本地 SQLite 文件" required>
+            <Space.Compact style={{ width: '100%' }}>
+              <Input
+                value={form.sqlitePath}
+                onChange={(e) => setForm((f) => ({ ...f, sqlitePath: e.target.value }))}
+                placeholder="D:\data\app.db"
+              />
+              <Button onClick={() => void browseSqlite()}>浏览…</Button>
+            </Space.Compact>
           </Form.Item>
         ) : (
           <>
@@ -235,13 +312,16 @@ export function SqlConnModal({
             </Form.Item>
           </>
         )}
-        <Form.Item label="连接名" style={{ marginBottom: connecting ? 12 : 0 }}>
+        <Form.Item label="连接名" style={{ marginBottom: 8 }}>
           <Input
             value={form.name}
             onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
             placeholder={`${TYPE_LABELS[form.type]} 连接`}
           />
         </Form.Item>
+        <Checkbox checked={saveConn} onChange={(e) => setSaveConn(e.target.checked)}>
+          连接成功后保存到连接列表
+        </Checkbox>
       </Form>
       {progress && (
         <div>
@@ -253,7 +333,7 @@ export function SqlConnModal({
             status="active"
             size="small"
             format={(p) =>
-              progress.total > 0 ? `${p}%（${progress.transferred}/${progress.total} 字节）` : '下载中'
+              progress.total > 0 ? `${p}%（${progress.transferred}/${progress.total} 字节）` : '进行中'
             }
           />
         </div>

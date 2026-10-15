@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/capability/2",
+  "identifier": "default",
+  "description": "串口工具主窗默认能力：核心 API + 调试记录保存 + 剪贴板",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://localhost:17177", "http://127.0.0.1:17177"]
+  },
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "dialog:allow-open",
+    "dialog:allow-save"
+  ]
+}

@@ -20,6 +20,12 @@ default = ["pet"]
 pet = ["dep:zip"]
 
 [dependencies]
+bg-core = { path = "../../../crates/bg-core" }
+bg-serial = { path = "../../../crates/bg-serial" }
+bg-ssh = { path = "../../../crates/bg-ssh" }
+bg-sql = { path = "../../../crates/bg-sql" }
+bg-ai = { path = "../../../crates/bg-ai" }
+bg-server = { path = "../../../crates/bg-server" }
 tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
@@ -57,14 +63,4 @@ zip = { version = "2", optional = true }
 # 传输预检：GetVolumeInformationW 查卷格式（FAT32 单文件 4GB 上限）
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
 
-[profile.dev]
-# 编译提速：只保留行号表（跳过变量/完整类型调试信息），MSVC 下 PDB 体积大幅缩小，
-# 依赖树首次编译与 rust-lld 链接都明显加快；panic 回溯仍带行号
-debug = "line-tables-only"
-
-[profile.release]
-# 编译提速（实测增量重建一次 app 改动：fat LTO+cu=1 链接需数分钟 → thin 88s → false 70s）；
-# 关 LTO 后 exe 仅大 0.7MB（体积主要靠 strip），SSH/IO 型应用无跨 crate 内联需求
-# codegen-units 保持默认 16（=1 会把本 crate 代码生成串行化，实测单核 31s）
-lto = false
-strip = true
+# profile（dev 行号表 / release 关 LTO+strip）已上移到根 workspace Cargo.toml

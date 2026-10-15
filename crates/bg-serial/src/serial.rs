@@ -12,7 +12,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio_serial::{SerialPort, SerialStream};
 
-use crate::protocol::{SerialOptions, SerialPortM, SerialSignalsM};
+use bg_core::protocol::{SerialOptions, SerialPortM, SerialSignalsM};
 
 /// 枚举本机串口（serial-ports 帧负载）
 pub fn list_ports() -> Result<Vec<SerialPortM>, String> {

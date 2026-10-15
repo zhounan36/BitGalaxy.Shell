@@ -90,8 +90,6 @@ export function SqlSchemaTree({
   const [selectedKeys, setSelectedKeys] = useState<Key[]>([])
   const [loading, setLoading] = useState(false)
   const [menu, setMenu] = useState<MenuState>()
-  /** 已加载过子节点的 key（刷新时强制重载） */
-  const loadedRef = useRef(new Set<string>())
   const metaRef = useRef(metaOf)
   /** 表节点 → kind（table | view）：双击/右键打开表页签时透传 */
   const tableKindRef = useRef(new Map<string, string | undefined>())
@@ -101,7 +99,6 @@ export function SqlSchemaTree({
     if (!connId) {
       setTreeData([])
       setExpandedKeys([])
-      loadedRef.current.clear()
       return
     }
     setLoading(true)
@@ -119,8 +116,6 @@ export function SqlSchemaTree({
           icon: <DatabaseOutlined />,
         })),
       )
-      loadedRef.current.clear()
-      loadedRef.current.add('root')
       tableKindRef.current.clear()
     } finally {
       setLoading(false)
@@ -239,7 +234,6 @@ export function SqlSchemaTree({
         const next = await loadChildren(key, node ? [node] : [])
         if (next.length === 1) {
           setTreeData((prev) => updateNodeChildren(prev, key, next[0].children ?? []))
-          loadedRef.current.add(key)
         }
       } finally {
         setLoading(false)
@@ -248,32 +242,33 @@ export function SqlSchemaTree({
     [connId, findNode, loadChildren, loadRoot, treeData, updateNodeChildren],
   )
 
-  const onExpand = useCallback(
-    (keys: Key[]) => {
-      setExpandedKeys(keys)
-      // 新展开且未加载的节点：懒加载子节点
-      for (const k of keys) {
-        const key = String(k)
-        if (loadedRef.current.has(key)) continue
-        const meta = metaRef.current(key)
-        if (meta.kind === 'columns') continue
-        loadedRef.current.add(key)
-        void (async () => {
-          setLoading(true)
-          try {
-            const node = findNode(treeData, key)
-            const next = await loadChildren(key, node ? [node] : [])
-            if (next.length === 1) {
-              setTreeData((prev) => updateNodeChildren(prev, key, next[0].children ?? []))
-            }
-          } finally {
-            setLoading(false)
+  /** antd 原生懒加载：无 children 的节点渲染为可展开（箭头），展开时拉取子节点。
+   *  不传 loadData 时 antd 把无 children 节点一律当叶子（无箭头），展开懒加载永不触发
+   *  —— 表现为「连接后点库节点无反应，右键刷新才出表」。 */
+  const loadData = useCallback(
+    (node: { key?: Key }): Promise<void> => {
+      const key = String(node.key ?? '')
+      const meta = metaRef.current(key)
+      if (meta.kind === 'columns') return Promise.resolve()
+      return (async () => {
+        setLoading(true)
+        try {
+          const nd = findNode(treeData, key)
+          const next = await loadChildren(key, nd ? [nd] : [])
+          if (next.length === 1) {
+            setTreeData((prev) => updateNodeChildren(prev, key, next[0].children ?? []))
           }
-        })()
-      }
+        } finally {
+          setLoading(false)
+        }
+      })()
     },
     [findNode, loadChildren, treeData, updateNodeChildren],
   )
+
+  const onExpand = useCallback((keys: Key[]) => {
+    setExpandedKeys(keys)
+  }, [])
 
   /** 双击表节点 = 打开数据页签（Navicat/DBeaver 行为）；双击库节点 = 展开/收起（树默认） */
   const onDoubleClick = useCallback(
@@ -394,6 +389,7 @@ export function SqlSchemaTree({
               treeData={treeData}
               expandedKeys={expandedKeys}
               selectedKeys={selectedKeys}
+              loadData={loadData}
               onExpand={onExpand}
               onSelect={(keys) => setSelectedKeys(keys)}
               onDoubleClick={onDoubleClick}

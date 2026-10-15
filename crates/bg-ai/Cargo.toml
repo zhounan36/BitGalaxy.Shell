@@ -1,0 +1,18 @@
+[package]
+name = "bg-ai"
+version = "0.1.0"
+edition = "2021"
+description = "BitGalaxy Shell AI 引擎：LLM 对话循环 + 工具核心（审批/策略/15 工具）+ MCP stdio 通道"
+
+[dependencies]
+bg-core = { path = "../bg-core" }
+bg-ssh = { path = "../bg-ssh" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "io-util", "io-std", "sync", "fs", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+regex = "1"
+# toolcore exec_with_stdin 直接匹配 ChannelMsg（喂 sudo 密码）
+russh = { version = "0.59", default-features = false, features = ["ring", "flate2", "rsa"] }
+# LLM OpenAI 兼容接口（默认 DeepSeek）：rustls 免 NASM
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

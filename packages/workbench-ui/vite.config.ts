@@ -23,9 +23,8 @@ export default defineConfig({
       '/ws': { target: 'http://127.0.0.1:7777', ws: true },
     },
   },
-  // MPA 双入口：`/` 工作台（index.html）+ `/pet/` 桌宠（pet/index.html，与随包
-  // 分发路径 apps/desktop/ui/pet/ 一致；素材为标准动作包 public/pet-packs/**，
-  // 内置包 pet-packs/builtin-whale，绝对路径 /pet-packs/**）；精简版仅工作台入口
+  // MPA 多入口：`/` 工作台（index.html）+ `/pet/` 桌宠 + `/ssh/` SSH 客户端 + `/sql/` SQL 客户端 + `/serial/` 串口工具
+  // （四 EXE 架构：各入口 HTML 内嵌 window.__BGSH_WS__ 指向后端端口）；精简版仅工作台入口
   build: {
     rollupOptions: {
       input: sshOnly
@@ -33,6 +32,9 @@ export default defineConfig({
         : {
             index: resolve(__dirname, 'index.html'),
             pet: resolve(__dirname, 'pet/index.html'),
+            ssh: resolve(__dirname, 'ssh/index.html'),
+            sql: resolve(__dirname, 'sql/index.html'),
+            serial: resolve(__dirname, 'serial/index.html'),
           },
     },
   },

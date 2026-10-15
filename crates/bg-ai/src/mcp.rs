@@ -11,9 +11,9 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::oneshot;
 
-use crate::policy::AiPolicy;
-use crate::pool::ConnRegistry;
-use crate::stores::Stores;
+use bg_core::policy::AiPolicy;
+use bg_core::stores::Stores;
+use bg_ssh::pool::ConnRegistry;
 use crate::toolcore::{self, ApproveFuture, Approver, ToolCtx, ToolError};
 
 const ELICIT_TIMEOUT_MS: u64 = 120_000;
@@ -104,10 +104,10 @@ pub fn run_stdio(data_dir: &Path) {
 }
 
 async fn run_stdio_async(data_dir: &Path) {
-    let db = crate::db::Db::open(&data_dir.join("bitgalaxy.db"));
+    let db = bg_core::db::Db::open(&data_dir.join("bitgalaxy.db"));
     db.migrate_from_json(data_dir);
     let stores = Stores::open(db);
-    let policy = crate::policy::load_ai_policy(data_dir, &stores);
+    let policy = bg_core::policy::load_ai_policy(data_dir, &stores);
     // MCP stdio 为独立进程：自建注册表实例（与桌面进程代码同源、池各自独立）
     let registry = ConnRegistry::new(stores.clone(), policy.limits.idle_close_sec);
 

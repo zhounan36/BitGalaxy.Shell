@@ -13,15 +13,34 @@ pub type DbResult<T> = Result<T, rusqlite::Error>;
 
 impl Db {
     pub fn open(file: &Path) -> Db {
+        let db = Db::open_raw(file);
+        db.init_schema();
+        db
+    }
+
+    /// 独立域库（如 sql-connections.db / hosts.db / settings.db / chat.db）：
+    /// 只开连接 + WAL，不初始化默认 schema（各域自己建表）
+    pub fn open_domain(file: &Path, schema: &str) -> Db {
+        let db = Db::open_raw(file);
+        db.0
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "PRAGMA busy_timeout = 2000;{schema}"
+            ))
+            .expect("初始化域库 schema 失败");
+        db
+    }
+
+    fn open_raw(file: &Path) -> Db {
         let conn = Connection::open(file).expect("打开 SQLite 数据库失败");
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA journal_size_limit = 67108864;",
+             PRAGMA journal_size_limit = 67108864;
+             PRAGMA busy_timeout = 2000;",
         )
         .ok();
-        let db = Db(Arc::new(Mutex::new(conn)));
-        db.init_schema();
-        db
+        Db(Arc::new(Mutex::new(conn)))
     }
 
     fn init_schema(&self) {

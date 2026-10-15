@@ -1,5 +1,0 @@
-# SQL 驱动宿主层：独立 workspace（不并入 apps/desktop/src-tauri，
-# 避免改变桌面 crate 现有的独立构建方式/target 目录）
-[workspace]
-resolver = "2"
-members = ["host-common", "host-mysql", "host-postgres", "host-sqlite"]

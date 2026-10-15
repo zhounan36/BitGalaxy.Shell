@@ -1,0 +1,30 @@
+# 根 Cargo workspace：「一包四 EXE」架构统一构建入口。
+# - apps/desktop/src-tauri：主程序（AI 基座壳，P1 阶段仍为全量功能）
+# - crates/bg-*：共享 crate（P1b 起分阶段迁入，迁入时补进 members）
+# - drivers/host-*：SQL 驱动宿主（原独立 workspace 并入，共享 target 与依赖缓存）
+[workspace]
+resolver = "2"
+members = [
+    "apps/desktop/src-tauri",
+    "apps/ssh/src-tauri",
+    "apps/sql/src-tauri",
+    "apps/serial/src-tauri",
+    "crates/*",
+    "drivers/host-common",
+    "drivers/host-mysql",
+    "drivers/host-postgres",
+    "drivers/host-sqlite",
+]
+
+# profile 集中在 workspace 根定义（非根成员内的 profile 会被 cargo 忽略并告警）
+[profile.dev]
+# 编译提速：只保留行号表（跳过变量/完整类型调试信息），MSVC 下 PDB 体积大幅缩小，
+# 依赖树首次编译与 rust-lld 链接都明显加快；panic 回溯仍带行号
+debug = "line-tables-only"
+
+[profile.release]
+# 编译提速（实测增量重建一次 app 改动：fat LTO+cu=1 链接需数分钟 → thin 88s → false 70s）；
+# 关 LTO 后 exe 仅大 0.7MB（体积主要靠 strip），SSH/IO 型应用无跨 crate 内联需求
+# codegen-units 保持默认 16（=1 会把本 crate 代码生成串行化，实测单核 31s）
+lto = false
+strip = true

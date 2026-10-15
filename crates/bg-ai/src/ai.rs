@@ -10,12 +10,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use crate::policy::AiPolicy;
-use crate::pool::ConnRegistry;
-use crate::protocol::{AiApprovalM, AiApproveM, AiChatsM, AiConsoleM, AiDeltaM, AiHistoryM, AiInputM, AiResultM, AiStatusM, AiThinkingM, AiToolM, ServerFrame};
-use crate::stores::Stores;
+use bg_core::policy::AiPolicy;
+use bg_core::protocol::{AiApprovalM, AiApproveM, AiAskResultM, AiChatsM, AiConsoleM, AiDeltaM, AiHistoryM, AiInputM, AiResultM, AiStatusM, AiThinkingM, AiToolM, ServerFrame};
+use bg_core::stores::Stores;
+use bg_core::wire::OutHub;
+use bg_ssh::pool::ConnRegistry;
 use crate::toolcore::{self, ApproveFuture, Approver, ToolCtx};
-use crate::wire::OutHub;
 
 const MAX_HISTORY: usize = 40;
 const MAX_TOOL_ROUNDS: usize = 8;
@@ -246,7 +246,7 @@ impl AiHandler {
     }
 
     /// 新 WS 连接注册：AI 帧开始向该连接广播
-    pub fn register_conn(&self, out: crate::wire::Outbound) {
+    pub fn register_conn(&self, out: bg_core::wire::Outbound) {
         self.shared.out.register(out);
     }
 
@@ -619,7 +619,7 @@ impl AiHandler {
             // 缺省按 ssh 处理（远程是主要场景）
             _ => "ssh".to_string(),
         };
-        let proposed = crate::protocol::AiCommandM {
+        let proposed = bg_core::protocol::AiCommandM {
             id: uuid::Uuid::new_v4().to_string(),
             command: command.clone(),
             purpose: s("purpose").filter(|v| !v.is_empty()),
@@ -627,7 +627,7 @@ impl AiHandler {
             host: s("host").filter(|v| !v.is_empty()),
         };
         self.shared.out.send_frame(&ServerFrame::AiCommands {
-            m: crate::protocol::AiCommandsM {
+            m: bg_core::protocol::AiCommandsM {
                 chat_id: chat_id.to_string(),
                 commands: vec![proposed],
             },

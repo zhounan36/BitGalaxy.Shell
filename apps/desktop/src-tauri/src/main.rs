@@ -7,7 +7,7 @@
 fn main() {
     if std::env::args().any(|a| a == "--mcp-stdio") || std::env::var("BGSH_MCP").as_deref() == Ok("stdio") {
         let data_dir = bgshell_desktop_lib::resolve_data_dir();
-        bgshell_desktop_lib::mcp::run_stdio(&data_dir);
+        bg_ai::mcp::run_stdio(&data_dir);
         return;
     }
     bgshell_desktop_lib::run()
