@@ -344,8 +344,101 @@ impl AiHandler {
                 });
                 self.shared.turns.lock().unwrap().insert(chat_id, handle);
             }
+            // 一次性问答（SQL 终端右键 AI 等场景）：无对话历史、无工具、
+            // 不落库，reqId 关联回包（ai-ask-result）——与 chat 轮次互不干扰
+            "ask" => {
+                let req_id = m.get("reqId").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let text = m.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let system = m
+                    .get("system")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.to_string());
+                if req_id.is_empty() || text.trim().is_empty() {
+                    return;
+                }
+                let this = self.clone();
+                tokio::spawn(async move {
+                    this.run_ask(req_id, text, system).await;
+                });
+            }
             _ => {}
         }
+    }
+
+    /// 一次性问答：单次 LLM 补全（system 可由调用方指定），结果按 reqId 广播
+    async fn run_ask(&self, req_id: String, text: String, system: Option<String>) {
+        let fail = |message: String| {
+            ServerFrame::AiAskResult {
+                m: AiAskResultM {
+                    req_id: req_id.clone(),
+                    ok: false,
+                    text: String::new(),
+                    message: Some(message),
+                },
+            }
+        };
+        let Some(cfg) = load_ai_config(&self.shared.stores) else {
+            self.shared.out.send_frame(&fail(
+                "还没有配置 AI 服务：在主程序「设置 → AI 助手」填写 API Key 后重试（也可设置环境变量 DEEPSEEK_API_KEY）".into(),
+            ));
+            return;
+        };
+        let mut messages = Vec::new();
+        if let Some(sys) = system {
+            messages.push(LlmMessage {
+                role: "system".into(),
+                content: Some(sys),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+        messages.push(LlmMessage {
+            role: "user".into(),
+            content: Some(text),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        let client = match reqwest::Client::builder().timeout(Duration::from_secs(120)).build() {
+            Ok(c) => c,
+            Err(e) => {
+                self.shared.out.send_frame(&fail(e.to_string()));
+                return;
+            }
+        };
+        let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+        let body = serde_json::json!({ "model": cfg.model, "messages": messages });
+        let resp = match client.post(&url).bearer_auth(&cfg.api_key).json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                self.shared.out.send_frame(&fail(format!("AI 服务请求失败: {e}")));
+                return;
+            }
+        };
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let detail = resp.text().await.unwrap_or_default();
+            self.shared
+                .out
+                .send_frame(&fail(format!("AI 服务返回 {status}: {}", truncate(&detail, 300))));
+            return;
+        }
+        let data: serde_json::Value = match resp.json().await {
+            Ok(d) => d,
+            Err(e) => {
+                self.shared.out.send_frame(&fail(format!("AI 服务返回解析失败: {e}")));
+                return;
+            }
+        };
+        // 只取最终文本（一次性问答不消费 reasoning）
+        let content = data
+            .pointer("/choices/0/message/content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        self.shared.out.send_frame(&ServerFrame::AiAskResult {
+            m: AiAskResultM { req_id, ok: true, text: content, message: None },
+        });
     }
 
     /// 终止单条执行中的命令：select 唤醒 → 工具返回「已终止」→
