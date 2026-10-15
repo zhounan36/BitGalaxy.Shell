@@ -57,3 +57,5 @@ Desktop.ini
 $RECYCLE.BIN/
 apps/desktop/ui/pet/assets/**
 apps/desktop/ui/assets/
+apps/serial/ui/assets/
+**/assets/**

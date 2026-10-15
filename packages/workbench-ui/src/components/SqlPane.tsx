@@ -383,6 +383,14 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
     [tabs, handleRun],
   )
 
+  /** 结构树库节点「新建查询」：新建查询页签并聚焦 */
+  const newQueryTab = useCallback(() => {
+    tabSeqRef.current += 1
+    const key = `sql-${tabSeqRef.current}`
+    setTabs((prev) => [...prev, { key, kind: 'query' as const, title: `查询 ${tabSeqRef.current}`, sql: '' }])
+    setActiveTab(key)
+  }, [])
+
   // 编辑器面板（每个标签一个实例，切换标签即时保存草稿）
   const editorPane = useMemo(
     () => (
@@ -390,9 +398,10 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
         value={activeSql}
         onChange={setActiveSql}
         onRun={(text) => handleRun(text)}
+        dbType={conn?.type}
       />
     ),
-    [activeSql, setActiveSql, handleRun],
+    [activeSql, setActiveSql, handleRun, conn],
   )
 
   /** 页签 label：查询=纯文本；表数据/结构=图标 + 表名（悬浮完整限定名） */
@@ -607,6 +616,7 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
             request={request}
             onRunSql={runSqlFromTree}
             onOpenTable={openTableTab}
+            onNewQuery={newQueryTab}
             onError={(title, hint) => {
               setQueryError({ title, hint })
               message.error(title)
