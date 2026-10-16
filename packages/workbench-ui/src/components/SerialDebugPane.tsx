@@ -1,13 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Badge, Button, Collapse, Input, InputNumber, Select, Space, Switch, Tag, Tooltip, message } from 'antd'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { Badge, Button, Collapse, Input, InputNumber, Menu, Modal, Select, Space, Switch, Tag, Tooltip, message } from 'antd'
+import type { MenuProps } from 'antd'
 import {
   CaretRightOutlined,
   ClearOutlined,
+  CopyOutlined,
+  DeleteOutlined,
   DownloadOutlined,
+  EditOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   RightOutlined,
+  RobotOutlined,
 } from '@ant-design/icons'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -18,6 +23,10 @@ import {
   type SerialSignals,
 } from '@bgshell/protocol'
 import { agentSocket } from '../api/ws'
+import { askAi } from '../api/askAi'
+import { requestAiAsk } from '../api/aiBridge'
+import { readClipboardText, writeClipboardText } from '../api/clipboard'
+import { SERIAL_AI_SYSTEM, SerialAiModal } from './SerialAiModal'
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -132,6 +141,40 @@ export function SerialDebugPane({ sessionId, portName, baudRate, initDtr, initRt
     rxWin: [] as Array<[number, number]>, // [ts, len]
     txWin: [] as Array<[number, number]>,
   })
+  // ── 控制台右键菜单（term-menu，快照选区打开时定格）─────────────────────────
+  const [termMenu, setTermMenu] = useState<{
+    x: number
+    y: number
+    hasSelection: boolean
+    selText: string | null
+  } | null>(null)
+  // 问 AI 卡片（term-ask-card 浮层）：选区快照 + 用户问题
+  const [ask, setAsk] = useState<{ selection: string; question: string } | null>(null)
+  // ── Hex 条目 / 预设条目右键（antd Menu + 共享遮罩）─────────────────────────
+  const [entryMenu, setEntryMenu] = useState<{ x: number; y: number; entry: MonitorEntry }>()
+  const [presetMenu, setPresetMenu] = useState<{ x: number; y: number; preset: SendPreset }>()
+  // ── AI 结果弹窗（parse/generate 两动作共用）+ 序号防串台 ───────────────────
+  const [ai, setAi] = useState<{
+    action: 'parse' | 'generate'
+    loading: boolean
+    text?: string
+    error?: string
+    /** 生成动作发起时用户选的行尾（回填发送框时用） */
+    genEnding?: SendPreset['ending']
+  }>()
+  const aiSeqRef = useRef(0)
+  // AI 生成指令输入弹窗
+  const [genOpen, setGenOpen] = useState(false)
+  const [genDesc, setGenDesc] = useState('')
+  const [genHex, setGenHex] = useState(false)
+  const [genEnding, setGenEnding] = useState<SendPreset['ending']>('cr')
+  const [genWithContext, setGenWithContext] = useState(true)
+  // 预设编辑弹窗（编辑期间持有拷贝，保存时按 id 替换）
+  const [editPreset, setEditPreset] = useState<SendPreset | null>(null)
+
+  /** 单条收发记录的日志行格式（「复制整行」与记录导出共用） */
+  const formatLogLine = (e: MonitorEntry): string =>
+    `${fmtTime(e.ts)} ${e.dir.toUpperCase()}  ${toHex(e.data, 4096)}  ${toAscii(e.data, 4096)}`
 
   const pushEntry = useCallback((dir: 'rx' | 'tx', data: Uint8Array) => {
     if (pausedRef.current && dir === 'rx') return
@@ -351,9 +394,7 @@ export function SerialDebugPane({ sessionId, portName, baudRate, initDtr, initRt
       message.info('本次记录没有捕获到数据')
       return
     }
-    const text = log
-      .map((e) => `${fmtTime(e.ts)} ${e.dir.toUpperCase()}  ${toHex(e.data, 4096)}  ${toAscii(e.data, 4096)}`)
-      .join('\r\n')
+    const text = log.map(formatLogLine).join('\r\n')
     void (async () => {
       if (isTauri) {
         const { save } = await import('@tauri-apps/plugin-dialog')
@@ -381,6 +422,216 @@ export function SerialDebugPane({ sessionId, portName, baudRate, initDtr, initRt
     if (paused || !monitorRef.current) return
     monitorRef.current.scrollTop = monitorRef.current.scrollHeight
   }, [entries, paused])
+
+  // ── 控制台右键菜单 ─────────────────────────────────────────────────────
+  // 菜单打开期间：点击菜单外 / Esc / 滚动 / 窗口失焦或缩放 → 关闭（仿 TerminalPane）
+  useEffect(() => {
+    if (!termMenu) return
+    const close = () => setTermMenu(null)
+    const onMouseDown = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement | null)?.closest('.term-menu')) close()
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close()
+    }
+    window.addEventListener('mousedown', onMouseDown, true)
+    window.addEventListener('keydown', onKeyDown, true)
+    window.addEventListener('wheel', close, { capture: true, passive: true })
+    window.addEventListener('blur', close)
+    window.addEventListener('resize', close)
+    return () => {
+      window.removeEventListener('mousedown', onMouseDown, true)
+      window.removeEventListener('keydown', onKeyDown, true)
+      window.removeEventListener('wheel', close, true)
+      window.removeEventListener('blur', close)
+      window.removeEventListener('resize', close)
+    }
+  }, [termMenu])
+
+  const termMenuStyle: CSSProperties | undefined = termMenu
+    ? {
+        left: Math.max(8, Math.min(termMenu.x, window.innerWidth - 200)),
+        top: Math.max(8, Math.min(termMenu.y, window.innerHeight - 300)),
+      }
+    : undefined
+
+  /** 复制选区（右键菜单）：写剪贴板后清选区回焦点 */
+  const copySelection = () => {
+    const sel = termRef.current?.getSelection()
+    if (sel) void writeClipboardText(sel).then(() => message.success('已复制'))
+    termRef.current?.clearSelection()
+    termRef.current?.focus()
+    setTermMenu(null)
+  }
+
+  /** 粘贴即发送：term.paste 触发 onData → sendInput，tx 记录/统计/本地回显走全链路 */
+  const pasteFromClipboard = async () => {
+    try {
+      const text = await readClipboardText()
+      if (text) termRef.current?.paste(text)
+    } catch {
+      /* 剪贴板权限异常：静默 */
+    }
+    termRef.current?.focus()
+    setTermMenu(null)
+  }
+
+  /** 问 AI 提交（控制台选区 + 问题 → AiSidebar 对话面板） */
+  const submitAsk = () => {
+    if (!ask || !ask.question.trim()) return
+    void requestAiAsk({
+      hostName: `${portName}@${baud}`,
+      selection: ask.selection,
+      question: ask.question.trim(),
+    })
+    setAsk(null)
+    message.success('已发给 AI，回答在右侧 AI 助手查看')
+  }
+
+  // ── AI 动作（askAi 一次性问答，序号防串台：旧请求回包丢弃）──────────────
+  const startAiParse = (entry: MonitorEntry) => {
+    const seq = ++aiSeqRef.current
+    setAi({ action: 'parse', loading: true })
+    const dir = entry.dir === 'rx' ? '接收（RX，设备 → 主机）' : '发送（TX，主机 → 设备）'
+    const prompt =
+      `请分析下面这条串口数据：逐字节标注偏移与含义，判断协议类型与帧结构` +
+      `（帧头/长度域/命令字/数据域/校验），若存在校验字节请指出疑似校验算法（如异或/累加和/CRC8/CRC16-Modbus）与计算范围；` +
+      `若是 ASCII 行协议、AT 指令或 NMEA 语句请说明语义。\n\n` +
+      `上下文：${dir}，时间 ${fmtTime(entry.ts)}，共 ${entry.data.length} 字节${entry.data.length > 1024 ? '（超长已截断）' : ''}。\n` +
+      `HEX：\n${toHex(entry.data, 1024)}\n\n` +
+      `ASCII：\n${toAscii(entry.data, 1024)}`
+    void askAi(prompt, SERIAL_AI_SYSTEM).then((r) => {
+      if (seq !== aiSeqRef.current) return
+      setAi((prev) =>
+        prev
+          ? {
+              ...prev,
+              loading: false,
+              text: r.ok ? r.text : undefined,
+              error: r.ok ? undefined : r.message ?? 'AI 请求失败，请重试',
+            }
+          : prev,
+      )
+    })
+  }
+
+  /** AI 生成指令（输入弹窗收集需求 → 生成 → SerialAiModal 展示 → 填入发送框） */
+  const startAiGenerate = () => {
+    const desc = genDesc.trim()
+    if (!desc) return
+    setGenOpen(false)
+    const seq = ++aiSeqRef.current
+    const ending = genEnding
+    setAi({ action: 'generate', loading: true, genEnding: ending })
+    let context = ''
+    if (genWithContext && entries.length > 0) {
+      const lines = entries.slice(-6).map((e) => {
+        const hex = toHex(e.data, 64)
+        return `[${fmtTime(e.ts)}] ${e.dir.toUpperCase()} ${hex}${e.data.length > 64 ? '…' : ''}`
+      })
+      context = `\n\n最近收发数据（供参考的设备行为，判断指令格式与响应习惯用）：\n${lines.join('\n').slice(0, 2000)}`
+    }
+    const prompt =
+      `请生成一条可直接通过串口发送的指令。\n\n` +
+      `需求：${desc}\n` +
+      `输出格式：${genHex ? '十六进制字节串，字节间用空格分隔（如 a1 b2 0d）' : '纯文本'}。\n` +
+      `注意：不要包含行尾字符（CR/LF），发送时会按行尾设置自动追加。${context}\n\n` +
+      `只输出指令本身：${genHex ? '务必用 ```hex 代码块' : '用 ```text 代码块'}给出，不要任何解释。`
+    void askAi(prompt, SERIAL_AI_SYSTEM).then((r) => {
+      if (seq !== aiSeqRef.current) return
+      setAi((prev) =>
+        prev
+          ? {
+              ...prev,
+              loading: false,
+              text: r.ok ? r.text : undefined,
+              error: r.ok ? undefined : r.message ?? 'AI 请求失败，请重试',
+            }
+          : prev,
+      )
+    })
+  }
+
+  /** AI 生成结果填入发送框（内容 + hex 开关 + 行尾三态联动） */
+  const insertGenerated = (b: { content: string; hex: boolean }) => {
+    setDraft(b.content)
+    setDraftHex(b.hex)
+    setDraftEnding(ai?.genEnding ?? 'cr')
+    setAi(undefined)
+    message.success('已填入发送框')
+  }
+
+  // ── Hex 条目 / 预设条目右键（antd Menu + 共享遮罩）──────────────────────
+  const closeMenus = () => {
+    setEntryMenu(undefined)
+    setPresetMenu(undefined)
+  }
+
+  const entryMenuItems: MenuProps['items'] = useMemo(() => {
+    if (!entryMenu) return []
+    return [
+      { key: 'hex', icon: <CopyOutlined />, label: '复制 Hex' },
+      { key: 'ascii', icon: <CopyOutlined />, label: '复制 ASCII' },
+      { key: 'line', icon: <CopyOutlined />, label: '复制整行日志' },
+      { key: 'ts', icon: <CopyOutlined />, label: '复制时间戳' },
+      { type: 'divider' as const },
+      { key: 'ai', icon: <RobotOutlined />, label: 'AI 解析此数据' },
+    ]
+  }, [entryMenu])
+
+  const onEntryMenuClick: MenuProps['onClick'] = ({ key }) => {
+    if (!entryMenu) return
+    const e = entryMenu.entry
+    let text = ''
+    if (key === 'hex') text = toHex(e.data, 4096)
+    else if (key === 'ascii') text = toAscii(e.data, 4096)
+    else if (key === 'line') text = formatLogLine(e)
+    else if (key === 'ts') text = fmtTime(e.ts)
+    else if (key === 'ai') {
+      closeMenus()
+      startAiParse(e)
+      return
+    }
+    closeMenus()
+    if (text) void writeClipboardText(text).then(() => message.success('已复制'))
+  }
+
+  const presetMenuItems: MenuProps['items'] = useMemo(() => {
+    if (!presetMenu) return []
+    return [
+      { key: 'send', icon: <CaretRightOutlined />, label: '立即发送' },
+      { key: 'edit', icon: <EditOutlined />, label: '编辑预设' },
+      { key: 'copy', icon: <CopyOutlined />, label: '复制内容' },
+      { key: 'ai', icon: <RobotOutlined />, label: 'AI 生成指令' },
+      { type: 'divider' as const },
+      { key: 'del', icon: <DeleteOutlined />, label: '删除', danger: true },
+    ]
+  }, [presetMenu])
+
+  const onPresetMenuClick: MenuProps['onClick'] = ({ key }) => {
+    if (!presetMenu) return
+    const p = presetMenu.preset
+    closeMenus()
+    if (key === 'send') sendPreset(p)
+    else if (key === 'edit') setEditPreset({ ...p })
+    else if (key === 'copy') void writeClipboardText(p.content).then(() => message.success('已复制'))
+    else if (key === 'ai') setGenOpen(true)
+    else if (key === 'del') {
+      savePresets(presets.filter((x) => x.id !== p.id))
+      message.success(`已删除预设「${p.label}」`)
+    }
+  }
+
+  /** 保存预设编辑（hex 内容先经 encodePayload 试算校验） */
+  const saveEditPreset = () => {
+    if (!editPreset) return
+    if (editPreset.hex && !encodePayload(editPreset.content, true, 'none')) {
+      message.warning('Hex 内容格式不正确（需偶数个十六进制字符）')
+      return
+    }
+    savePresets(presets.map((x) => (x.id === editPreset.id ? editPreset : x)))
+    setEditPreset(null)
+  }
 
   const filtered = useMemo(
     () => (dirFilter === 'all' ? entries : entries.filter((e) => e.dir === dirFilter)),
@@ -428,9 +679,111 @@ export function SerialDebugPane({ sessionId, portName, baudRate, initDtr, initRt
         </Space>
       </div>
 
-      {/* 双栏：控制台 + 折叠调试面板 */}
-      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        <div ref={hostRef} style={{ flex: 1, minWidth: 0, background: '#081018' }} />
+      {/* 双栏：控制台 + 折叠调试面板（relative 作问 AI 卡片的 absolute 锚点） */}
+      <div style={{ display: 'flex', flex: 1, minHeight: 0, position: 'relative' }}>
+        <div
+          ref={hostRef}
+          style={{ flex: 1, minWidth: 0, background: '#081018' }}
+          onContextMenu={(e) => {
+            // 右键菜单：快照当前选区（打开期间选区可能消失），替换 WebView 默认菜单
+            e.preventDefault()
+            const sel = termRef.current?.getSelection()
+            setTermMenu({
+              x: e.clientX,
+              y: e.clientY,
+              hasSelection: !!sel,
+              // 选区快照截断到 8000 字符（问 AI 附带日志足够；太长会撑爆对话上下文）
+              selText: sel ? sel.replace(/\s+$/, '').slice(0, 8000) : null,
+            })
+          }}
+        />
+        {termMenu && (
+          <div className="term-menu" style={termMenuStyle} onContextMenu={(e) => e.preventDefault()}>
+            <button
+              type="button"
+              className="term-menu-item"
+              disabled={!termMenu.hasSelection}
+              onClick={copySelection}
+            >
+              <span>复制</span>
+              <span className="term-menu-key">Ctrl+Shift+C</span>
+            </button>
+            <button
+              type="button"
+              className="term-menu-item"
+              disabled={!termMenu.hasSelection}
+              title={termMenu.hasSelection ? '把所选数据/日志连同问题发给 AI 助手' : '先框选一段数据/日志'}
+              onClick={() => {
+                const sel = termMenu.selText
+                setTermMenu(null)
+                if (sel) setAsk({ selection: sel, question: '' })
+              }}
+            >
+              <span>问 AI</span>
+              <span className="term-menu-key">选区</span>
+            </button>
+            <button type="button" className="term-menu-item" onClick={() => void pasteFromClipboard()}>
+              <span>粘贴并发送</span>
+              <span className="term-menu-key">Ctrl+Shift+V</span>
+            </button>
+            <div className="term-menu-sep" />
+            <button
+              type="button"
+              className="term-menu-item"
+              onClick={() => {
+                termRef.current?.selectAll()
+                setTermMenu({ ...termMenu, hasSelection: true })
+              }}
+            >
+              <span>全选</span>
+              <span className="term-menu-key">Ctrl+Shift+A</span>
+            </button>
+            <button
+              type="button"
+              className="term-menu-item"
+              onClick={() => {
+                termRef.current?.clear()
+                termRef.current?.focus()
+                setTermMenu(null)
+              }}
+            >
+              <span>清屏</span>
+              <span className="term-menu-key">只清控制台，Hex 监视保留</span>
+            </button>
+          </div>
+        )}
+        {ask && (
+          <div className="term-ask-card">
+            <div className="term-drop-card-head">
+              <span className="term-drop-card-title">问 AI（附上控制台选区）</span>
+              <button type="button" className="term-drop-card-close" aria-label="取消" onClick={() => setAsk(null)}>
+                ×
+              </button>
+            </div>
+            <div className="term-ask-sel" title={ask.selection}>
+              {ask.selection.length > 400 ? `${ask.selection.slice(0, 400)}…` : ask.selection}
+            </div>
+            <textarea
+              className="term-ask-input"
+              autoFocus
+              rows={2}
+              placeholder="输入你的问题：回车发送，Shift+回车换行，Esc 取消"
+              value={ask.question}
+              onChange={(e) => setAsk({ ...ask, question: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  submitAsk()
+                } else if (e.key === 'Escape') {
+                  setAsk(null)
+                }
+              }}
+            />
+            <button type="button" className="term-ask-send" disabled={!ask.question.trim()} onClick={submitAsk}>
+              发送给 AI
+            </button>
+          </div>
+        )}
         {panelOpen && (
           <div
             style={{
@@ -489,6 +842,10 @@ export function SerialDebugPane({ sessionId, portName, baudRate, initDtr, initRt
                               padding: '3px 8px',
                               borderBottom: '1px solid var(--border-subtle)',
                               borderLeft: `3px solid ${e.dir === 'rx' ? 'var(--accent)' : 'var(--warning)'}`,
+                            }}
+                            onContextMenu={(ev) => {
+                              ev.preventDefault()
+                              setEntryMenu({ x: ev.clientX, y: ev.clientY, entry: e })
                             }}
                           >
                             <span style={{ color: 'var(--text-muted)' }}>{fmtTime(e.ts)}</span>{' '}
@@ -557,6 +914,11 @@ export function SerialDebugPane({ sessionId, portName, baudRate, initDtr, initRt
                         <Button size="small" onClick={savePreset}>
                           存为预设
                         </Button>
+                        <Tooltip title="描述需求，AI 生成可发送的指令（hex 或文本）并填入发送框">
+                          <Button size="small" icon={<RobotOutlined />} onClick={() => setGenOpen(true)}>
+                            AI 生成
+                          </Button>
+                        </Tooltip>
                       </div>
                       <Space direction="vertical" style={{ width: '100%' }} size={4}>
                         {presets.map((p) => (
@@ -569,6 +931,10 @@ export function SerialDebugPane({ sessionId, portName, baudRate, initDtr, initRt
                               padding: '4px 8px',
                               background: 'var(--bg-raised)',
                               borderRadius: 4,
+                            }}
+                            onContextMenu={(ev) => {
+                              ev.preventDefault()
+                              setPresetMenu({ x: ev.clientX, y: ev.clientY, preset: p })
                             }}
                           >
                             <Tag color={p.hex ? 'purple' : 'blue'} style={{ marginInlineEnd: 0 }}>
@@ -651,6 +1017,151 @@ export function SerialDebugPane({ sessionId, portName, baudRate, initDtr, initRt
           </div>
         )}
       </div>
+
+      {/* ── Hex 条目 / 预设条目右键（antd Menu + 共享遮罩）───────────────── */}
+      {(entryMenu || presetMenu) && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 1049 }}
+            onClick={closeMenus}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              closeMenus()
+            }}
+          />
+          {entryMenu && (
+            <Menu
+              items={entryMenuItems}
+              onClick={onEntryMenuClick}
+              style={{
+                position: 'fixed',
+                // 面板在窗口右侧 420px：钳制防溢出屏幕
+                left: Math.max(8, Math.min(entryMenu.x, window.innerWidth - 220)),
+                top: Math.max(8, Math.min(entryMenu.y, window.innerHeight - 260)),
+                zIndex: 1050,
+                border: '1px solid var(--border)',
+              }}
+            />
+          )}
+          {presetMenu && (
+            <Menu
+              items={presetMenuItems}
+              onClick={onPresetMenuClick}
+              style={{
+                position: 'fixed',
+                left: Math.max(8, Math.min(presetMenu.x, window.innerWidth - 220)),
+                top: Math.max(8, Math.min(presetMenu.y, window.innerHeight - 260)),
+                zIndex: 1050,
+                border: '1px solid var(--border)',
+              }}
+            />
+          )}
+        </>
+      )}
+
+      {/* ── 预设编辑弹窗 ─────────────────────────────────────────────────── */}
+      <Modal
+        title="编辑预设"
+        open={!!editPreset}
+        onCancel={() => setEditPreset(null)}
+        onOk={saveEditPreset}
+        okText="保存"
+        cancelText="取消"
+        width={520}
+      >
+        {editPreset && (
+          <Space direction="vertical" style={{ width: '100%' }} size={8}>
+            <Input
+              placeholder="预设标签"
+              value={editPreset.label}
+              onChange={(e) => setEditPreset({ ...editPreset, label: e.target.value })}
+            />
+            <Input.TextArea
+              rows={2}
+              value={editPreset.content}
+              onChange={(e) => setEditPreset({ ...editPreset, content: e.target.value })}
+              placeholder={editPreset.hex ? '十六进制字节，如 a1 b2 0d' : '要发送的文本'}
+              style={{ fontFamily: 'Consolas, monospace' }}
+            />
+            <Space size={4} wrap>
+              <Switch size="small" checked={editPreset.hex} onChange={(v) => setEditPreset({ ...editPreset, hex: v })} />
+              <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Hex</span>
+              <Select
+                size="small"
+                value={editPreset.ending}
+                onChange={(v) => setEditPreset({ ...editPreset, ending: v })}
+                style={{ width: 96 }}
+                options={[
+                  { value: 'none', label: '无行尾' },
+                  { value: 'cr', label: 'CR' },
+                  { value: 'lf', label: 'LF' },
+                  { value: 'crlf', label: 'CRLF' },
+                ]}
+              />
+            </Space>
+          </Space>
+        )}
+      </Modal>
+
+      {/* ── AI 生成指令输入弹窗 ───────────────────────────────────────────── */}
+      <Modal
+        title="AI 生成发送指令"
+        open={genOpen}
+        onCancel={() => setGenOpen(false)}
+        onOk={startAiGenerate}
+        okText="生成"
+        cancelText="取消"
+        okButtonProps={{ disabled: !genDesc.trim() }}
+        width={560}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size={8}>
+          <Input.TextArea
+            autoFocus
+            rows={3}
+            value={genDesc}
+            onChange={(e) => setGenDesc(e.target.value)}
+            placeholder="例如：Modbus RTU 读保持寄存器：从站 1，起始 0x0000，读 2 个；或：发送 AT+RST 重启设备"
+          />
+          <Space size={4} wrap>
+            <Select
+              size="small"
+              value={genHex ? 'hex' : 'text'}
+              onChange={(v) => setGenHex(v === 'hex')}
+              style={{ width: 100 }}
+              options={[
+                { value: 'hex', label: 'HEX 字节' },
+                { value: 'text', label: '文本' },
+              ]}
+            />
+            <Select
+              size="small"
+              value={genEnding}
+              onChange={setGenEnding}
+              style={{ width: 96 }}
+              options={[
+                { value: 'none', label: '无行尾' },
+                { value: 'cr', label: 'CR' },
+                { value: 'lf', label: 'LF' },
+                { value: 'crlf', label: 'CRLF' },
+              ]}
+            />
+            <Switch size="small" checked={genWithContext} onChange={setGenWithContext} />
+            <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>附最近收发数据（帮助 AI 判断指令格式）</span>
+          </Space>
+        </Space>
+      </Modal>
+
+      {/* ── AI 结果弹窗（解析数据帧 / 生成指令共用）────────────────────────── */}
+      <SerialAiModal
+        open={!!ai}
+        title={ai?.action === 'parse' ? 'AI 解析数据帧' : 'AI 生成指令'}
+        loading={ai?.loading}
+        error={ai?.error}
+        text={ai?.text}
+        autoCopy={ai?.action === 'generate'}
+        onInsert={ai?.action === 'generate' ? insertGenerated : undefined}
+        onClose={() => setAi(undefined)}
+      />
     </div>
   )
 }
