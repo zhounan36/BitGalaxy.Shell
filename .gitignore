@@ -54,6 +54,7 @@ coverage/
 sea.blob
 
 # 编辑器
+.trae/
 .idea/
 .vscode/*
 !.vscode/extensions.json
