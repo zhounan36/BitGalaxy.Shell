@@ -114,11 +114,10 @@ Section "-核心程序" SecCore
   ${EndIf}
   Delete "$INSTDIR\MicrosoftEdgeWebview2Setup.exe"
 
-  ; 开始菜单 + 桌面快捷方式（核心）
+  ; 开始菜单（主程序 + 卸载入口；桌面快捷方式按所选组件在各组件节创建）
   CreateDirectory "$SMPROGRAMS\BitGalaxy Shell"
   CreateShortcut "$SMPROGRAMS\BitGalaxy Shell\BitGalaxy Shell.lnk" "$INSTDIR\bgshell-desktop.exe"
   CreateShortcut "$SMPROGRAMS\BitGalaxy Shell\卸载 BitGalaxy Shell.lnk" "$INSTDIR\uninstall.exe"
-  CreateShortcut "$DESKTOP\BitGalaxy Shell.lnk" "$INSTDIR\bgshell-desktop.exe"
 
   ; 注册表：安装目录记忆（升级沿用）+ 卸载项
   WriteRegStr HKCU "Software\BitGalaxy Shell" "InstallDir" "$INSTDIR"
@@ -139,12 +138,14 @@ Section "SSH 终端" SecSSH
   SetOutPath "$INSTDIR"
   File "${PACKDIR}\bgshell-ssh.exe"
   CreateShortcut "$SMPROGRAMS\BitGalaxy Shell\SSH 终端.lnk" "$INSTDIR\bgshell-ssh.exe"
+  CreateShortcut "$DESKTOP\SSH 终端.lnk" "$INSTDIR\bgshell-ssh.exe"
 SectionEnd
 
 Section "SQL 客户端（含数据库驱动）" SecSQL
   SetOutPath "$INSTDIR"
   File "${PACKDIR}\bgshell-sql.exe"
   CreateShortcut "$SMPROGRAMS\BitGalaxy Shell\SQL 客户端.lnk" "$INSTDIR\bgshell-sql.exe"
+  CreateShortcut "$DESKTOP\SQL 客户端.lnk" "$INSTDIR\bgshell-sql.exe"
   SetOutPath "$INSTDIR\drivers"
   File /r "${PACKDIR}\drivers\*.*"
 SectionEnd
@@ -153,6 +154,7 @@ Section "串口调试" SecSerial
   SetOutPath "$INSTDIR"
   File "${PACKDIR}\bgshell-serial.exe"
   CreateShortcut "$SMPROGRAMS\BitGalaxy Shell\串口调试.lnk" "$INSTDIR\bgshell-serial.exe"
+  CreateShortcut "$DESKTOP\串口调试.lnk" "$INSTDIR\bgshell-serial.exe"
 SectionEnd
 
 !ifndef NO_PET
@@ -189,6 +191,7 @@ Section "un.SSH 终端" unSecSSH
   IfFileExists "$INSTDIR\bgshell-ssh.exe" 0 skip_ssh
     Delete "$INSTDIR\bgshell-ssh.exe"
     Delete "$SMPROGRAMS\BitGalaxy Shell\SSH 终端.lnk"
+    Delete "$DESKTOP\SSH 终端.lnk"
   skip_ssh:
 SectionEnd
 
@@ -196,6 +199,7 @@ Section "un.SQL 客户端（含数据库驱动）" unSecSQL
   IfFileExists "$INSTDIR\bgshell-sql.exe" 0 skip_sql
     Delete "$INSTDIR\bgshell-sql.exe"
     Delete "$SMPROGRAMS\BitGalaxy Shell\SQL 客户端.lnk"
+    Delete "$DESKTOP\SQL 客户端.lnk"
   skip_sql:
   IfFileExists "$INSTDIR\drivers\*.*" 0 skip_sqldrv
     RMDir /r "$INSTDIR\drivers"
@@ -206,6 +210,7 @@ Section "un.串口调试" unSecSerial
   IfFileExists "$INSTDIR\bgshell-serial.exe" 0 skip_serial
     Delete "$INSTDIR\bgshell-serial.exe"
     Delete "$SMPROGRAMS\BitGalaxy Shell\串口调试.lnk"
+    Delete "$DESKTOP\串口调试.lnk"
   skip_serial:
 SectionEnd
 
@@ -220,7 +225,6 @@ Section "un.核心程序" unSecCore
   SectionIn RO
   Delete "$INSTDIR\bgshell-desktop.exe"
   Delete "$INSTDIR\MicrosoftEdgeWebview2Setup.exe"
-  Delete "$DESKTOP\BitGalaxy Shell.lnk"
   Delete "$SMPROGRAMS\BitGalaxy Shell\BitGalaxy Shell.lnk"
   Delete "$SMPROGRAMS\BitGalaxy Shell\卸载 BitGalaxy Shell.lnk"
   RMDir "$SMPROGRAMS\BitGalaxy Shell"

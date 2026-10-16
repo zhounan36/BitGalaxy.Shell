@@ -125,12 +125,18 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
   const lastSqlRef = useRef('')
   const [paneAi, setPaneAi] = useState<PaneAiState>()
 
-  const pendingRef = useRef(new Map<string, { resolve: (r: SqlResult) => void; timer: number }>())
+  const pendingRef = useRef(new Map<string, { resolve: (r: SqlResult) => void; timer: number; op: string }>())
   const runningQueryIdRef = useRef<string | undefined>(undefined)
   const activeTabRef = useRef(activeTab)
   useEffect(() => {
     activeTabRef.current = activeTab
   }, [activeTab])
+
+  // 连接状态镜像：WS 断线感知 effect 只订阅一次，经 ref 读取当前连接
+  const connRef = useRef<ConnState | undefined>(undefined)
+  useEffect(() => {
+    connRef.current = conn
+  }, [conn])
 
   const activeTabEntry = tabs.find((t) => t.key === activeTab)
   const activeSql = activeTabEntry?.kind === 'query' ? activeTabEntry.sql : ''
@@ -155,7 +161,7 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
         const timer = window.setTimeout(() => {
           if (pendingRef.current.delete(rid)) resolve({ op: op.op, rid, ok: false, message: '请求超时', errorKind: 'timeout' })
         }, timeoutMs)
-        pendingRef.current.set(rid, { resolve, timer })
+        pendingRef.current.set(rid, { resolve, timer, op: op.op })
         agentSocket.sendControl({ t: 'sql', s: sessionId, m: { ...op, rid } as SqlOp })
       })
     },
@@ -180,11 +186,74 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
     return off
   }, [sessionId])
 
-  // 面板打开即未连接：自动弹出连接窗（所有 SQL 入口直达数据库连接，无需再点「新建连接」）
+  // WS 断线/重连感知：后端 SQL 会话按 WS 代际清理（断线即失效，重连不恢复），
+  // 前端必须同步清空连接状态——否则界面停留在「假连接」，首个查询才报
+  // 「连接不存在或已断开」；挂起请求也立即失败，不等各自 rid 超时
   useEffect(() => {
-    setConnModalOpen(true)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let lostConnByWs = false
+    const off = agentSocket.onControl((frame) => {
+      if (frame.t !== 'error') return
+      if (frame.m.code === 'disconnected') {
+        pendingRef.current.forEach(({ resolve, timer, op }) => {
+          clearTimeout(timer)
+          resolve({ op, ok: false, message: '与 Agent 的连接已断开', errorKind: 'network' })
+        })
+        pendingRef.current.clear()
+        if (connRef.current) {
+          lostConnByWs = true
+          setConn(undefined)
+          setResultView(undefined)
+          setExecInfo(undefined)
+          setTabs([{ key: 'sql-1', kind: 'query', title: '查询 1', sql: '' }])
+          setActiveTab('sql-1')
+        }
+      } else if (frame.m.code === 'reconnected' && lostConnByWs) {
+        lostConnByWs = false
+        if (!connRef.current) {
+          message.warning('已重新连接 Agent，数据库连接已断开，请重新连接')
+          setConnModalOpen(true)
+        }
+      }
+    })
+    return off
   }, [])
+
+  // 已保存连接（sql-connections.db）：挂载拉列表 + 订阅回包（新建/删除后服务端总回最新列表）。
+  // 连接建立后再发请求（SqlApp 场景面板挂载时 WS 可能尚未打开，直接发会被丢弃）；
+  // 首次列表为空才自动弹出连接窗，已有保存连接则展示连接列表，双击即连
+  const [savedConns, setSavedConns] = useState<SqlConnRecord[]>([])
+  const firstListRef = useRef(false)
+  useEffect(() => {
+    const off = agentSocket.onControl((frame) => {
+      if (frame.t === 'sql-conns-result' && frame.m.conns) {
+        setSavedConns(frame.m.conns)
+        if (!firstListRef.current) {
+          firstListRef.current = true
+          if (frame.m.conns.length === 0) setConnModalOpen(true)
+        }
+      }
+    })
+    void agentSocket.connect().then(() => {
+      agentSocket.sendControl({ t: 'sql-conns', m: { op: 'list' } })
+    })
+    return off
+  }, [])
+
+  /** 当前活跃连接对应的已保存档案 id（按连接参数匹配；连接时未勾选保存则无匹配） */
+  const activeSavedId = useMemo(() => {
+    if (!conn) return undefined
+    const spec = conn.spec
+    return savedConns.find(
+      (r) =>
+        r.type === spec.type &&
+        (spec.type === 'sqlite'
+          ? r.sqlitePath === (spec.sqlitePath ?? '')
+          : r.host === (spec.host ?? '') &&
+            r.port === (spec.port ?? 0) &&
+            r.user === (spec.user ?? '') &&
+            r.database === (spec.database ?? '')),
+    )?.id
+  }, [conn, savedConns])
 
   /** 弹窗完成 connect 后登记连接状态 */
   const adoptConn = useCallback((r: SqlResult, spec: SqlConnSpec) => {
@@ -199,44 +268,6 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
     setTreeTick((t) => t + 1)
   }, [])
 
-  // 已保存连接（sql-connections.db）：挂载拉列表 + 订阅回包（新建/删除后服务端总回最新列表）
-  const [savedConns, setSavedConns] = useState<SqlConnRecord[]>([])
-  useEffect(() => {
-    agentSocket.sendControl({ t: 'sql-conns', m: { op: 'list' } })
-    const off = agentSocket.onControl((frame) => {
-      if (frame.t === 'sql-conns-result' && frame.m.conns) setSavedConns(frame.m.conns)
-    })
-    return off
-  }, [])
-
-  /** 已存连接一键直连 */
-  const connectFromSaved = useCallback(
-    async (rec: SqlConnRecord) => {
-      const spec: SqlConnSpec = {
-        type: rec.type,
-        host: rec.host || undefined,
-        port: rec.port || undefined,
-        user: rec.user || undefined,
-        password: rec.password || undefined,
-        database: rec.database || undefined,
-        sqlitePath: rec.type === 'sqlite' ? rec.sqlitePath || undefined : undefined,
-        name: rec.name,
-      }
-      const r = await request({ op: 'connect', conn: spec }, 180000)
-      if (r.ok) {
-        message.success(`连接成功${r.serverVersion ? `（${r.serverVersion}）` : ''}`)
-        adoptConn(r, spec)
-      } else {
-        message.error(describeSqlError(r.errorKind, r.message).title)
-      }
-    },
-    [request, adoptConn],
-  )
-
-  const deleteSavedConn = useCallback((id: string) => {
-    agentSocket.sendControl({ t: 'sql-conns', m: { op: 'delete', id } })
-  }, [])
-
   const doDisconnect = useCallback(async () => {
     if (!conn) return
     const r = await request({ op: 'disconnect', connId: conn.connId })
@@ -245,9 +276,60 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
     setResultView(undefined)
     setExecInfo(undefined)
     // 表数据/结构页签依附连接：断开即关闭，回到单个查询页签
+    //（连接本身保留在左侧连接列表，仅收起灰显）
     setTabs([{ key: 'sql-1', kind: 'query', title: '查询 1', sql: '' }])
     setActiveTab('sql-1')
   }, [conn, request])
+
+  /** 已存连接直连（列表双击/右键「连接」）；已在别的连接上时先断开再切换 */
+  const [connectingSavedId, setConnectingSavedId] = useState<string>()
+  const connectFromSaved = useCallback(
+    async (rec: SqlConnRecord) => {
+      if (connectingSavedId) return
+      if (conn) await doDisconnect()
+      setConnectingSavedId(rec.id)
+      try {
+        const spec: SqlConnSpec = {
+          type: rec.type,
+          host: rec.host || undefined,
+          port: rec.port || undefined,
+          user: rec.user || undefined,
+          password: rec.password || undefined,
+          database: rec.database || undefined,
+          sqlitePath: rec.type === 'sqlite' ? rec.sqlitePath || undefined : undefined,
+          name: rec.name,
+        }
+        const r = await request({ op: 'connect', conn: spec }, 180000)
+        if (r.ok) {
+          message.success(`连接成功${r.serverVersion ? `（${r.serverVersion}）` : ''}`)
+          adoptConn(r, spec)
+        } else {
+          message.error(describeSqlError(r.errorKind, r.message).title)
+        }
+      } finally {
+        setConnectingSavedId(undefined)
+      }
+    },
+    [conn, connectingSavedId, doDisconnect, request, adoptConn],
+  )
+
+  /** 删除已保存连接档案（二次确认；删除活跃连接时先断开） */
+  const deleteSavedConn = useCallback(
+    (rec: SqlConnRecord) => {
+      Modal.confirm({
+        title: '删除连接',
+        content: `确定删除连接「${rec.name}」吗？保存的连接信息将一并删除。`,
+        okText: '删除',
+        okButtonProps: { danger: true },
+        cancelText: '取消',
+        onOk: async () => {
+          if (conn && activeSavedId === rec.id) await doDisconnect()
+          agentSocket.sendControl({ t: 'sql-conns', m: { op: 'delete', id: rec.id } })
+        },
+      })
+    },
+    [conn, activeSavedId, doDisconnect],
+  )
 
   /** 结构树双击/右键打开表页签（同表复用已有页签）：data = 数据网格 / struct = 结构详情 */
   const openTableTab = useCallback(
@@ -620,41 +702,7 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
         </Button>
       </div>
 
-      {/* ── 已保存连接（未连接时展示；点击直连，关闭按钮删除档案） ── */}
-      {!conn && savedConns.length > 0 && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            padding: '4px 12px',
-            borderBottom: '1px solid var(--border-subtle)',
-            background: 'var(--bg-base)',
-            flexWrap: 'wrap',
-          }}
-        >
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            已保存连接：
-          </Typography.Text>
-          {savedConns.map((c) => (
-            <Tag
-              key={c.id}
-              color="blue"
-              style={{ cursor: 'pointer', marginInlineEnd: 0 }}
-              closable
-              onClose={(e) => {
-                e.preventDefault()
-                deleteSavedConn(c.id)
-              }}
-              onClick={() => void connectFromSaved(c)}
-            >
-              {c.name}
-            </Tag>
-          ))}
-        </div>
-      )}
-
-      {/* ── 主体：左结构树 / 右编辑器 + 结果 ── */}
+      {/* ── 主体：左连接列表树（已保存连接常驻）/ 右编辑器 + 结果 ── */}
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         <div
           style={{
@@ -668,13 +716,19 @@ export function SqlPane({ sessionId }: { sessionId: string }) {
           }}
         >
           <SqlSchemaTree
+            savedConns={savedConns}
             connId={conn?.connId}
-            connLabel={conn ? `${conn.name}${conn.serverVersion ? `（${conn.serverVersion}）` : ''}` : '未连接'}
+            activeSavedId={activeSavedId}
+            connectingSavedId={connectingSavedId}
             dbType={conn?.type ?? 'mysql'}
             request={request}
             onRunSql={runSqlFromTree}
             onOpenTable={openTableTab}
             onNewQuery={newQueryTab}
+            onConnectSaved={(rec) => void connectFromSaved(rec)}
+            onDisconnectSaved={() => void doDisconnect()}
+            onDeleteSaved={deleteSavedConn}
+            onNewConn={() => setConnModalOpen(true)}
             onError={(title, hint) => {
               setQueryError({ title, hint })
               message.error(title)
