@@ -1,17 +1,19 @@
 /**
  * 一键合包：前端 → 四 EXE（release）→ 产物汇总 → NSIS 安装包。
- * 用法：npm run desktop:pack
+ * 用法：npm run desktop:pack [-- --slim]
+ *   --slim     轻量变体：不含 PET 桌宠资源（约省 60MB），其余组件照样可选
  * 可选环境变量：
  *   BGSH_NSIS   makensis.exe 路径（默认 %LOCALAPPDATA%\tauri\NSIS\makensis.exe，
  *               或 PATH 中的 makensis——tauri CLI 打过包会自动缓存前者）
  *   BGSH_SKIP_UI=1  跳过前端与资产步骤（只重编 Rust + 打包，调试安装脚本用）
- * 输出：dist/BitGalaxy-Shell_<version>_x64-setup.exe（组件可选安装/卸载）
+ * 输出：dist/BitGalaxy-Shell_<version>_x64-setup.exe（slim：…_x64-slim-setup.exe）
  */
 import { execSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
+const slim = process.argv.includes('--slim')
 
 // cargo 在 PATH（rustup 默认装到 ~/.cargo/bin；与 prep-drivers.mjs 同款处理）
 if (process.platform === 'win32') {
@@ -62,7 +64,10 @@ if (!makensis) {
 const version = JSON.parse(
   readFileSync(join(root, 'apps', 'desktop', 'src-tauri', 'tauri.conf.json'), 'utf8'),
 ).version
-const outfile = join('dist', `BitGalaxy-Shell_${version}_x64-setup.exe`)
+const outfile = join(
+  'dist',
+  `BitGalaxy-Shell_${version}_x64${slim ? '-slim' : ''}-setup.exe`,
+)
 mkdirSync(join(root, 'dist'), { recursive: true })
 
 // NSIS Unicode 模式要求脚本带 UTF-8 BOM（中文组件名/描述）；
@@ -76,7 +81,7 @@ if (!head.equals(BOM)) {
   console.log('installer.nsi 缺 UTF-8 BOM，已自动补上')
 }
 
-console.log(`\n$ makensis（版本 ${version}）`)
+console.log(`\n$ makensis（版本 ${version}${slim ? '，slim 不含 PET' : ''}）`)
 const r = spawnSync(
   makensis,
   [
@@ -84,6 +89,7 @@ const r = spawnSync(
     `-DVERSION=${version}`,
     '-DPACKDIR=target\\pack',
     `-DOUTFILE=${outfile}`,
+    ...(slim ? ['-DNO_PET'] : []),
     'scripts/installer.nsi',
   ],
   { cwd: root, stdio: 'inherit' },

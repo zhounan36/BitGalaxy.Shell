@@ -30,6 +30,7 @@
 !ifndef OUTFILE
   !define OUTFILE "dist\BitGalaxy-Shell_x64-setup.exe"
 !endif
+; NO_PET：slim 变体（不带 PET 桌宠资源，包体 ~20MB；PET Section/描述一并裁掉）
 
 !define PRODUCTNAME "BitGalaxy Shell"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BitGalaxy Shell"
@@ -151,26 +152,32 @@ Section "串口调试" SecSerial
   CreateShortcut "$SMPROGRAMS\BitGalaxy Shell\串口调试.lnk" "$INSTDIR\bgshell-serial.exe"
 SectionEnd
 
+!ifndef NO_PET
 Section "PET 桌宠资源（约 90MB）" SecPET
   SetOutPath "$INSTDIR\resources\pet-packs"
   File /r "${PACKDIR}\resources\pet-packs\*.*"
 SectionEnd
+!endif
 
 ; ── 组件描述（鼠标悬停提示，双语）────────────────────────────────────────
 LangString DESC_SSH ${LANG_SIMPCHINESE} "远程终端 / SFTP 文件管理 / 运行状态客户端"
 LangString DESC_SQL ${LANG_SIMPCHINESE} "MySQL / PostgreSQL / SQLite 客户端（内置数据库驱动）"
 LangString DESC_Serial ${LANG_SIMPCHINESE} "本机 COM 口双工调试（DTR/RTS/Break/热插拔）"
-LangString DESC_PET ${LANG_SIMPCHINESE} "桌宠内置动作包（不装则桌宠以无精灵形态运行，聊天/菜单不受影响）"
 LangString DESC_SSH ${LANG_ENGLISH} "Remote terminal / SFTP file manager / runtime client"
 LangString DESC_SQL ${LANG_ENGLISH} "MySQL / PostgreSQL / SQLite client (bundled database drivers)"
 LangString DESC_Serial ${LANG_ENGLISH} "Local COM port duplex debugging (DTR/RTS/Break/hotplug)"
+!ifndef NO_PET
+LangString DESC_PET ${LANG_SIMPCHINESE} "桌宠内置动作包（不装则桌宠以无精灵形态运行，聊天/菜单不受影响）"
 LangString DESC_PET ${LANG_ENGLISH} "Desktop pet built-in animation packs (skipped = pet runs without sprites)"
+!endif
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecSSH} $(DESC_SSH)
   !insertmacro MUI_DESCRIPTION_TEXT ${SecSQL} $(DESC_SQL)
   !insertmacro MUI_DESCRIPTION_TEXT ${SecSerial} $(DESC_Serial)
+  !ifndef NO_PET
   !insertmacro MUI_DESCRIPTION_TEXT ${SecPET} $(DESC_PET)
+  !endif
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 ; ── 卸载 Section（组件按已安装文件存在性生效；文件不在则本节空跑）────────
