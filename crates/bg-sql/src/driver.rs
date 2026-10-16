@@ -49,11 +49,18 @@ pub struct DriverHost {
 impl DriverHost {
     /// 启动驱动进程并完成 initialize 握手
     pub async fn spawn(exe: &PathBuf, driver_version: &str) -> Result<DriverHost, DriverError> {
-        let mut child = Command::new(exe)
-            .stdin(Stdio::piped())
+        let mut cmd = Command::new(exe);
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        // Windows：GUI 进程启动控制台驱动宿主必须 CREATE_NO_WINDOW，否则系统为
+        // 子进程新建控制台（弹 cmd 窗）；且默认终端为 Windows Terminal 时，
+        // CreateProcess 会阻塞在控制台会话握手（spawn 无超时保护）——
+        // 测试连接将一直挂起，直到用户关闭弹出的终端窗口
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let mut child = cmd
             .spawn()
             .map_err(|e| DriverError::Unavailable(e.to_string()))?;
 

@@ -1,23 +1,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Key, ReactNode } from 'react'
-import { Empty, Menu, Spin, Tooltip, Tree, message } from 'antd'
+import { Button, Empty, Menu, Space, Spin, Tooltip, Tree, message } from 'antd'
 import type { MenuProps } from 'antd'
 import {
   AppstoreOutlined,
   CopyOutlined,
   DatabaseOutlined,
+  DeleteOutlined,
   FieldBinaryOutlined,
   FileAddOutlined,
+  LinkOutlined,
+  PlusOutlined,
+  PoweroffOutlined,
   SearchOutlined,
   ShrinkOutlined,
   TableOutlined,
   ReloadOutlined,
 } from '@ant-design/icons'
-import type { SqlRequest, SqlResult } from '@bgshell/protocol'
+import type { SqlConnRecord, SqlRequest, SqlResult } from '@bgshell/protocol'
 import { writeClipboardText } from '../api/clipboard'
 import { describeSqlError, qualifiedTable } from './sqlTypes'
 
-type NodeKind = 'root' | 'db' | 'table' | 'columns'
+type NodeKind = 'conn' | 'db' | 'table' | 'columns' | 'root'
+// 'root' 仅作空白区右键菜单的标记 key，不对应真实树节点
 
 interface NodeMeta {
   kind: NodeKind
@@ -38,6 +43,12 @@ interface TreeNode {
 const metaOf = (key: string): NodeMeta => {
   const [kind, ...rest] = key.split(':')
   const body = rest.join(':')
+  if (kind === 'conn') {
+    // conn:{savedId}（未连接）或 conn:{savedId}@{runtimeConnId}（活跃）。
+    // 活跃节点每次连接换 key：让 rc-tree 的懒加载缓存失效，重连后能重新拉数据库列表
+    const i = body.indexOf('@')
+    return { kind: 'conn', name: i >= 0 ? body.slice(0, i) : body }
+  }
   if (kind === 'tbl') {
     const i = body.indexOf('/')
     return { kind: 'table', schema: body.slice(0, i), name: body.slice(i + 1) }
@@ -53,6 +64,8 @@ const metaOf = (key: string): NodeMeta => {
   return { kind: kind as NodeKind, name: body }
 }
 
+const connKey = (savedId: string, connId?: string) =>
+  connId ? `conn:${savedId}@${connId}` : `conn:${savedId}`
 const dbKey = (db: string) => `db:${db}`
 const tableKey = (schema: string, table: string) => `tbl:${schema}/${table}`
 const colsKey = (schema: string, table: string) => `cols:${schema}/${table}`
@@ -63,23 +76,60 @@ interface MenuState {
   key: string
 }
 
-/** 结构树（懒加载）：连接 → databases → 表 → 字段。
- *  连接后仅显示根节点（连接名），数据库列表点开后才按需拉取，不随连接一次性加载。
- *  双击表节点 = 打开表数据页签（主流 SQL 工具行为）；右键菜单提供
- *  打开数据 / 查看结构 / 生成 SELECT / 新建查询 / 刷新等。 */
+/** 连接节点标题：活跃=高亮加粗；未连接=灰显 +「双击连接」提示；连接中=spinner */
+function connTitle(rec: SqlConnRecord, isActive: boolean, connecting: boolean) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+      {connecting && <Spin size="small" />}
+      <span
+        style={{
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          ...(isActive ? { fontWeight: 600 } : { color: 'var(--text-muted)' }),
+        }}
+      >
+        {rec.name}
+      </span>
+      {!isActive && !connecting && (
+        <span style={{ color: 'var(--text-muted)', fontSize: 11, opacity: 0.75, flexShrink: 0 }}>
+          双击连接
+        </span>
+      )}
+    </span>
+  )
+}
+
+/** 连接列表树（Navicat/DBeaver 风格）：所有已保存连接常驻左侧，
+ *  断开只收起/灰显、不消失；未连接的连接双击即连（切换活跃连接）；
+ *  活跃连接 → databases → 表 → 字段逐级懒加载。
+ *  双击表节点 = 打开表数据页签；右键菜单按节点类型提供
+ *  连接/断开/删除、打开数据/查看结构/生成 SELECT/新建查询/刷新等。 */
 export function SqlSchemaTree({
+  savedConns,
   connId,
-  connLabel,
+  activeSavedId,
+  connectingSavedId,
   dbType,
   request,
   onRunSql,
   onOpenTable,
   onNewQuery,
+  onConnectSaved,
+  onDisconnectSaved,
+  onDeleteSaved,
+  onNewConn,
   onError,
   refreshTick,
 }: {
+  /** 已保存连接档案（sql-connections.db），常驻列表 */
+  savedConns: SqlConnRecord[]
+  /** 活跃连接的运行时会话 id（introspect 用）；未连接为 undefined */
   connId?: string
-  connLabel: string
+  /** 活跃连接对应的已保存档案 id（未连接或连接未保存为 undefined） */
+  activeSavedId?: string
+  /** 正在连接中的档案 id（节点显示 spinner） */
+  connectingSavedId?: string
   dbType: string
   request: (op: SqlRequest, timeoutMs?: number) => Promise<SqlResult>
   /** 右键「生成 SELECT」：生成查询并执行 */
@@ -88,8 +138,16 @@ export function SqlSchemaTree({
   onOpenTable: (schema: string | undefined, table: string, viewKind: string | undefined, target: 'data' | 'struct') => void
   /** 右键库节点「新建查询」：新建查询页签 */
   onNewQuery?: () => void
+  /** 未连接连接的双击/右键「连接」：切换活跃连接 */
+  onConnectSaved: (rec: SqlConnRecord) => void
+  /** 活跃连接右键「断开连接」 */
+  onDisconnectSaved: () => void
+  /** 右键「删除连接」（含二次确认，由父组件负责） */
+  onDeleteSaved: (rec: SqlConnRecord) => void
+  /** 空白区右键「新建连接」/ 空态按钮 */
+  onNewConn: () => void
   onError: (title: string, hint?: string) => void
-  /** 外部触发刷新根节点（连接栏刷新按钮） */
+  /** 外部触发刷新（连接建立后重置树） */
   refreshTick: number
 }) {
   const [treeData, setTreeData] = useState<TreeNode[]>([])
@@ -101,31 +159,48 @@ export function SqlSchemaTree({
   /** 表节点 → kind（table | view）：双击/右键打开表页签时透传 */
   const tableKindRef = useRef(new Map<string, string | undefined>())
 
-  // 连接切换：树重置为裸根节点（连接名）。数据库列表不随连接自动拉取，
-  // 用户点开根节点时才按需加载（loadData），对齐 Navicat/DBeaver 点击逐级取数。
-  const loadRoot = useCallback(() => {
-    if (!connId) {
-      setTreeData([])
-      setExpandedKeys([])
-      return
-    }
-    setTreeData([{ key: 'root', title: connLabel, icon: <DatabaseOutlined /> }])
-    setExpandedKeys([])
-    tableKindRef.current.clear()
-  }, [connId, connLabel])
+  const activeKey = activeSavedId && connId ? connKey(activeSavedId, connId) : undefined
 
+  // 列表 → 树：所有已保存连接常驻；活跃连接可展开（子树懒加载），未连接的灰显为叶子。
+  // activeSavedId / connId / refreshTick 变化 = 连接切换：重置展开与选中；
+  // 仅列表变化（新增/删除其他连接）时保留活跃节点已加载的子树与展开状态。
+  const prevCtxRef = useRef<{ active?: string; connId?: string; tick: number } | undefined>(undefined)
   useEffect(() => {
-    void loadRoot()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connId, refreshTick])
+    const prev = prevCtxRef.current
+    const ctxChanged =
+      !prev || prev.active !== activeSavedId || prev.connId !== connId || prev.tick !== refreshTick
+    prevCtxRef.current = { active: activeSavedId, connId, tick: refreshTick }
+    setTreeData((prevTree) => {
+      const prevActive =
+        !ctxChanged && activeKey ? prevTree.find((n) => n.key === activeKey) : undefined
+      return savedConns.map((rec) => {
+        const isActive = !!activeKey && rec.id === activeSavedId
+        return {
+          key: isActive ? activeKey : connKey(rec.id),
+          title: connTitle(rec, isActive, rec.id === connectingSavedId),
+          icon: <DatabaseOutlined style={isActive ? { color: 'var(--accent)' } : undefined} />,
+          ...(isActive
+            ? prevActive?.children
+              ? { children: prevActive.children }
+              : {}
+            : { isLeaf: true }),
+        }
+      })
+    })
+    if (ctxChanged) {
+      setExpandedKeys([])
+      setSelectedKeys([])
+      tableKindRef.current.clear()
+    }
+  }, [savedConns, activeSavedId, connId, connectingSavedId, refreshTick, activeKey])
 
   /** 加载某节点的子节点并写回树 */
   const loadChildren = useCallback(
     async (key: string, parentTree: TreeNode[]): Promise<TreeNode[]> => {
       if (!connId) return parentTree
       const meta = metaRef.current(key)
-      if (meta.kind === 'root') {
-        // 根节点首次展开：拉数据库列表（懒加载入口，替代旧的连接即拉取）
+      if (meta.kind === 'conn') {
+        // 活跃连接节点首次展开：拉数据库列表（懒加载入口）
         const r = await request({ op: 'introspect', connId, scope: 'databases' })
         if (!r.ok) {
           const e = describeSqlError(r.errorKind, r.message)
@@ -237,10 +312,6 @@ export function SqlSchemaTree({
   const reloadNode = useCallback(
     async (key: string) => {
       if (!connId) return
-      if (key === 'root') {
-        void loadRoot()
-        return
-      }
       setLoading(true)
       try {
         const node = findNode(treeData, key)
@@ -252,18 +323,24 @@ export function SqlSchemaTree({
         setLoading(false)
       }
     },
-    [connId, findNode, loadChildren, loadRoot, treeData, updateNodeChildren],
+    [connId, findNode, loadChildren, treeData, updateNodeChildren],
   )
 
+  /** 刷新活跃连接节点（重拉数据库列表）；头部刷新按钮与空白区右键共用 */
+  const reloadActive = useCallback(() => {
+    if (activeKey) void reloadNode(activeKey)
+  }, [activeKey, reloadNode])
+
   /** antd 原生懒加载：无 children 的节点渲染为可展开（箭头），展开时拉取子节点
-   *  （root→databases、db→tables、table→columns，全部点击后才取数）。
-   *  不传 loadData 时 antd 把无 children 节点一律当叶子（无箭头），展开懒加载永不触发
-   *  —— 表现为「连接后点库节点无反应，右键刷新才出表」。 */
+   *  （连接→databases、db→tables、table→columns，全部点击后才取数）。
+   *  不传 loadData 时 antd 把无 children 节点一律当叶子（无箭头），展开懒加载永不触发。 */
   const loadData = useCallback(
     (node: { key?: Key }): Promise<void> => {
       const key = String(node.key ?? '')
       const meta = metaRef.current(key)
       if (meta.kind === 'columns') return Promise.resolve()
+      // 未连接的连接节点是叶子（isLeaf），不会触发；防御性兜底
+      if (meta.kind === 'conn' && key !== activeKey) return Promise.resolve()
       return (async () => {
         setLoading(true)
         try {
@@ -277,23 +354,29 @@ export function SqlSchemaTree({
         }
       })()
     },
-    [findNode, loadChildren, treeData, updateNodeChildren],
+    [findNode, loadChildren, treeData, updateNodeChildren, activeKey],
   )
 
   const onExpand = useCallback((keys: Key[]) => {
     setExpandedKeys(keys)
   }, [])
 
-  /** 双击表节点 = 打开数据页签（Navicat/DBeaver 行为）；
-   *  连接/库节点的双击展开收起由 expandAction="doubleClick" 接管（展开即懒加载） */
+  /** 双击：未连接的连接节点 = 连接（切换活跃连接）；表节点 = 打开数据页签（Navicat 行为）；
+   *  活跃连接/库节点的双击展开收起由 expandAction="doubleClick" 接管（展开即懒加载） */
   const onDoubleClick = useCallback(
     (_: unknown, node: unknown) => {
       const key = String((node as { key?: Key }).key ?? '')
       const meta = metaRef.current(key)
+      if (meta.kind === 'conn') {
+        if (key === activeKey) return
+        const rec = savedConns.find((r) => r.id === meta.name)
+        if (rec && rec.id !== connectingSavedId) onConnectSaved(rec)
+        return
+      }
       if (meta.kind !== 'table') return
       onOpenTable(meta.schema, meta.name, tableKindRef.current.get(key), 'data')
     },
-    [onOpenTable],
+    [activeKey, savedConns, connectingSavedId, onConnectSaved, onOpenTable],
   )
 
   const onRightClick = useCallback((info: unknown) => {
@@ -303,11 +386,25 @@ export function SqlSchemaTree({
     setMenu({ x: e.clientX, y: e.clientY, key })
   }, [])
 
-  /** 右键菜单按节点类型生成（表：打开数据/查看结构/生成 SELECT/复制 SELECT/复制表名；
-   *  库：新建查询/复制库名；列：复制列名；空白：刷新/全部收起） */
+  /** 右键菜单按节点类型生成：
+   *  连接（未连接）：连接/删除；连接（活跃）：断开/删除；
+   *  表：打开数据/查看结构/生成 SELECT/复制 SELECT/复制表名；
+   *  库：新建查询/复制库名；列：复制列名；空白：新建连接/刷新/全部收起 */
   const menuItems: MenuProps['items'] = useMemo(() => {
     if (!menu) return []
     const meta = metaRef.current(menu.key)
+    if (meta.kind === 'conn') {
+      const rec = savedConns.find((r) => r.id === meta.name)
+      if (!rec) return []
+      const isActive = menu.key === activeKey
+      return [
+        ...(isActive
+          ? [{ key: 'conn-disconnect', label: '断开连接', icon: <PoweroffOutlined /> }]
+          : [{ key: 'conn-connect', label: '连接', icon: <LinkOutlined /> }]),
+        { type: 'divider' },
+        { key: 'conn-delete', label: '删除连接', icon: <DeleteOutlined />, danger: true },
+      ]
+    }
     if (meta.kind === 'table') {
       return [
         { key: 'open-data', label: '打开数据', icon: <TableOutlined /> },
@@ -335,12 +432,14 @@ export function SqlSchemaTree({
         { key: 'refresh-parent', label: '刷新', icon: <ReloadOutlined /> },
       ]
     }
-    // 空白区（连接层）
+    // 空白区（连接列表层）
     return [
+      { key: 'new-conn', label: '新建连接', icon: <PlusOutlined /> },
+      { type: 'divider' },
       { key: 'refresh', label: '刷新', icon: <ReloadOutlined /> },
       { key: 'collapse-all', label: '全部收起', icon: <ShrinkOutlined /> },
     ]
-  }, [menu])
+  }, [menu, activeKey, savedConns])
 
   const onMenuClick: MenuProps['onClick'] = ({ key, domEvent }) => {
     domEvent.stopPropagation()
@@ -348,8 +447,27 @@ export function SqlSchemaTree({
     setMenu(undefined)
     if (!menuKey) return
     const meta = metaRef.current(menuKey)
+    if (key === 'conn-connect' && meta.kind === 'conn') {
+      const rec = savedConns.find((r) => r.id === meta.name)
+      if (rec) onConnectSaved(rec)
+      return
+    }
+    if (key === 'conn-disconnect') {
+      onDisconnectSaved()
+      return
+    }
+    if (key === 'conn-delete' && meta.kind === 'conn') {
+      const rec = savedConns.find((r) => r.id === meta.name)
+      if (rec) onDeleteSaved(rec)
+      return
+    }
+    if (key === 'new-conn' && meta.kind === 'root') {
+      onNewConn()
+      return
+    }
     if (key === 'refresh') {
-      void reloadNode(menuKey)
+      if (meta.kind === 'root') reloadActive()
+      else void reloadNode(menuKey)
       return
     }
     if (key === 'collapse-all') {
@@ -409,15 +527,21 @@ export function SqlSchemaTree({
           alignItems: 'center',
         }}
       >
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {connLabel}
-        </span>
-        <Tooltip title="刷新">
-          <ReloadOutlined
-            style={{ cursor: 'pointer', color: 'var(--text-muted)' }}
-            onClick={() => void reloadNode('root')}
-          />
-        </Tooltip>
+        <span>连接</span>
+        <Space size={6}>
+          <Tooltip title="新建连接">
+            <PlusOutlined
+              style={{ cursor: 'pointer', color: 'var(--text-muted)' }}
+              onClick={onNewConn}
+            />
+          </Tooltip>
+          <Tooltip title="刷新">
+            <ReloadOutlined
+              style={{ cursor: 'pointer', color: 'var(--text-muted)' }}
+              onClick={reloadActive}
+            />
+          </Tooltip>
+        </Space>
       </div>
       {/* 空白区右键（树节点右键由 Tree onRightClick 处理，此处只接管非节点区域） */}
       <div
@@ -430,12 +554,16 @@ export function SqlSchemaTree({
         }}
       >
         <Spin spinning={loading}>
-          {!connId ? (
+          {savedConns.length === 0 ? (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="未连接"
-              style={{ marginTop: 40 }}
-            />
+              description="暂无已保存连接"
+              style={{ marginTop: 32 }}
+            >
+              <Button size="small" type="primary" icon={<PlusOutlined />} onClick={onNewConn}>
+                新建连接
+              </Button>
+            </Empty>
           ) : (
             <Tree
               showIcon
