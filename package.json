@@ -18,7 +18,8 @@
     "desktop:dev": "npm run desktop:assets && start \"bgshell-dev-ui\" /min npm run dev:ui && npm run dev -w @bgshell/desktop",
     "desktop:exe": "npm run desktop:assets && npm run build:exe-only -w @bgshell/desktop",
     "desktop:build": "npm run desktop:assets && npm run build -w @bgshell/desktop",
-    "desktop:pack": "node scripts/build-installer.mjs"
+    "desktop:pack": "node scripts/build-installer.mjs",
+    "desktop:pack:slim": "node scripts/build-installer.mjs --slim"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",
