@@ -51,6 +51,9 @@ SetCompressor /SOLID lzma
 ; ── MUI 页面 ─────────────────────────────────────────────────────────────
 !define MUI_ABORTWARNING
 !define MUI_COMPONENTSPAGE_SMALLDESC
+; 安装包文件图标：主程序品牌图标（-NOCD 模式下相对 cwd 解析）
+!define MUI_ICON "apps\desktop\src-tauri\icons\icon.ico"
+!define MUI_UNICON "apps\desktop\src-tauri\icons\icon.ico"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${NSISDIR}\Docs\Modern UI\License.txt"
